@@ -613,7 +613,7 @@ static int path_set_perms(Item *i, const char *path) {
          * with AT_SYMLINK_NOFOLLOW, hence we emulate it here via
          * O_PATH. */
 
-        fd = open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_NOATIME);
+        fd = open(path, O_NOFOLLOW|O_CLOEXEC|O_PATH);
         if (fd < 0)
                 return log_error_errno(errno, "Adjusting owner and mode for %s failed: %m", path);
 
@@ -804,7 +804,7 @@ static int path_set_acls(Item *item, const char *path) {
         assert(item);
         assert(path);
 
-        fd = open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_NOATIME);
+        fd = open(path, O_NOFOLLOW|O_CLOEXEC|O_PATH);
         if (fd < 0)
                 return log_error_errno(errno, "Adjusting ACL of %s failed: %m", path);
 
@@ -917,10 +917,7 @@ static int parse_attribute_from_arg(Item *item) {
 
                 v = attributes[i].value;
 
-                if (mode == MODE_ADD || mode == MODE_SET)
-                        value |= v;
-                else
-                        value &= ~v;
+                SET_FLAG(value, v, (mode == MODE_ADD || mode == MODE_SET));
 
                 mask |= v;
         }
@@ -2288,7 +2285,7 @@ int main(int argc, char *argv[]) {
 
         umask(0022);
 
-        mac_selinux_init(NULL);
+        mac_selinux_init();
 
         items = ordered_hashmap_new(&string_hash_ops);
         globs = ordered_hashmap_new(&string_hash_ops);

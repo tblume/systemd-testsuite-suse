@@ -1369,7 +1369,7 @@ int main(int argc, char *argv[]) {
                         dual_timestamp_get(&security_finish_timestamp);
                 }
 
-                if (mac_selinux_init(NULL) < 0) {
+                if (mac_selinux_init() < 0) {
                         error_message = "Failed to initialize SELinux policy";
                         goto finish;
                 }
@@ -1435,9 +1435,7 @@ int main(int argc, char *argv[]) {
 
                 /* clear the kernel timestamp,
                  * because we are in a container */
-                kernel_timestamp.monotonic = 0ULL;
-                kernel_timestamp.realtime = 0ULL;
-
+                kernel_timestamp = DUAL_TIMESTAMP_NULL;
         } else {
                 /* Running as user instance */
                 arg_running_as = MANAGER_USER;

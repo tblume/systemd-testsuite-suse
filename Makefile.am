@@ -131,8 +131,12 @@ TEST_EXTENSIONS = .py
 PY_LOG_COMPILER = $(PYTHON)
 DISABLE_HARD_ERRORS = yes
 if ENABLE_TESTS
-noinst_PROGRAMS = $(manual_tests) $(tests)
+noinst_PROGRAMS = $(manual_tests) $(tests) $(unsafe_tests)
 TESTS = $(tests)
+if ENABLE_UNSAFE_TESTS
+TESTS += \
+	$(unsafe_tests)
+endif
 else
 noinst_PROGRAMS =
 TESTS =
@@ -1387,18 +1391,16 @@ EXTRA_DIST += \
 
 manual_tests += \
 	test-ns \
-	test-loopback \
-	test-hostname \
-	test-daemon \
 	test-cgroup \
 	test-install \
-	test-watchdog \
-	test-log \
-	test-ipcrm \
 	test-btrfs \
 	test-acd \
 	test-ipv4ll-manual \
 	test-ask-password-api
+
+unsafe_tests = \
+	test-hostname \
+	test-ipcrm
 
 if HAVE_LIBIPTC
 manual_tests += \
@@ -1411,7 +1413,11 @@ manual_tests += \
 endif
 
 tests += \
+	test-daemon \
+	test-log \
+	test-loopback \
 	test-engine \
+	test-watchdog \
 	test-cgroup-mask \
 	test-job-type \
 	test-env-replace \
@@ -1426,6 +1432,18 @@ tests += \
 	test-utf8 \
 	test-ellipsize \
 	test-util \
+	test-cpu-set-util \
+	test-hexdecoct \
+	test-escape \
+	test-alloc-util \
+	test-proc-cmdline \
+	test-io-util \
+	test-glob-util \
+	test-xattr-util \
+	test-fs-util \
+	test-web-util \
+	test-stat-util \
+	test-fd-util \
 	test-string-util \
 	test-extract-word \
 	test-parse-util \
@@ -1479,7 +1497,9 @@ tests += \
 	test-dns-domain \
 	test-install-root \
 	test-rlimit-util \
-	test-signal-util
+	test-signal-util \
+	test-selinux \
+	test-sizeof
 
 if HAVE_ACL
 tests += \
@@ -1649,13 +1669,13 @@ test_dns_domain_LDADD = \
 
 
 if ENABLE_EFI
-manual_tests += \
-	test-boot-timestamp
+tests += \
+	test-boot-timestamps
 
-test_boot_timestamp_SOURCES = \
+test_boot_timestamps_SOURCES = \
 	src/test/test-boot-timestamps.c
 
-test_boot_timestamp_LDADD = \
+test_boot_timestamps_LDADD = \
 	libshared.la
 endif
 
@@ -1752,6 +1772,78 @@ test_util_SOURCES = \
 
 test_util_LDADD = \
 	libshared.la
+
+test_hexdecoct_SOURCES = \
+	src/test/test-hexdecoct.c
+
+test_hexdecoct_LDADD = \
+	libbasic.la
+
+test_alloc_util_SOURCES = \
+	src/test/test-alloc-util.c
+
+test_alloc_util_LDADD = \
+	libbasic.la
+
+test_xattr_util_SOURCES = \
+	src/test/test-xattr-util.c
+
+test_xattr_util_LDADD = \
+	libbasic.la
+
+test_io_util_SOURCES = \
+	src/test/test-io-util.c
+
+test_io_util_LDADD = \
+	libbasic.la
+
+test_glob_util_SOURCES = \
+	src/test/test-glob-util.c
+
+test_glob_util_LDADD = \
+	libbasic.la
+
+test_fs_util_SOURCES = \
+	src/test/test-fs-util.c
+
+test_fs_util_LDADD = \
+	libbasic.la
+
+test_proc_cmdline_SOURCES = \
+	src/test/test-proc-cmdline.c
+
+test_proc_cmdline_LDADD = \
+	libbasic.la
+
+test_fd_util_SOURCES = \
+	src/test/test-fd-util.c
+
+test_fd_util_LDADD = \
+	libbasic.la
+
+test_web_util_SOURCES = \
+	src/test/test-web-util.c
+
+test_web_util_LDADD = \
+	libbasic.la
+
+test_cpu_set_util_SOURCES = \
+	src/test/test-cpu-set-util.c
+
+test_cpu_set_util_LDADD = \
+	libbasic.la
+
+test_stat_util_SOURCES = \
+	src/test/test-stat-util.c
+
+test_stat_util_LDADD = \
+	libbasic.la
+
+test_escape_SOURCES = \
+	src/test/test-escape.c
+
+test_escape_LDADD = \
+	libbasic.la
 
 test_string_util_SOURCES = \
 	src/test/test-string-util.c
@@ -1871,6 +1963,18 @@ test_signal_util_SOURCES = \
 	src/test/test-signal-util.c
 
 test_signal_util_LDADD = \
+	libshared.la
+
+test_selinux_SOURCES = \
+	src/test/test-selinux.c
+
+test_selinux_LDADD = \
+	libshared.la
+
+test_sizeof_SOURCES = \
+	src/test/test-sizeof.c
+
+test_sizeof_LDADD = \
 	libshared.la
 
 BUILT_SOURCES += \
@@ -3689,8 +3793,10 @@ endif
 endif
 endif
 
+tests += \
+	test-libudev
+
 manual_tests += \
-	test-libudev \
 	test-udev
 
 test_libudev_SOURCES = \
@@ -4101,11 +4207,9 @@ catalog-remove-hook:
 UNINSTALL_DATA_HOOKS += \
 	catalog-remove-hook
 
-manual_tests += \
-	test-journal-enum
-
 tests += \
 	test-journal \
+	test-journal-enum \
 	test-journal-send \
 	test-journal-syslog \
 	test-journal-match \
