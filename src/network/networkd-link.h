@@ -21,14 +21,17 @@
 
 #include <endian.h>
 
+#include "sd-bus.h"
 #include "sd-dhcp-client.h"
 #include "sd-dhcp-server.h"
 #include "sd-dhcp6-client.h"
 #include "sd-ipv4ll.h"
 #include "sd-lldp.h"
 #include "sd-ndisc.h"
+#include "sd-netlink.h"
 
-typedef struct Link Link;
+#include "list.h"
+#include "set.h"
 
 typedef enum LinkState {
         LINK_STATE_PENDING,
@@ -54,11 +57,11 @@ typedef enum LinkOperationalState {
         _LINK_OPERSTATE_INVALID = -1
 } LinkOperationalState;
 
-#include "networkd-address.h"
-#include "networkd-network.h"
-#include "networkd.h"
+typedef struct Manager Manager;
+typedef struct Network Network;
+typedef struct Address Address;
 
-struct Link {
+typedef struct Link {
         Manager *manager;
 
         int n_ref;
@@ -118,11 +121,11 @@ struct Link {
 
         /* This is about LLDP transmission */
         unsigned lldp_tx_fast; /* The LLDP txFast counter (See 802.1ab-2009, section 9.2.5.18) */
-        sd_event_source *lldp_tx_event_source;
+        sd_event_source *lldp_emit_event_source;
 
         Hashmap *bound_by_links;
         Hashmap *bound_to_links;
-};
+} Link;
 
 Link *link_unref(Link *link);
 Link *link_ref(Link *link);

@@ -144,6 +144,7 @@ MANPAGES += \
 	man/systemd.link.5 \
 	man/systemd.mount.5 \
 	man/systemd.nspawn.5 \
+	man/systemd.offline-updates.7 \
 	man/systemd.path.5 \
 	man/systemd.preset.5 \
 	man/systemd.resource-control.5 \
@@ -241,6 +242,7 @@ MANPAGES_ALIAS += \
 	man/SD_JOURNAL_INVALIDATE.3 \
 	man/SD_JOURNAL_LOCAL_ONLY.3 \
 	man/SD_JOURNAL_NOP.3 \
+	man/SD_JOURNAL_OS_ROOT.3 \
 	man/SD_JOURNAL_RUNTIME_ONLY.3 \
 	man/SD_JOURNAL_SUPPRESS_LOCATION.3 \
 	man/SD_JOURNAL_SYSTEM.3 \
@@ -387,9 +389,10 @@ MANPAGES_ALIAS += \
 	man/sd_journal_get_timeout.3 \
 	man/sd_journal_has_persistent_files.3 \
 	man/sd_journal_next_skip.3 \
-	man/sd_journal_open_container.3 \
 	man/sd_journal_open_directory.3 \
+	man/sd_journal_open_directory_fd.3 \
 	man/sd_journal_open_files.3 \
+	man/sd_journal_open_files_fd.3 \
 	man/sd_journal_perror.3 \
 	man/sd_journal_previous.3 \
 	man/sd_journal_previous_skip.3 \
@@ -570,6 +573,7 @@ man/SD_JOURNAL_FOREACH_UNIQUE.3: man/sd_journal_query_unique.3
 man/SD_JOURNAL_INVALIDATE.3: man/sd_journal_get_fd.3
 man/SD_JOURNAL_LOCAL_ONLY.3: man/sd_journal_open.3
 man/SD_JOURNAL_NOP.3: man/sd_journal_get_fd.3
+man/SD_JOURNAL_OS_ROOT.3: man/sd_journal_open.3
 man/SD_JOURNAL_RUNTIME_ONLY.3: man/sd_journal_open.3
 man/SD_JOURNAL_SUPPRESS_LOCATION.3: man/sd_journal_print.3
 man/SD_JOURNAL_SYSTEM.3: man/sd_journal_open.3
@@ -716,9 +720,10 @@ man/sd_journal_get_monotonic_usec.3: man/sd_journal_get_realtime_usec.3
 man/sd_journal_get_timeout.3: man/sd_journal_get_fd.3
 man/sd_journal_has_persistent_files.3: man/sd_journal_has_runtime_files.3
 man/sd_journal_next_skip.3: man/sd_journal_next.3
-man/sd_journal_open_container.3: man/sd_journal_open.3
 man/sd_journal_open_directory.3: man/sd_journal_open.3
+man/sd_journal_open_directory_fd.3: man/sd_journal_open.3
 man/sd_journal_open_files.3: man/sd_journal_open.3
+man/sd_journal_open_files_fd.3: man/sd_journal_open.3
 man/sd_journal_perror.3: man/sd_journal_print.3
 man/sd_journal_previous.3: man/sd_journal_next.3
 man/sd_journal_previous_skip.3: man/sd_journal_next.3
@@ -1031,6 +1036,9 @@ man/SD_JOURNAL_LOCAL_ONLY.html: man/sd_journal_open.html
 	$(html-alias)
 
 man/SD_JOURNAL_NOP.html: man/sd_journal_get_fd.html
+	$(html-alias)
+
+man/SD_JOURNAL_OS_ROOT.html: man/sd_journal_open.html
 	$(html-alias)
 
 man/SD_JOURNAL_RUNTIME_ONLY.html: man/sd_journal_open.html
@@ -1471,13 +1479,16 @@ man/sd_journal_has_persistent_files.html: man/sd_journal_has_runtime_files.html
 man/sd_journal_next_skip.html: man/sd_journal_next.html
 	$(html-alias)
 
-man/sd_journal_open_container.html: man/sd_journal_open.html
-	$(html-alias)
-
 man/sd_journal_open_directory.html: man/sd_journal_open.html
 	$(html-alias)
 
+man/sd_journal_open_directory_fd.html: man/sd_journal_open.html
+	$(html-alias)
+
 man/sd_journal_open_files.html: man/sd_journal_open.html
+	$(html-alias)
+
+man/sd_journal_open_files_fd.html: man/sd_journal_open.html
 	$(html-alias)
 
 man/sd_journal_perror.html: man/sd_journal_print.html
@@ -1849,9 +1860,19 @@ MANPAGES += \
 	man/coredumpctl.1 \
 	man/systemd-coredump.8
 MANPAGES_ALIAS += \
-	man/coredump.conf.d.5
+	man/coredump.conf.d.5 \
+	man/systemd-coredump.socket.8 \
+	man/systemd-coredump@.service.8
 man/coredump.conf.d.5: man/coredump.conf.5
+man/systemd-coredump.socket.8: man/systemd-coredump.8
+man/systemd-coredump@.service.8: man/systemd-coredump.8
 man/coredump.conf.d.html: man/coredump.conf.html
+	$(html-alias)
+
+man/systemd-coredump.socket.html: man/systemd-coredump.html
+	$(html-alias)
+
+man/systemd-coredump@.service.html: man/systemd-coredump.html
 	$(html-alias)
 
 endif
@@ -1960,15 +1981,21 @@ endif
 if ENABLE_NETWORKD
 MANPAGES += \
 	man/networkctl.1 \
+	man/networkd.conf.5 \
 	man/systemd-networkd-wait-online.service.8 \
 	man/systemd-networkd.service.8 \
 	man/systemd.netdev.5 \
 	man/systemd.network.5
 MANPAGES_ALIAS += \
+	man/networkd.conf.d.5 \
 	man/systemd-networkd-wait-online.8 \
 	man/systemd-networkd.8
+man/networkd.conf.d.5: man/networkd.conf.5
 man/systemd-networkd-wait-online.8: man/systemd-networkd-wait-online.service.8
 man/systemd-networkd.8: man/systemd-networkd.service.8
+man/networkd.conf.d.html: man/networkd.conf.html
+	$(html-alias)
+
 man/systemd-networkd-wait-online.html: man/systemd-networkd-wait-online.service.html
 	$(html-alias)
 
@@ -2479,6 +2506,7 @@ EXTRA_DIST += \
 	man/machinectl.xml \
 	man/modules-load.d.xml \
 	man/networkctl.xml \
+	man/networkd.conf.xml \
 	man/nss-myhostname.xml \
 	man/nss-mymachines.xml \
 	man/nss-resolve.xml \
@@ -2644,6 +2672,7 @@ EXTRA_DIST += \
 	man/systemd.netdev.xml \
 	man/systemd.network.xml \
 	man/systemd.nspawn.xml \
+	man/systemd.offline-updates.xml \
 	man/systemd.path.xml \
 	man/systemd.preset.xml \
 	man/systemd.resource-control.xml \

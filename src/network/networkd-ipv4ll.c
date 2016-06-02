@@ -21,7 +21,7 @@
 #include <linux/if.h>
 
 #include "network-internal.h"
-#include "networkd-link.h"
+#include "networkd.h"
 
 static int ipv4ll_address_lost(Link *link) {
         _cleanup_address_free_ Address *address = NULL;
@@ -51,7 +51,7 @@ static int ipv4ll_address_lost(Link *link) {
         address->prefixlen = 16;
         address->scope = RT_SCOPE_LINK;
 
-        address_remove(address, link, &link_address_remove_handler);
+        address_remove(address, link, link_address_remove_handler);
 
         r = route_new(&route);
         if (r < 0) {
@@ -63,7 +63,7 @@ static int ipv4ll_address_lost(Link *link) {
         route->scope = RT_SCOPE_LINK;
         route->priority = IPV4LL_ROUTE_METRIC;
 
-        route_remove(route, link, &link_route_remove_handler);
+        route_remove(route, link, link_route_remove_handler);
 
         link_check_ready(link);
 
@@ -215,9 +215,7 @@ int ipv4ll_configure(Link *link) {
         if (link->udev_device) {
                 r = net_get_unique_predictable_data(link->udev_device, &seed);
                 if (r >= 0) {
-                        assert_cc(sizeof(unsigned) <= 8);
-
-                        r = sd_ipv4ll_set_address_seed(link->ipv4ll, (unsigned)seed);
+                        r = sd_ipv4ll_set_address_seed(link->ipv4ll, seed);
                         if (r < 0)
                                 return r;
                 }
@@ -231,7 +229,7 @@ int ipv4ll_configure(Link *link) {
         if (r < 0)
                 return r;
 
-        r = sd_ipv4ll_set_index(link->ipv4ll, link->ifindex);
+        r = sd_ipv4ll_set_ifindex(link->ipv4ll, link->ifindex);
         if (r < 0)
                 return r;
 

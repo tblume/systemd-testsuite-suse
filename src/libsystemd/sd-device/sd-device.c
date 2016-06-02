@@ -533,7 +533,7 @@ int device_read_uevent_file(sd_device *device) {
                 return r;
         }
 
-        for (i = 0; i < uevent_len; i++) {
+        for (i = 0; i < uevent_len; i++)
                 switch (state) {
                 case PRE_KEY:
                         if (!strchr(NEWLINE, uevent[i])) {
@@ -558,10 +558,9 @@ int device_read_uevent_file(sd_device *device) {
                         break;
                 case PRE_VALUE:
                         value = &uevent[i];
-
                         state = VALUE;
 
-                        break;
+                        /* fall through to handle empty property */
                 case VALUE:
                         if (strchr(NEWLINE, uevent[i])) {
                                 uevent[i] = '\0';
@@ -577,7 +576,6 @@ int device_read_uevent_file(sd_device *device) {
                 default:
                         assert_not_reached("invalid state when parsing uevent file");
                 }
-        }
 
         if (major) {
                 r = device_set_devnum(device, major, minor);
@@ -1212,19 +1210,19 @@ int device_get_id_filename(sd_device *device, const char **ret) {
                 if (major(devnum) > 0) {
                         assert(subsystem);
 
-                        /* use dev_t -- b259:131072, c254:0 */
+                        /* use dev_t — b259:131072, c254:0 */
                         r = asprintf(&id, "%c%u:%u",
                                      streq(subsystem, "block") ? 'b' : 'c',
                                      major(devnum), minor(devnum));
                         if (r < 0)
                                 return -ENOMEM;
                 } else if (ifindex > 0) {
-                        /* use netdev ifindex -- n3 */
+                        /* use netdev ifindex — n3 */
                         r = asprintf(&id, "n%u", ifindex);
                         if (r < 0)
                                 return -ENOMEM;
                 } else {
-                        /* use $subsys:$sysname -- pci:0000:00:1f.2
+                        /* use $subsys:$sysname — pci:0000:00:1f.2
                          * sysname() has '!' translated, get it from devpath
                          */
                         const char *sysname;
@@ -1457,15 +1455,20 @@ static int device_properties_prepare(sd_device *device) {
                 return r;
 
         if (device->property_devlinks_outdated) {
-                char *devlinks = NULL;
+                _cleanup_free_ char *devlinks = NULL;
+                size_t devlinks_allocated = 0, devlinks_len = 0;
                 const char *devlink;
 
-                devlink = sd_device_get_devlink_first(device);
-                if (devlink)
-                        devlinks = strdupa(devlink);
+                for (devlink = sd_device_get_devlink_first(device); devlink; devlink = sd_device_get_devlink_next(device)) {
+                        char *e;
 
-                while ((devlink = sd_device_get_devlink_next(device)))
-                        devlinks = strjoina(devlinks, " ", devlink);
+                        if (!GREEDY_REALLOC(devlinks, devlinks_allocated, devlinks_len + strlen(devlink) + 2))
+                                return -ENOMEM;
+                        if (devlinks_len > 0)
+                                stpcpy(devlinks + devlinks_len++, " ");
+                        e = stpcpy(devlinks + devlinks_len, devlink);
+                        devlinks_len = e - devlinks;
+                }
 
                 r = device_add_property_internal(device, "DEVLINKS", devlinks);
                 if (r < 0)
@@ -1475,17 +1478,23 @@ static int device_properties_prepare(sd_device *device) {
         }
 
         if (device->property_tags_outdated) {
-                char *tags = NULL;
+                _cleanup_free_ char *tags = NULL;
+                size_t tags_allocated = 0, tags_len = 0;
                 const char *tag;
 
-                tag = sd_device_get_tag_first(device);
-                if (tag)
-                        tags = strjoina(":", tag);
+                if (!GREEDY_REALLOC(tags, tags_allocated, 2))
+                        return -ENOMEM;
+                stpcpy(tags, ":");
+                tags_len++;
 
-                while ((tag = sd_device_get_tag_next(device)))
-                        tags = strjoina(tags, ":", tag);
+                for (tag = sd_device_get_tag_first(device); tag; tag = sd_device_get_tag_next(device)) {
+                        char *e;
 
-                tags = strjoina(tags, ":");
+                        if (!GREEDY_REALLOC(tags, tags_allocated, tags_len + strlen(tag) + 2))
+                                return -ENOMEM;
+                        e = stpcpy(stpcpy(tags + tags_len, tag), ":");
+                        tags_len = e - tags;
+                }
 
                 r = device_add_property_internal(device, "TAGS", tags);
                 if (r < 0)

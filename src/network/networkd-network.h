@@ -19,17 +19,20 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include "condition.h"
-#include "resolve-util.h"
+#include "sd-bus.h"
+#include "udev.h"
 
-typedef struct Network Network;
+#include "condition.h"
+#include "dhcp-identifier.h"
+#include "hashmap.h"
+#include "resolve-util.h"
 
 #include "networkd-address.h"
 #include "networkd-fdb.h"
+#include "networkd-lldp-tx.h"
 #include "networkd-netdev.h"
 #include "networkd-route.h"
 #include "networkd-util.h"
-#include "networkd.h"
 
 #define DHCP_ROUTE_METRIC 1024
 #define IPV4LL_ROUTE_METRIC 2048
@@ -65,6 +68,16 @@ typedef enum LLDPMode {
         _LLDP_MODE_MAX,
         _LLDP_MODE_INVALID = -1,
 } LLDPMode;
+
+typedef struct DUID {
+        /* Value of Type in [DHCP] section */
+        DUIDType type;
+
+        uint8_t raw_data_len;
+        uint8_t raw_data[MAX_DUID_LEN];
+} DUID;
+
+typedef struct Manager Manager;
 
 struct Network {
         Manager *manager;
@@ -114,6 +127,7 @@ struct Network {
         bool dhcp_server_emit_ntp;
         struct in_addr *dhcp_server_ntp;
         unsigned n_dhcp_server_ntp;
+        bool dhcp_server_emit_router;
         bool dhcp_server_emit_timezone;
         char *dhcp_server_timezone;
         usec_t dhcp_server_default_lease_time_usec, dhcp_server_max_lease_time_usec;
@@ -138,15 +152,18 @@ struct Network {
         int ipv6_accept_ra;
         int ipv6_dad_transmits;
         int ipv6_hop_limit;
+        int proxy_arp;
 
         union in_addr_union ipv6_token;
         IPv6PrivacyExtensions ipv6_privacy_extensions;
 
         struct ether_addr *mac;
         unsigned mtu;
+        uint32_t iaid;
+        DUID duid;
 
         LLDPMode lldp_mode; /* LLDP reception */
-        bool lldp_emit;     /* LLDP transmission */
+        LLDPEmit lldp_emit; /* LLDP transmission */
 
         LIST_HEAD(Address, static_addresses);
         LIST_HEAD(Route, static_routes);
@@ -176,6 +193,8 @@ int network_load(Manager *manager);
 int network_get_by_name(Manager *manager, const char *name, Network **ret);
 int network_get(Manager *manager, struct udev_device *device, const char *ifname, const struct ether_addr *mac, Network **ret);
 int network_apply(Manager *manager, Network *network, Link *link);
+
+bool network_has_static_ipv6_addresses(Network *network);
 
 int config_parse_netdev(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_domains(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);

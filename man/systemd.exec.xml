@@ -94,11 +94,9 @@
     required to access <filename>/tmp</filename> and
     <filename>/var/tmp</filename>.</para>
 
-    <para>Units whose output standard output or error output is
-    connected to any other sink but <option>null</option>,
-    <option>tty</option> and <option>socket</option> automatically
-    acquire dependencies of type <varname>After=</varname> on
-    <filename>journald.socket</filename>.</para>
+    <para>Units whose standard output or error output is connected to <option>journal</option>, <option>syslog</option>
+    or <option>kmsg</option> (or their combinations with console output, see below) automatically acquire dependencies
+    of type <varname>After=</varname> on <filename>systemd-journald.socket</filename>.</para>
   </refsect1>
 
   <refsect1>
@@ -109,7 +107,8 @@
       <varlistentry>
         <term><varname>WorkingDirectory=</varname></term>
 
-        <listitem><para>Takes an absolute directory path, or the
+        <listitem><para>Takes a directory path relative to the service's root
+        directory specified by <varname>RootDirectory=</varname>, or the
         special value <literal>~</literal>. Sets the working directory
         for executed processes. If set to <literal>~</literal>, the
         home directory of the user specified in
@@ -118,7 +117,10 @@
         and the respective user's home directory if run as user. If
         the setting is prefixed with the <literal>-</literal>
         character, a missing working directory is not considered
-        fatal. Note that setting this parameter might result in
+        fatal. If <varname>RootDirectory=</varname> is not set, then
+        <varname>WorkingDirectory=</varname> is relative to the root of
+        the system running the service manager.
+        Note that setting this parameter might result in
         additional dependencies to be added to the unit (see
         above).</para></listitem>
       </varlistentry>
@@ -126,7 +128,8 @@
       <varlistentry>
         <term><varname>RootDirectory=</varname></term>
 
-        <listitem><para>Takes an absolute directory path. Sets the
+        <listitem><para>Takes a directory path relative to the host's root directory
+        (i.e. the root of the system running the service manager). Sets the
         root directory for executed processes, with the <citerefentry
         project='man-pages'><refentrytitle>chroot</refentrytitle><manvolnum>2</manvolnum></citerefentry>
         system call. If this is used, it must be ensured that the
@@ -470,6 +473,10 @@
         similar to the same option of
         <varname>StandardInput=</varname>.</para>
 
+        <para>If the standard output (or error output, see below) of a unit is connected to the journal, syslog or the
+        kernel log buffer, the unit will implicitly gain a dependency of type <varname>After=</varname> on
+        <filename>systemd-journald.socket</filename> (also see the automatic dependencies section above).</para>
+
         <para>This setting defaults to the value set with
         <option>DefaultStandardOutput=</option> in
         <citerefentry><refentrytitle>systemd-system.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
@@ -627,27 +634,23 @@
         <term><varname>LimitNICE=</varname></term>
         <term><varname>LimitRTPRIO=</varname></term>
         <term><varname>LimitRTTIME=</varname></term>
-        <listitem><para>These settings set both soft and hard limits
-        of various resources for executed processes. See
-        <citerefentry><refentrytitle>setrlimit</refentrytitle><manvolnum>2</manvolnum></citerefentry>
-        for details. The resource limit is possible to specify in two formats,
-        <option>value</option> to set soft and hard limits to the same value,
-        or <option>soft:hard</option> to set both limits individually (e.g. LimitAS=4G:16G).
-        Use the string <varname>infinity</varname> to
-        configure no limit on a specific resource. The multiplicative
-        suffixes K (=1024), M (=1024*1024) and so on for G, T, P and E
-        may be used for resource limits measured in bytes
-        (e.g. LimitAS=16G). For the limits referring to time values,
-        the usual time units ms, s, min, h and so on may be used (see
-        <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry>
-        for details). Note that if no time unit is specified for
-        <varname>LimitCPU=</varname> the default unit of seconds is
-        implied, while for <varname>LimitRTTIME=</varname> the default
-        unit of microseconds is implied. Also, note that the effective
-        granularity of the limits might influence their
-        enforcement. For example, time limits specified for
-        <varname>LimitCPU=</varname> will be rounded up implicitly to
-        multiples of 1s.</para>
+        <listitem><para>Set soft and hard limits on various resources for executed processes. See
+        <citerefentry><refentrytitle>setrlimit</refentrytitle><manvolnum>2</manvolnum></citerefentry> for details on
+        the resource limit concept. Resource limits may be specified in two formats: either as single value to set a
+        specific soft and hard limit to the same value, or as colon-separated pair <option>soft:hard</option> to set
+        both limits individually (e.g. <literal>LimitAS=4G:16G</literal>).  Use the string <varname>infinity</varname>
+        to configure no limit on a specific resource. The multiplicative suffixes K, M, G, T, P and E (to the base
+        1024) may be used for resource limits measured in bytes (e.g. LimitAS=16G). For the limits referring to time
+        values, the usual time units ms, s, min, h and so on may be used (see
+        <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry> for
+        details). Note that if no time unit is specified for <varname>LimitCPU=</varname> the default unit of seconds
+        is implied, while for <varname>LimitRTTIME=</varname> the default unit of microseconds is implied. Also, note
+        that the effective granularity of the limits might influence their enforcement. For example, time limits
+        specified for <varname>LimitCPU=</varname> will be rounded up implicitly to multiples of 1s. For
+        <varname>LimitNICE=</varname> the value may be specified in two syntaxes: if prefixed with <literal>+</literal>
+        or <literal>-</literal>, the value is understood as regular Linux nice value in the range -20..19. If not
+        prefixed like this the value is understood as raw resource limit parameter in the range 0..40 (with 0 being
+        equivalent to 1).</para>
 
         <para>Note that most process resource limits configured with
         these options are per-process, and processes may fork in order
@@ -850,8 +853,9 @@
         <listitem><para>Sets up a new file system namespace for
         executed processes. These options may be used to limit access
         a process might have to the main file system hierarchy. Each
-        setting takes a space-separated list of absolute directory
-        paths. Directories listed in
+        setting takes a space-separated list of directory paths relative to
+        the host's root directory (i.e. the system running the service manager).
+        Directories listed in
         <varname>ReadWriteDirectories=</varname> are accessible from
         within the namespace with the same access rights as from
         outside. Directories listed in
@@ -859,9 +863,12 @@
         reading only, writing will be refused even if the usual file
         access controls would permit this. Directories listed in
         <varname>InaccessibleDirectories=</varname> will be made
-        inaccessible for processes inside the namespace. Note that
-        restricting access with these options does not extend to
-        submounts of a directory that are created later on. These
+        inaccessible for processes inside the namespace, and may not
+        countain any other mountpoints, including those specified by
+        <varname>ReadWriteDirectories=</varname> or
+        <varname>ReadOnlyDirectories=</varname>.
+        Note that restricting access with these options does not extend
+        to submounts of a directory that are created later on. These
         options may be specified more than once, in which case all
         directories listed will have limited access from within the
         namespace. If the empty string is assigned to this option, the
@@ -932,7 +939,10 @@
         (propagation in the opposite direction continues to work).
         This means that this setting may not be used for services
         which shall be able to install mount points in the main mount
-        namespace.</para></listitem>
+        namespace. The /dev namespace will be mounted read-only and 'noexec'.
+        The latter may break old programs which try to set up executable
+        memory by using <citerefentry><refentrytitle>mmap</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+        of <filename>/dev/zero</filename> instead of using <constant>MAP_ANON</constant>.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1155,7 +1165,9 @@
         first character of the list is <literal>~</literal>, the
         effect is inverted: only the listed system calls will result
         in immediate process termination (blacklisting). If running in
-        user mode and this option is used,
+        user mode, or in system mode, but without the
+        <constant>CAP_SYS_ADMIN</constant> capability (e.g. setting
+        <varname>User=nobody</varname>),
         <varname>NoNewPrivileges=yes</varname> is implied. This
         feature makes use of the Secure Computing Mode 2 interfaces of
         the kernel ('seccomp filtering') and is useful for enforcing a
@@ -1181,7 +1193,78 @@
         <function>read</function> and <function>write</function>, and
         right after it add a blacklisting of
         <function>write</function>, then <function>write</function>
-        will be removed from the set.) </para></listitem>
+        will be removed from the set.)</para>
+
+        <para>As the number of possible system
+        calls is large, predefined sets of system calls are provided.
+        A set starts with <literal>@</literal> character, followed by
+        name of the set.
+
+        <table>
+          <title>Currently predefined system call sets</title>
+
+          <tgroup cols='2'>
+            <colspec colname='set' />
+            <colspec colname='description' />
+            <thead>
+              <row>
+                <entry>Set</entry>
+                <entry>Description</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry>@clock</entry>
+                <entry>System calls for changing the system clock (<function>adjtimex()</function>,
+                <function>settimeofday()</function>)</entry>
+              </row>
+              <row>
+                <entry>@io-event</entry>
+                <entry>Event loop use (<function>poll()</function>, <function>select()</function>,
+                <citerefentry project='man-pages'><refentrytitle>epoll</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
+                <function>eventfd()</function>...)</entry>
+              </row>
+              <row>
+                <entry>@ipc</entry>
+                <entry>SysV IPC, POSIX Message Queues or other IPC (<citerefentry project='man-pages'><refentrytitle>mq_overview</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
+                <citerefentry project='man-pages'><refentrytitle>svipc</refentrytitle><manvolnum>7</manvolnum></citerefentry>)</entry>
+              </row>
+              <row>
+                <entry>@module</entry>
+                <entry>Kernel module control (<function>create_module()</function>, <function>init_module()</function>...)</entry>
+              </row>
+              <row>
+                <entry>@mount</entry>
+                <entry>File system mounting and unmounting (<function>chroot()</function>, <function>mount()</function>...)</entry>
+              </row>
+              <row>
+                <entry>@network-io</entry>
+                <entry>Socket I/O (including local AF_UNIX):
+                <citerefentry project='man-pages'><refentrytitle>socket</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
+                <citerefentry project='man-pages'><refentrytitle>unix</refentrytitle><manvolnum>7</manvolnum></citerefentry></entry>
+              </row>
+              <row>
+                <entry>@obsolete</entry>
+                <entry>Unusual, obsolete or unimplemented (<function>fattach()</function>, <function>gtty()</function>, <function>vm86()</function>...)</entry>
+              </row>
+              <row>
+                <entry>@privileged</entry>
+                <entry>All system calls which need superuser capabilities (<citerefentry project='man-pages'><refentrytitle>capabilities</refentrytitle><manvolnum>7</manvolnum></citerefentry>)</entry>
+              </row>
+              <row>
+                <entry>@process</entry>
+                <entry>Process control, execution, namespaces (<function>execve()</function>, <function>kill()</function>, <citerefentry project='man-pages'><refentrytitle>namespaces</refentrytitle><manvolnum>7</manvolnum></citerefentry>...)</entry>
+              </row>
+              <row>
+                <entry>@raw-io</entry>
+                <entry>Raw I/O ports (<function>ioperm()</function>, <function>iopl()</function>, <function>pciconfig_read()</function>...)</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+
+        Note, that as new system calls are added to the kernel, additional system calls might be added to the groups
+        above, so the contents of the sets may change between systemd versions.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1214,8 +1297,10 @@
         systems. The special <constant>native</constant> identifier
         implicitly maps to the native architecture of the system (or
         more strictly: to the architecture the system manager is
-        compiled for). If running in user mode and this option is
-        used, <varname>NoNewPrivileges=yes</varname> is implied. Note
+        compiled for). If running in user mode, or in system mode,
+        but without the <constant>CAP_SYS_ADMIN</constant>
+        capability (e.g. setting <varname>User=nobody</varname>),
+        <varname>NoNewPrivileges=yes</varname> is implied. Note
         that setting this option to a non-empty list implies that
         <constant>native</constant> is included too. By default, this
         option is set to the empty list, i.e. no architecture system
@@ -1244,8 +1329,10 @@
         <function>socketpair()</function> (which creates connected
         AF_UNIX sockets only) are unaffected. Note that this option
         has no effect on 32-bit x86 and is ignored (but works
-        correctly on x86-64). If running in user mode and this option
-        is used, <varname>NoNewPrivileges=yes</varname> is implied. By
+        correctly on x86-64). If running in user mode, or in system
+        mode, but without the <constant>CAP_SYS_ADMIN</constant>
+        capability (e.g. setting <varname>User=nobody</varname>),
+        <varname>NoNewPrivileges=yes</varname> is implied. By
         default, no restriction applies, all address families are
         accessible to processes. If assigned the empty string, any
         previous list changes are undone.</para>

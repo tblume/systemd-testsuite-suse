@@ -117,9 +117,20 @@ $1.CPUShares,                    config_parse_cpu_shares,            0,         
 $1.StartupCPUShares,             config_parse_cpu_shares,            0,                             offsetof($1, cgroup_context.startup_cpu_shares)
 $1.CPUQuota,                     config_parse_cpu_quota,             0,                             offsetof($1, cgroup_context)
 $1.MemoryAccounting,             config_parse_bool,                  0,                             offsetof($1, cgroup_context.memory_accounting)
+$1.MemoryLow,                    config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
+$1.MemoryHigh,                   config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
+$1.MemoryMax,                    config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
 $1.MemoryLimit,                  config_parse_memory_limit,          0,                             offsetof($1, cgroup_context)
 $1.DeviceAllow,                  config_parse_device_allow,          0,                             offsetof($1, cgroup_context)
 $1.DevicePolicy,                 config_parse_device_policy,         0,                             offsetof($1, cgroup_context.device_policy)
+$1.IOAccounting,                 config_parse_bool,                  0,                             offsetof($1, cgroup_context.io_accounting)
+$1.IOWeight,                     config_parse_io_weight,             0,                             offsetof($1, cgroup_context.io_weight)
+$1.StartupIOWeight,              config_parse_io_weight,             0,                             offsetof($1, cgroup_context.startup_io_weight)
+$1.IODeviceWeight,               config_parse_io_device_weight,      0,                             offsetof($1, cgroup_context)
+$1.IOReadBandwidthMax,           config_parse_io_limit,              0,                             offsetof($1, cgroup_context)
+$1.IOWriteBandwidthMax,          config_parse_io_limit,              0,                             offsetof($1, cgroup_context)
+$1.IOReadIOPSMax,                config_parse_io_limit,              0,                             offsetof($1, cgroup_context)
+$1.IOWriteIOPSMax,               config_parse_io_limit,              0,                             offsetof($1, cgroup_context)
 $1.BlockIOAccounting,            config_parse_bool,                  0,                             offsetof($1, cgroup_context.blockio_accounting)
 $1.BlockIOWeight,                config_parse_blockio_weight,        0,                             offsetof($1, cgroup_context.blockio_weight)
 $1.StartupBlockIOWeight,         config_parse_blockio_weight,        0,                             offsetof($1, cgroup_context.startup_blockio_weight)
@@ -164,6 +175,8 @@ Unit.IgnoreOnSnapshot,           config_parse_warn_compat,           DISABLED_LE
 Unit.JobTimeoutSec,              config_parse_sec_fix_0,             0,                             offsetof(Unit, job_timeout)
 Unit.JobTimeoutAction,           config_parse_failure_action,        0,                             offsetof(Unit, job_timeout_action)
 Unit.JobTimeoutRebootArgument,   config_parse_string,                0,                             offsetof(Unit, job_timeout_reboot_arg)
+Unit.StartLimitIntervalSec,      config_parse_sec,                   0,                             offsetof(Unit, start_limit.interval)
+m4_dnl The following is a legacy alias name for compatibility
 Unit.StartLimitInterval,         config_parse_sec,                   0,                             offsetof(Unit, start_limit.interval)
 Unit.StartLimitBurst,            config_parse_unsigned,              0,                             offsetof(Unit, start_limit.burst)
 Unit.StartLimitAction,           config_parse_failure_action,        0,                             offsetof(Unit, start_limit_action)
@@ -220,6 +233,7 @@ Service.TimeoutStartSec,         config_parse_service_timeout,       0,         
 Service.TimeoutStopSec,          config_parse_service_timeout,       0,                             0
 Service.RuntimeMaxSec,           config_parse_sec,                   0,                             offsetof(Service, runtime_max_usec)
 Service.WatchdogSec,             config_parse_sec,                   0,                             offsetof(Service, watchdog_usec)
+m4_dnl The following three only exist for compatibility, they moved into Unit, see above
 Service.StartLimitInterval,      config_parse_sec,                   0,                             offsetof(Unit, start_limit.interval)
 Service.StartLimitBurst,         config_parse_unsigned,              0,                             offsetof(Unit, start_limit.burst)
 Service.StartLimitAction,        config_parse_failure_action,        0,                             offsetof(Unit, start_limit_action)
@@ -297,6 +311,8 @@ Socket.RemoveOnStop,             config_parse_bool,                  0,         
 Socket.Symlinks,                 config_parse_unit_path_strv_printf, 0,                             offsetof(Socket, symlinks)
 Socket.FileDescriptorName,       config_parse_fdname,                0,                             0
 Socket.Service,                  config_parse_socket_service,        0,                             0
+Socket.TriggerLimitIntervalSec,  config_parse_sec,                   0,                             offsetof(Socket, trigger_limit.interval)
+Socket.TriggerLimitBurst,        config_parse_unsigned,              0,                             offsetof(Socket, trigger_limit.burst)
 m4_ifdef(`HAVE_SMACK',
 `Socket.SmackLabel,              config_parse_string,                0,                             offsetof(Socket, smack)
 Socket.SmackLabelIPIn,           config_parse_string,                0,                             offsetof(Socket, smack_ip_in)

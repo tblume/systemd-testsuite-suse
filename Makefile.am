@@ -42,9 +42,9 @@ LIBUDEV_CURRENT=7
 LIBUDEV_REVISION=4
 LIBUDEV_AGE=6
 
-LIBSYSTEMD_CURRENT=14
+LIBSYSTEMD_CURRENT=15
 LIBSYSTEMD_REVISION=0
-LIBSYSTEMD_AGE=14
+LIBSYSTEMD_AGE=15
 
 # Dirs of external packages
 dbuspolicydir=@dbuspolicydir@
@@ -467,6 +467,7 @@ dist_systemunit_DATA = \
 	units/local-fs-pre.target \
 	units/initrd.target \
 	units/initrd-fs.target \
+	units/initrd-root-device.target \
 	units/initrd-root-fs.target \
 	units/remote-fs.target \
 	units/remote-fs-pre.target \
@@ -744,10 +745,10 @@ noinst_LTLIBRARIES += \
 
 libbasic_la_SOURCES = \
 	src/basic/missing.h \
+	src/basic/missing_syscall.h \
+	src/basic/raw-clone.h \
 	src/basic/capability-util.c \
 	src/basic/capability-util.h \
-	src/basic/c-rbtree.c \
-	src/basic/c-rbtree.h \
 	src/basic/conf-files.c \
 	src/basic/conf-files.h \
 	src/basic/stdio-util.h \
@@ -963,6 +964,7 @@ noinst_LTLIBRARIES += \
 
 libshared_la_SOURCES = \
 	src/shared/output-mode.h \
+	src/shared/output-mode.c \
 	src/shared/gpt.h \
 	src/shared/udev-util.h \
 	src/shared/linux/auto_dev-ioctl.h \
@@ -1037,7 +1039,11 @@ libshared_la_SOURCES = \
 	src/shared/machine-pool.c \
 	src/shared/machine-pool.h \
 	src/shared/resolve-util.c \
-	src/shared/resolve-util.h
+	src/shared/resolve-util.h \
+	src/shared/bus-unit-util.c \
+	src/shared/bus-unit-util.h \
+	src/shared/tests.h \
+	src/shared/tests.c
 
 if HAVE_UTMP
 libshared_la_SOURCES += \
@@ -1382,6 +1388,9 @@ pkgconfigdata_DATA += \
 nodist_rpmmacros_DATA = \
 	src/core/macros.systemd
 
+BUILT_SOURCES += \
+	src/core/triggers.systemd
+
 EXTRA_DIST += \
 	src/core/systemd.pc.in \
 	src/core/macros.systemd.in \
@@ -1420,7 +1429,7 @@ tests += \
 	test-watchdog \
 	test-cgroup-mask \
 	test-job-type \
-	test-env-replace \
+	test-env-util \
 	test-strbuf \
 	test-strv \
 	test-path \
@@ -1490,7 +1499,6 @@ tests += \
 	test-copy \
 	test-cap-list \
 	test-sigbus \
-	test-rbtree \
 	test-verbs \
 	test-af-list \
 	test-arphrd-list \
@@ -1562,6 +1570,7 @@ EXTRA_DIST += \
 	test/test-execute/exec-passenvironment-repeated.service \
 	test/test-execute/exec-passenvironment.service \
 	test/test-execute/exec-group.service \
+	test/test-execute/exec-group-nfsnobody.service \
 	test/test-execute/exec-ignoresigpipe-no.service \
 	test/test-execute/exec-ignoresigpipe-yes.service \
 	test/test-execute/exec-personality-x86-64.service \
@@ -1577,7 +1586,10 @@ EXTRA_DIST += \
 	test/test-execute/exec-systemcallfilter-failing.service \
 	test/test-execute/exec-systemcallfilter-not-failing2.service \
 	test/test-execute/exec-systemcallfilter-not-failing.service \
+	test/test-execute/exec-systemcallfilter-system-user.service \
+	test/test-execute/exec-systemcallfilter-system-user-nfsnobody.service \
 	test/test-execute/exec-user.service \
+	test/test-execute/exec-user-nfsnobody.service \
 	test/test-execute/exec-workingdirectory.service \
 	test/test-execute/exec-umask-0177.service \
 	test/test-execute/exec-umask-default.service \
@@ -1594,10 +1606,13 @@ EXTRA_DIST += \
 	test/test-execute/exec-capabilityboundingset-reset.service \
 	test/test-execute/exec-capabilityboundingset-simple.service \
 	test/test-execute/exec-capabilityambientset.service \
+	test/test-execute/exec-capabilityambientset-nfsnobody.service \
 	test/test-execute/exec-capabilityambientset-merge.service \
+	test/test-execute/exec-capabilityambientset-merge-nfsnobody.service \
 	test/test-execute/exec-runtimedirectory.service \
 	test/test-execute/exec-runtimedirectory-mode.service \
 	test/test-execute/exec-runtimedirectory-owner.service \
+	test/test-execute/exec-runtimedirectory-owner-nfsnobody.service \
 	test/bus-policy/hello.conf \
 	test/bus-policy/methods.conf \
 	test/bus-policy/ownerships.conf \
@@ -1735,12 +1750,6 @@ test_sigbus_SOURCES = \
 	src/test/test-sigbus.c
 
 test_sigbus_LDADD = \
-	libshared.la
-
-test_rbtree_SOURCES = \
-	src/test/test-rbtree.c
-
-test_rbtree_LDADD = \
 	libshared.la
 
 test_condition_SOURCES = \
@@ -2189,10 +2198,10 @@ test_cgroup_util_SOURCES = \
 test_cgroup_util_LDADD = \
 	libshared.la
 
-test_env_replace_SOURCES = \
-	src/test/test-env-replace.c
+test_env_util_SOURCES = \
+	src/test/test-env-util.c
 
-test_env_replace_LDADD = \
+test_env_util_LDADD = \
 	libshared.la
 
 test_strbuf_SOURCES = \
@@ -3008,16 +3017,22 @@ systemd_nspawn_SOURCES = \
 	src/nspawn/nspawn-expose-ports.h \
 	src/nspawn/nspawn-cgroup.c \
 	src/nspawn/nspawn-cgroup.h \
+	src/nspawn/nspawn-seccomp.c \
+	src/nspawn/nspawn-seccomp.h \
 	src/nspawn/nspawn-register.c \
 	src/nspawn/nspawn-register.h \
 	src/nspawn/nspawn-setuid.c \
 	src/nspawn/nspawn-setuid.h \
 	src/nspawn/nspawn-stub-pid1.c \
 	src/nspawn/nspawn-stub-pid1.h \
+	src/nspawn/nspawn-patch-uid.c \
+	src/nspawn/nspawn-patch-uid.h \
 	src/core/mount-setup.c \
 	src/core/mount-setup.h \
 	src/core/loopback-setup.c \
-	src/core/loopback-setup.h
+	src/core/loopback-setup.h \
+	src/core/machine-id-setup.c \
+	src/core/machine-id-setup.h
 
 nodist_systemd_nspawn_SOURCES = \
 	src/nspawn/nspawn-gperf.c
@@ -3038,6 +3053,17 @@ if HAVE_LIBIPTC
 systemd_nspawn_LDADD += \
 	libfirewall.la
 endif
+
+test_patch_uid_SOURCES = \
+	src/nspawn/nspawn-patch-uid.c \
+	src/nspawn/nspawn-patch-uid.h \
+	src/nspawn/test-patch-uid.c
+
+test_patch_uid_LDADD = \
+	libshared.la
+
+manual_tests += \
+	test-patch-uid
 
 # ------------------------------------------------------------------------------
 systemd_run_SOURCES = \
@@ -3415,7 +3441,6 @@ libsystemd_network_la_SOURCES = \
 	src/libsystemd-network/sd-dhcp6-lease.c \
 	src/libsystemd-network/dhcp-identifier.h \
 	src/libsystemd-network/dhcp-identifier.c \
-	src/libsystemd-network/lldp.h \
 	src/libsystemd-network/lldp-internal.h \
 	src/libsystemd-network/lldp-network.h \
 	src/libsystemd-network/lldp-network.c \
@@ -3577,7 +3602,8 @@ INSTALL_DIRS += \
 dist_network_DATA = \
 	network/99-default.link \
 	network/80-container-host0.network \
-	network/80-container-ve.network
+	network/80-container-ve.network \
+	network/80-container-vz.network
 
 dist_udevrules_DATA += \
 	rules/50-udev-default.rules \
@@ -3819,9 +3845,11 @@ check_DATA += \
 endif
 
 # packed sysfs test tree
-test/sys:
+test/sys: test/sys.tar.xz
+	-rm -rf test/sys
 	$(AM_V_at)$(MKDIR_P) $(dir $@)
 	$(AM_V_GEN)tar -C test/ -xJf $(top_srcdir)/test/sys.tar.xz
+	-touch test/sys
 
 test-sys-distclean:
 	-rm -rf test/sys
@@ -3944,6 +3972,34 @@ systemd_cat_SOURCES = \
 systemd_cat_LDADD = \
 	libjournal-core.la
 
+if HAVE_LIBCURL
+rootlibexec_PROGRAMS += \
+        systemd-journal-upload
+
+systemd_journal_upload_SOURCES = \
+        src/journal-remote/journal-upload.h \
+        src/journal-remote/journal-upload.c \
+        src/journal-remote/journal-upload-journal.c
+
+systemd_journal_upload_CFLAGS = \
+        $(AM_CFLAGS) \
+        $(LIBCURL_CFLAGS)
+
+systemd_journal_upload_LDADD = \
+        libshared.la \
+        $(LIBCURL_LIBS)
+
+nodist_systemunit_DATA += \
+        units/systemd-journal-upload.service
+
+nodist_pkgsysconf_DATA += \
+        src/journal-remote/journal-upload.conf
+endif
+
+EXTRA_DIST += \
+        units/systemd-journal-upload.service.in \
+        src/journal-remote/journal-upload.conf.in
+
 if HAVE_MICROHTTPD
 rootlibexec_PROGRAMS += \
 	systemd-journal-remote
@@ -4002,34 +4058,6 @@ EXTRA_DIST += \
 	src/journal-remote/journal-remote.conf.in \
 	src/journal-remote/log-generator.py
 endif
-
-if HAVE_LIBCURL
-rootlibexec_PROGRAMS += \
-	systemd-journal-upload
-
-systemd_journal_upload_SOURCES = \
-	src/journal-remote/journal-upload.h \
-	src/journal-remote/journal-upload.c \
-	src/journal-remote/journal-upload-journal.c
-
-systemd_journal_upload_CFLAGS = \
-	$(AM_CFLAGS) \
-	$(LIBCURL_CFLAGS)
-
-systemd_journal_upload_LDADD = \
-	libshared.la \
-	$(LIBCURL_LIBS)
-
-nodist_systemunit_DATA += \
-	units/systemd-journal-upload.service
-
-nodist_pkgsysconf_DATA += \
-	src/journal-remote/journal-upload.conf
-endif
-
-EXTRA_DIST += \
-	units/systemd-journal-upload.service.in \
-	src/journal-remote/journal-upload.conf.in
 
 # using _CFLAGS = in the conditional below would suppress AM_CFLAGS
 journalctl_CFLAGS = \
@@ -4254,7 +4282,9 @@ libsystemd_journal_internal_la_SOURCES = \
 	src/journal/mmap-cache.h \
 	src/journal/compress.c \
 	src/journal/audit-type.h \
-	src/journal/audit-type.c
+	src/journal/audit-type.c \
+	src/shared/gcrypt-util.h \
+	src/shared/gcrypt-util.c
 
 nodist_libsystemd_journal_internal_la_SOURCES = \
 	src/journal/audit_type-to-name.h
@@ -4286,9 +4316,7 @@ libsystemd_journal_internal_la_SOURCES += \
 	src/journal/journal-authenticate.c \
 	src/journal/journal-authenticate.h \
 	src/journal/fsprg.c \
-	src/journal/fsprg.h \
-	src/shared/gcrypt-util.c \
-	src/shared/gcrypt-util.h
+	src/journal/fsprg.h
 
 libsystemd_journal_internal_la_LIBADD += \
 	$(GCRYPT_LIBS)
@@ -4325,6 +4353,7 @@ dist_pkgsysconf_DATA += \
 	src/journal/journald.conf
 
 dist_catalog_DATA = \
+	catalog/systemd.bg.catalog \
 	catalog/systemd.be.catalog \
 	catalog/systemd.be@latin.catalog \
 	catalog/systemd.fr.catalog \
@@ -4716,7 +4745,7 @@ systemd_localed_SOURCES = \
 
 systemd_localed_LDADD = \
 	libshared.la \
-	$(XKBCOMMON_LIBS)
+	-ldl
 
 systemd_localed_CFLAGS = \
 	$(AM_CFLAGS) \
@@ -4868,6 +4897,17 @@ EXTRA_DIST += \
 	src/timesync/timesyncd.conf.in
 
 # ------------------------------------------------------------------------------
+test_nss_SOURCES = \
+	src/test/test-nss.c
+
+test_nss_LDADD = \
+	libsystemd-internal.la \
+	-ldl
+
+manual_tests += \
+	test-nss
+
+# ------------------------------------------------------------------------------
 if HAVE_MYHOSTNAME
 libnss_myhostname_la_SOURCES = \
 	src/nss-myhostname/nss-myhostname.sym \
@@ -4908,7 +4948,9 @@ libmachine_core_la_SOURCES = \
 	src/machine/machine-dbus.c \
 	src/machine/machine-dbus.h \
 	src/machine/image-dbus.c \
-	src/machine/image-dbus.h
+	src/machine/image-dbus.h \
+	src/machine/operation.c \
+	src/machine/operation.h
 
 libmachine_core_la_LIBADD = \
 	libshared.la
@@ -5390,6 +5432,8 @@ libnetworkd_core_la_CFLAGS = \
 libnetworkd_core_la_SOURCES = \
 	src/libsystemd-network/network-internal.h \
 	src/network/networkd.h \
+	src/network/networkd-conf.h \
+	src/network/networkd-conf.c \
 	src/network/networkd-link.h \
 	src/network/networkd-link.c \
 	src/network/networkd-netdev.h \
@@ -5438,6 +5482,7 @@ libnetworkd_core_la_SOURCES = \
 	src/network/networkd-lldp-tx.c
 
 nodist_libnetworkd_core_la_SOURCES = \
+	src/network/networkd-gperf.c \
 	src/network/networkd-network-gperf.c \
 	src/network/networkd-netdev-gperf.c
 
@@ -5476,6 +5521,12 @@ networkctl_LDADD = \
 dist_bashcompletion_data += \
 	shell-completion/bash/networkctl
 
+test_networkd_conf_SOURCES = \
+	src/network/test-networkd-conf.c
+
+test_networkd_conf_LDADD = \
+	libnetworkd-core.la
+
 test_network_SOURCES = \
 	src/network/test-network.c
 
@@ -5501,6 +5552,7 @@ test_network_tables_LDADD += \
 endif
 
 tests += \
+	test-networkd-conf \
 	test-network \
 	test-network-tables
 
@@ -5534,6 +5586,7 @@ BUSNAMES_TARGET_WANTS += \
 endif
 
 gperf_gperf_sources += \
+	src/network/networkd-gperf.gperf \
 	src/network/networkd-network-gperf.gperf \
 	src/network/networkd-netdev-gperf.gperf
 
@@ -5698,7 +5751,7 @@ dist_dbussystemservice_DATA += \
 dist_dbuspolicy_DATA += \
 	src/login/org.freedesktop.login1.conf
 
-dist_pkgsysconf_DATA += \
+nodist_pkgsysconf_DATA += \
 	src/login/logind.conf
 
 polkitpolicy_files += \
@@ -5735,7 +5788,8 @@ gperf_gperf_sources += \
 EXTRA_DIST += \
 	src/login/71-seat.rules.in \
 	src/login/73-seat-late.rules.in \
-	units/systemd-logind.service.in
+	units/systemd-logind.service.in \
+	src/login/logind.conf.in
 
 # ------------------------------------------------------------------------------
 if HAVE_PAM
@@ -5788,6 +5842,16 @@ EXTRA_DIST += \
 	test/TEST-07-ISSUE-1981/Makefile \
 	test/TEST-07-ISSUE-1981/test-segfault.sh \
 	test/TEST-07-ISSUE-1981/test.sh \
+	test/TEST-08-ISSUE-2730/Makefile \
+	test/TEST-08-ISSUE-2730/test.sh \
+	test/TEST-09-ISSUE-2691/Makefile \
+	test/TEST-09-ISSUE-2691/test.sh \
+	test/TEST-10-ISSUE-2467/Makefile \
+	test/TEST-10-ISSUE-2467/test.sh \
+	test/TEST-11-ISSUE-3166/Makefile \
+	test/TEST-11-ISSUE-3166/test.sh \
+	test/TEST-12-ISSUE-3171/Makefile \
+	test/TEST-12-ISSUE-3171/test.sh \
 	test/test-functions
 
 EXTRA_DIST += \
@@ -5852,6 +5916,7 @@ substitutions = \
        '|NTP_SERVERS=$(NTP_SERVERS)|' \
        '|DNS_SERVERS=$(DNS_SERVERS)|' \
        '|DEFAULT_DNSSEC_MODE=$(DEFAULT_DNSSEC_MODE)|' \
+       '|KILL_USER_PROCESSES=$(KILL_USER_PROCESSES)|' \
        '|systemuidmax=$(SYSTEM_UID_MAX)|' \
        '|systemgidmax=$(SYSTEM_GID_MAX)|' \
        '|TTY_GID=$(TTY_GID)|' \
@@ -6157,7 +6222,6 @@ DISTCHECK_CONFIGURE_FLAGS += \
 endif
 
 .PHONY: dist-check-help
-
 dist-check-help: $(rootbin_PROGRAMS) $(bin_PROGRAMS)
 	for i in $(abspath $^); do                                             \
             if $$i  --help | grep -v 'default:' | grep -E -q '.{80}.' ; then   \
@@ -6165,6 +6229,18 @@ dist-check-help: $(rootbin_PROGRAMS) $(bin_PROGRAMS)
 	        $$i  --help | awk 'length > 80' | grep -E --color=yes '.{80}'; \
 	        exit 1;                                                        \
             fi; done
+
+include_compilers = "$(CC)" "$(CC) -ansi" "$(CC) -std=iso9899:1990"
+public_headers = $(filter-out src/systemd/_sd-common.h, $(pkginclude_HEADERS) $(include_HEADERS))
+.PHONY: dist-check-includes
+dist-check-includes: $(public_headers)
+	@res=0;                                                        	        \
+	for i in $(abspath $^); do	                                        \
+	    for cc in $(include_compilers); do                                  \
+	        echo "$$cc -o/dev/null -c -x c -include "$$i" - </dev/null";    \
+	        $$cc -o/dev/null -c -x c -include "$$i" - </dev/null || res=1;  \
+	    done;                                                               \
+	done; exit $$res
 
 .PHONY: hwdb-update
 hwdb-update:

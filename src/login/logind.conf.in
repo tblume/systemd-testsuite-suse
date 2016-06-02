@@ -14,7 +14,7 @@
 [Login]
 #NAutoVTs=6
 #ReserveVT=6
-#KillUserProcesses=no
+#KillUserProcesses=@KILL_USER_PROCESSES@
 #KillOnlyUsers=
 #KillExcludeUsers=root
 #InhibitDelayMaxSec=5
@@ -32,4 +32,6 @@
 #IdleActionSec=30min
 #RuntimeDirectorySize=10%
 #RemoveIPC=yes
+#InhibitorsMax=8192
+#SessionsMax=8192
 #UserTasksMax=12288

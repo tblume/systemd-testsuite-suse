@@ -29,6 +29,7 @@
 #include "in-addr-util.h"
 #include "siphash24.h"
 #include "string-util.h"
+#include "unaligned.h"
 
 #define DHCP_DEFAULT_LEASE_TIME_USEC USEC_PER_HOUR
 #define DHCP_MAX_LEASE_TIME_USEC (USEC_PER_HOUR*12)
@@ -468,10 +469,12 @@ static int server_send_offer(sd_dhcp_server *server, DHCPRequest *req,
         if (r < 0)
                 return r;
 
-        r = dhcp_option_append(&packet->dhcp, req->max_optlen, &offset, 0,
-                               SD_DHCP_OPTION_ROUTER, 4, &server->address);
-        if (r < 0)
-                return r;
+        if (server->emit_router) {
+                r = dhcp_option_append(&packet->dhcp, req->max_optlen, &offset, 0,
+                                       SD_DHCP_OPTION_ROUTER, 4, &server->address);
+                if (r < 0)
+                        return r;
+        }
 
         r = dhcp_server_send_packet(server, req, packet, DHCP_OFFER, offset);
         if (r < 0)
@@ -505,10 +508,12 @@ static int server_send_ack(sd_dhcp_server *server, DHCPRequest *req,
         if (r < 0)
                 return r;
 
-        r = dhcp_option_append(&packet->dhcp, req->max_optlen, &offset, 0,
-                               SD_DHCP_OPTION_ROUTER, 4, &server->address);
-        if (r < 0)
-                return r;
+        if (server->emit_router) {
+                r = dhcp_option_append(&packet->dhcp, req->max_optlen, &offset, 0,
+                                       SD_DHCP_OPTION_ROUTER, 4, &server->address);
+                if (r < 0)
+                        return r;
+        }
 
         if (server->n_dns > 0) {
                 r = dhcp_option_append(
@@ -600,17 +605,17 @@ static int parse_request(uint8_t code, uint8_t len, const void *option, void *us
         switch(code) {
         case SD_DHCP_OPTION_IP_ADDRESS_LEASE_TIME:
                 if (len == 4)
-                        req->lifetime = be32toh(*(be32_t*)option);
+                        req->lifetime = unaligned_read_be32(option);
 
                 break;
         case SD_DHCP_OPTION_REQUESTED_IP_ADDRESS:
                 if (len == 4)
-                        req->requested_ip = *(be32_t*)option;
+                        memcpy(&req->requested_ip, option, sizeof(be32_t));
 
                 break;
         case SD_DHCP_OPTION_SERVER_IDENTIFIER:
                 if (len == 4)
-                        req->server_id = *(be32_t*)option;
+                        memcpy(&req->server_id, option, sizeof(be32_t));
 
                 break;
         case SD_DHCP_OPTION_CLIENT_IDENTIFIER:
@@ -629,8 +634,7 @@ static int parse_request(uint8_t code, uint8_t len, const void *option, void *us
                 break;
         case SD_DHCP_OPTION_MAXIMUM_MESSAGE_SIZE:
                 if (len == 2)
-                        req->max_optlen = be16toh(*(be16_t*)option) -
-                                          - sizeof(DHCPPacket);
+                        req->max_optlen = unaligned_read_be16(option) - sizeof(DHCPPacket);
 
                 break;
         }
@@ -1155,6 +1159,17 @@ int sd_dhcp_server_set_ntp(sd_dhcp_server *server, const struct in_addr ntp[], u
                 server->ntp = c;
                 server->n_ntp = n;
         }
+
+        return 1;
+}
+
+int sd_dhcp_server_set_emit_router(sd_dhcp_server *server, int enabled) {
+        assert_return(server, -EINVAL);
+
+        if (enabled == server->emit_router)
+                return 0;
+
+        server->emit_router = enabled;
 
         return 1;
 }

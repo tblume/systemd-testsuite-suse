@@ -36,6 +36,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -183,6 +184,6 @@ int namespace_enter(int pidns_fd, int mntns_fd, int netns_fd, int userns_fd, int
 
 uint64_t physical_memory(void);
 
-int update_reboot_param_file(const char *param);
+int update_reboot_parameter_and_warn(const char *param);
 
 int version(void);

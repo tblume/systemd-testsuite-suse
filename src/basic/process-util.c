@@ -48,6 +48,7 @@
 #include "macro.h"
 #include "missing.h"
 #include "process-util.h"
+#include "raw-clone.h"
 #include "signal-util.h"
 #include "stat-util.h"
 #include "string-table.h"
@@ -528,14 +529,20 @@ int wait_for_terminate_and_warn(const char *name, pid_t pid, bool check_exit_cod
         return -EPROTO;
 }
 
-void sigkill_wait(pid_t *pid) {
+void sigkill_wait(pid_t pid) {
+        assert(pid > 1);
+
+        if (kill(pid, SIGKILL) > 0)
+                (void) wait_for_terminate(pid, NULL);
+}
+
+void sigkill_waitp(pid_t *pid) {
         if (!pid)
                 return;
         if (*pid <= 1)
                 return;
 
-        if (kill(*pid, SIGKILL) > 0)
-                (void) wait_for_terminate(*pid, NULL);
+        sigkill_wait(*pid);
 }
 
 int kill_and_sigcont(pid_t pid, int sig) {
@@ -661,6 +668,8 @@ bool is_main_thread(void) {
 
 noreturn void freeze(void) {
 
+        log_close();
+
         /* Make sure nobody waits for us on a socket anymore */
         close_all_fds(NULL, 0);
 
@@ -718,7 +727,7 @@ void valgrind_summary_hack(void) {
 #ifdef HAVE_VALGRIND_VALGRIND_H
         if (getpid() == 1 && RUNNING_ON_VALGRIND) {
                 pid_t pid;
-                pid = raw_clone(SIGCHLD, NULL);
+                pid = raw_clone(SIGCHLD);
                 if (pid < 0)
                         log_emergency_errno(errno, "Failed to fork off valgrind helper: %m");
                 else if (pid == 0)
@@ -729,6 +738,18 @@ void valgrind_summary_hack(void) {
                 }
         }
 #endif
+}
+
+int pid_compare_func(const void *a, const void *b) {
+        const pid_t *p = a, *q = b;
+
+        /* Suitable for usage in qsort() */
+
+        if (*p < *q)
+                return -1;
+        if (*p > *q)
+                return 1;
+        return 0;
 }
 
 static const char *const ioprio_class_table[] = {

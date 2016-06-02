@@ -180,20 +180,17 @@ static int service_set_main_pid(Service *s, pid_t pid) {
         return 0;
 }
 
-static void service_close_socket_fd(Service *s) {
+void service_close_socket_fd(Service *s) {
         assert(s);
+
+        /* Undo the effect of service_set_socket_fd(). */
 
         s->socket_fd = asynchronous_close(s->socket_fd);
-}
 
-static void service_connection_unref(Service *s) {
-        assert(s);
-
-        if (!UNIT_ISSET(s->accept_socket))
-                return;
-
-        socket_connection_unref(SOCKET(UNIT_DEREF(s->accept_socket)));
-        unit_ref_unset(&s->accept_socket);
+        if (UNIT_ISSET(s->accept_socket)) {
+                socket_connection_unref(SOCKET(UNIT_DEREF(s->accept_socket)));
+                unit_ref_unset(&s->accept_socket);
+        }
 }
 
 static void service_stop_watchdog(Service *s) {
@@ -321,7 +318,6 @@ static void service_done(Unit *u) {
         s->bus_name_owner = mfree(s->bus_name_owner);
 
         service_close_socket_fd(s);
-        service_connection_unref(s);
 
         unit_ref_unset(&s->accept_socket);
 
@@ -523,7 +519,7 @@ static int service_add_default_dependencies(Service *s) {
         /* Add a number of automatic dependencies useful for the
          * majority of services. */
 
-        if (UNIT(s)->manager->running_as == MANAGER_SYSTEM) {
+        if (MANAGER_IS_SYSTEM(UNIT(s)->manager)) {
                 /* First, pull in the really early boot stuff, and
                  * require it, so that we fail if we can't acquire
                  * it. */
@@ -832,7 +828,7 @@ static int service_load_pid_file(Service *s, bool may_warn) {
         return 0;
 }
 
-static int service_search_main_pid(Service *s) {
+static void service_search_main_pid(Service *s) {
         pid_t pid = 0;
         int r;
 
@@ -841,30 +837,24 @@ static int service_search_main_pid(Service *s) {
         /* If we know it anyway, don't ever fallback to unreliable
          * heuristics */
         if (s->main_pid_known)
-                return 0;
+                return;
 
         if (!s->guess_main_pid)
-                return 0;
+                return;
 
         assert(s->main_pid <= 0);
 
-        r = unit_search_main_pid(UNIT(s), &pid);
-        if (r < 0)
-                return r;
+        if (unit_search_main_pid(UNIT(s), &pid) < 0)
+                return;
 
         log_unit_debug(UNIT(s), "Main PID guessed: "PID_FMT, pid);
-        r = service_set_main_pid(s, pid);
-        if (r < 0)
-                return r;
+        if (service_set_main_pid(s, pid) < 0)
+                return;
 
         r = unit_watch_pid(UNIT(s), pid);
-        if (r < 0) {
+        if (r < 0)
                 /* FIXME: we need to do something here */
                 log_unit_warning_errno(UNIT(s), r, "Failed to watch PID "PID_FMT" from: %m", pid);
-                return r;
-        }
-
-        return 0;
 }
 
 static void service_set_state(Service *s, ServiceState state) {
@@ -916,17 +906,15 @@ static void service_set_state(Service *s, ServiceState state) {
                     SERVICE_RUNNING, SERVICE_RELOAD,
                     SERVICE_STOP, SERVICE_STOP_SIGABRT, SERVICE_STOP_SIGTERM, SERVICE_STOP_SIGKILL, SERVICE_STOP_POST,
                     SERVICE_FINAL_SIGTERM, SERVICE_FINAL_SIGKILL) &&
-            !(state == SERVICE_DEAD && UNIT(s)->job)) {
+            !(state == SERVICE_DEAD && UNIT(s)->job))
                 service_close_socket_fd(s);
-                service_connection_unref(s);
-        }
 
         if (!IN_SET(state, SERVICE_START_POST, SERVICE_RUNNING, SERVICE_RELOAD))
                 service_stop_watchdog(s);
 
         /* For the inactive states unit_notify() will trim the cgroup,
          * but for exit we have to do that ourselves... */
-        if (state == SERVICE_EXITED && UNIT(s)->manager->n_reloading <= 0)
+        if (state == SERVICE_EXITED && !MANAGER_IS_RELOADING(UNIT(s)->manager))
                 unit_prune_cgroup(UNIT(s));
 
         /* For remain_after_exit services, let's see if we can "release" the
@@ -1217,7 +1205,7 @@ static int service_spawn(
                 if (asprintf(our_env + n_env++, "MAINPID="PID_FMT, s->main_pid) < 0)
                         return -ENOMEM;
 
-        if (UNIT(s)->manager->running_as != MANAGER_SYSTEM)
+        if (!MANAGER_IS_SYSTEM(UNIT(s)->manager))
                 if (asprintf(our_env + n_env++, "MANAGERPID="PID_FMT, getpid()) < 0)
                         return -ENOMEM;
 
@@ -1969,6 +1957,7 @@ fail:
 
 static int service_start(Unit *u) {
         Service *s = SERVICE(u);
+        int r;
 
         assert(s);
 
@@ -1994,6 +1983,13 @@ static int service_start(Unit *u) {
                 return -EAGAIN;
 
         assert(IN_SET(s->state, SERVICE_DEAD, SERVICE_FAILED));
+
+        /* Make sure we don't enter a busy loop of some kind. */
+        r = unit_start_limit_test(u);
+        if (r < 0) {
+                service_enter_dead(s, SERVICE_FAILURE_START_LIMIT_HIT, false);
+                return r;
+        }
 
         s->result = SERVICE_SUCCESS;
         s->reload_result = SERVICE_SUCCESS;
@@ -2729,7 +2725,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                                 break;
                                         }
                                 } else
-                                        (void) service_search_main_pid(s);
+                                        service_search_main_pid(s);
 
                                 service_enter_start_post(s);
                                 break;
@@ -2751,16 +2747,15 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                                                 break;
                                         }
                                 } else
-                                        (void) service_search_main_pid(s);
+                                        service_search_main_pid(s);
 
                                 service_enter_running(s, SERVICE_SUCCESS);
                                 break;
 
                         case SERVICE_RELOAD:
-                                if (f == SERVICE_SUCCESS) {
-                                        service_load_pid_file(s, true);
-                                        (void) service_search_main_pid(s);
-                                }
+                                if (f == SERVICE_SUCCESS)
+                                        if (service_load_pid_file(s, true) < 0)
+                                                service_search_main_pid(s);
 
                                 s->reload_result = f;
                                 service_enter_running(s, SERVICE_SUCCESS);
@@ -3146,9 +3141,8 @@ int service_set_socket_fd(Service *s, int fd, Socket *sock, bool selinux_context
         assert(s);
         assert(fd >= 0);
 
-        /* This is called by the socket code when instantiating a new
-         * service for a stream socket and the socket needs to be
-         * configured. */
+        /* This is called by the socket code when instantiating a new service for a stream socket and the socket needs
+         * to be configured. We take ownership of the passed fd on success. */
 
         if (UNIT(s)->load_state != UNIT_LOADED)
                 return -EINVAL;
@@ -3176,12 +3170,15 @@ int service_set_socket_fd(Service *s, int fd, Socket *sock, bool selinux_context
                         return r;
         }
 
+        r = unit_add_two_dependencies(UNIT(sock), UNIT_BEFORE, UNIT_TRIGGERS, UNIT(s), false);
+        if (r < 0)
+                return r;
+
         s->socket_fd = fd;
         s->socket_fd_selinux_context_net = selinux_context_net;
 
         unit_ref_set(&s->accept_socket, UNIT(sock));
-
-        return unit_add_two_dependencies(UNIT(sock), UNIT_BEFORE, UNIT_TRIGGERS, UNIT(s), false);
+        return 0;
 }
 
 static void service_reset_failed(Unit *u) {
@@ -3200,6 +3197,22 @@ static int service_kill(Unit *u, KillWho who, int signo, sd_bus_error *error) {
         Service *s = SERVICE(u);
 
         return unit_kill_common(u, who, signo, s->main_pid, s->control_pid, error);
+}
+
+static int service_main_pid(Unit *u) {
+        Service *s = SERVICE(u);
+
+        assert(s);
+
+        return s->main_pid;
+}
+
+static int service_control_pid(Unit *u) {
+        Service *s = SERVICE(u);
+
+        assert(s);
+
+        return s->control_pid;
 }
 
 static const char* const service_restart_table[_SERVICE_RESTART_MAX] = {
@@ -3261,6 +3274,7 @@ static const char* const service_result_table[_SERVICE_RESULT_MAX] = {
         [SERVICE_FAILURE_SIGNAL] = "signal",
         [SERVICE_FAILURE_CORE_DUMP] = "core-dump",
         [SERVICE_FAILURE_WATCHDOG] = "watchdog",
+        [SERVICE_FAILURE_START_LIMIT_HIT] = "start-limit-hit",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(service_result, ServiceResult);
@@ -3309,6 +3323,9 @@ const UnitVTable service_vtable = {
 
         .notify_cgroup_empty = service_notify_cgroup_empty_event,
         .notify_message = service_notify_message,
+
+        .main_pid = service_main_pid,
+        .control_pid = service_control_pid,
 
         .bus_name_owner_change = service_bus_name_owner_change,
 

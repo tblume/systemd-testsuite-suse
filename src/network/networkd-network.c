@@ -113,6 +113,7 @@ static int network_load_one(Manager *manager, const char *filename) {
 
         network->dhcp_server_emit_dns = true;
         network->dhcp_server_emit_ntp = true;
+        network->dhcp_server_emit_router = true;
         network->dhcp_server_emit_timezone = true;
 
         network->use_bpdu = true;
@@ -131,6 +132,8 @@ static int network_load_one(Manager *manager, const char *filename) {
         network->ipv6_accept_ra = -1;
         network->ipv6_dad_transmits = -1;
         network->ipv6_hop_limit = -1;
+        network->duid.type = _DUID_TYPE_INVALID;
+        network->proxy_arp = -1;
 
         r = config_parse(NULL, filename, file,
                          "Match\0"
@@ -394,6 +397,19 @@ int network_apply(Manager *manager, Network *network, Link *link) {
         }
 
         return 0;
+}
+
+bool network_has_static_ipv6_addresses(Network *network) {
+        Address *address;
+
+        assert(network);
+
+        LIST_FOREACH(addresses, address, network->static_addresses) {
+                if (address->family == AF_INET6)
+                        return true;
+        }
+
+        return false;
 }
 
 int config_parse_netdev(const char *unit,

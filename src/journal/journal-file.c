@@ -37,6 +37,7 @@
 #include "journal-file.h"
 #include "lookup3.h"
 #include "parse-util.h"
+#include "path-util.h"
 #include "random-util.h"
 #include "sd-event.h"
 #include "set.h"
@@ -119,7 +120,7 @@ static void journal_file_set_offline_internal(JournalFile *f) {
                         if (!__sync_bool_compare_and_swap(&f->offline_state, OFFLINE_SYNCING, OFFLINE_OFFLINING))
                                 continue;
 
-                        f->header->state = STATE_OFFLINE;
+                        f->header->state = f->archive ? STATE_ARCHIVED : STATE_OFFLINE;
                         (void) fsync(f->fd);
                         break;
 
@@ -217,8 +218,10 @@ int journal_file_set_offline(JournalFile *f, bool wait) {
         if (!(f->fd >= 0 && f->header))
                 return -EINVAL;
 
-        if (f->header->state != STATE_ONLINE)
-                return 0;
+        /* An offlining journal is implicitly online and may modify f->header->state,
+         * we must also join any potentially lingering offline thread when not online. */
+        if (!journal_file_is_offlining(f) && f->header->state != STATE_ONLINE)
+                return journal_file_set_offline_thread_join(f);
 
         /* Restart an in-flight offline thread and wait if needed, or join a lingering done one. */
         restarted = journal_file_set_offline_try_restart(f);
@@ -362,7 +365,8 @@ JournalFile* journal_file_close(JournalFile *f) {
                 (void) btrfs_defrag_fd(f->fd);
         }
 
-        safe_close(f->fd);
+        if (f->close_fd)
+                safe_close(f->fd);
         free(f->path);
 
         mmap_cache_unref(f->mmap);
@@ -435,6 +439,39 @@ static int journal_file_init_header(JournalFile *f, JournalFile *template) {
         return 0;
 }
 
+static int fsync_directory_of_file(int fd) {
+        _cleanup_free_ char *path = NULL, *dn = NULL;
+        _cleanup_close_ int dfd = -1;
+        struct stat st;
+        int r;
+
+        if (fstat(fd, &st) < 0)
+                return -errno;
+
+        if (!S_ISREG(st.st_mode))
+                return -EBADFD;
+
+        r = fd_get_path(fd, &path);
+        if (r < 0)
+                return r;
+
+        if (!path_is_absolute(path))
+                return -EINVAL;
+
+        dn = dirname_malloc(path);
+        if (!dn)
+                return -ENOMEM;
+
+        dfd = open(dn, O_RDONLY|O_CLOEXEC|O_DIRECTORY);
+        if (dfd < 0)
+                return -errno;
+
+        if (fsync(dfd) < 0)
+                return -errno;
+
+        return 0;
+}
+
 static int journal_file_refresh_header(JournalFile *f) {
         sd_id128_t boot_id;
         int r;
@@ -459,6 +496,9 @@ static int journal_file_refresh_header(JournalFile *f) {
 
         /* Sync the online state to disk */
         (void) fsync(f->fd);
+
+        /* We likely just created a new file, also sync the directory this file is located in. */
+        (void) fsync_directory_of_file(f->fd);
 
         return r;
 }
@@ -703,7 +743,11 @@ int journal_file_move_to_object(JournalFile *f, ObjectType type, uint64_t offset
 
         /* Objects may only be located at multiple of 64 bit */
         if (!VALID64(offset))
-                return -EFAULT;
+                return -EBADMSG;
+
+        /* Object may not be located in the file header */
+        if (offset < le64toh(f->header->header_size))
+                return -EBADMSG;
 
         r = journal_file_move_to(f, type, false, offset, sizeof(ObjectHeader), &t);
         if (r < 0)
@@ -1976,9 +2020,14 @@ static int generic_array_bisect(
                 i = right - 1;
                 lp = p = le64toh(array->entry_array.items[i]);
                 if (p <= 0)
-                        return -EBADMSG;
-
-                r = test_object(f, p, needle);
+                        r = -EBADMSG;
+                else
+                        r = test_object(f, p, needle);
+                if (r == -EBADMSG) {
+                        log_debug_errno(r, "Encountered invalid entry while bisecting, cutting algorithm short. (1)");
+                        n = i;
+                        continue;
+                }
                 if (r < 0)
                         return r;
 
@@ -2054,9 +2103,14 @@ static int generic_array_bisect(
 
                                 p = le64toh(array->entry_array.items[i]);
                                 if (p <= 0)
-                                        return -EBADMSG;
-
-                                r = test_object(f, p, needle);
+                                        r = -EBADMSG;
+                                else
+                                        r = test_object(f, p, needle);
+                                if (r == -EBADMSG) {
+                                        log_debug_errno(r, "Encountered invalid entry while bisecting, cutting algorithm short. (2)");
+                                        right = n = i;
+                                        continue;
+                                }
                                 if (r < 0)
                                         return r;
 
@@ -2461,13 +2515,18 @@ int journal_file_next_entry(
                               le64toh(f->header->entry_array_offset),
                               i,
                               ret, &ofs);
+        if (r == -EBADMSG && direction == DIRECTION_DOWN) {
+                /* Special case: when we iterate throught the journal file linearly, and hit an entry we can't read,
+                 * consider this the end of the journal file. */
+                log_debug_errno(r, "Encountered entry we can't read while iterating through journal file. Considering this the end of the file.");
+                return 0;
+        }
         if (r <= 0)
                 return r;
 
         if (p > 0 &&
             (direction == DIRECTION_DOWN ? ofs <= p : ofs >= p)) {
-                log_debug("%s: entry array corrupted at entry %"PRIu64,
-                          f->path, i);
+                log_debug("%s: entry array corrupted at entry %" PRIu64, f->path, i);
                 return -EBADMSG;
         }
 
@@ -2806,11 +2865,11 @@ void journal_file_print_header(JournalFile *f) {
                "Data Hash Table Size: %"PRIu64"\n"
                "Field Hash Table Size: %"PRIu64"\n"
                "Rotate Suggested: %s\n"
-               "Head Sequential Number: %"PRIu64"\n"
-               "Tail Sequential Number: %"PRIu64"\n"
-               "Head Realtime Timestamp: %s\n"
-               "Tail Realtime Timestamp: %s\n"
-               "Tail Monotonic Timestamp: %s\n"
+               "Head Sequential Number: %"PRIu64" (%"PRIx64")\n"
+               "Tail Sequential Number: %"PRIu64" (%"PRIx64")\n"
+               "Head Realtime Timestamp: %s (%"PRIx64")\n"
+               "Tail Realtime Timestamp: %s (%"PRIx64")\n"
+               "Tail Monotonic Timestamp: %s (%"PRIx64")\n"
                "Objects: %"PRIu64"\n"
                "Entry Objects: %"PRIu64"\n",
                f->path,
@@ -2831,11 +2890,11 @@ void journal_file_print_header(JournalFile *f) {
                le64toh(f->header->data_hash_table_size) / sizeof(HashItem),
                le64toh(f->header->field_hash_table_size) / sizeof(HashItem),
                yes_no(journal_file_rotate_suggested(f, 0)),
-               le64toh(f->header->head_entry_seqnum),
-               le64toh(f->header->tail_entry_seqnum),
-               format_timestamp_safe(x, sizeof(x), le64toh(f->header->head_entry_realtime)),
-               format_timestamp_safe(y, sizeof(y), le64toh(f->header->tail_entry_realtime)),
-               format_timespan(z, sizeof(z), le64toh(f->header->tail_entry_monotonic), USEC_PER_MSEC),
+               le64toh(f->header->head_entry_seqnum), le64toh(f->header->head_entry_seqnum),
+               le64toh(f->header->tail_entry_seqnum), le64toh(f->header->tail_entry_seqnum),
+               format_timestamp_safe(x, sizeof(x), le64toh(f->header->head_entry_realtime)), le64toh(f->header->head_entry_realtime),
+               format_timestamp_safe(y, sizeof(y), le64toh(f->header->tail_entry_realtime)), le64toh(f->header->tail_entry_realtime),
+               format_timespan(z, sizeof(z), le64toh(f->header->tail_entry_monotonic), USEC_PER_MSEC), le64toh(f->header->tail_entry_monotonic),
                le64toh(f->header->n_objects),
                le64toh(f->header->n_entries));
 
@@ -2898,6 +2957,7 @@ static int journal_file_warn_btrfs(JournalFile *f) {
 }
 
 int journal_file_open(
+                int fd,
                 const char *fname,
                 int flags,
                 mode_t mode,
@@ -2914,22 +2974,24 @@ int journal_file_open(
         void *h;
         int r;
 
-        assert(fname);
         assert(ret);
+        assert(fd >= 0 || fname);
 
         if ((flags & O_ACCMODE) != O_RDONLY &&
             (flags & O_ACCMODE) != O_RDWR)
                 return -EINVAL;
 
-        if (!endswith(fname, ".journal") &&
-            !endswith(fname, ".journal~"))
-                return -EINVAL;
+        if (fname) {
+                if (!endswith(fname, ".journal") &&
+                    !endswith(fname, ".journal~"))
+                        return -EINVAL;
+        }
 
         f = new0(JournalFile, 1);
         if (!f)
                 return -ENOMEM;
 
-        f->fd = -1;
+        f->fd = fd;
         f->mode = mode;
 
         f->flags = flags;
@@ -2954,7 +3016,10 @@ int journal_file_open(
                 }
         }
 
-        f->path = strdup(fname);
+        if (fname)
+                f->path = strdup(fname);
+        else /* If we don't know the path, fill in something explanatory and vaguely useful */
+                asprintf(&f->path, "/proc/self/%i", fd);
         if (!f->path) {
                 r = -ENOMEM;
                 goto fail;
@@ -2966,10 +3031,15 @@ int journal_file_open(
                 goto fail;
         }
 
-        f->fd = open(f->path, f->flags|O_CLOEXEC, f->mode);
         if (f->fd < 0) {
-                r = -errno;
-                goto fail;
+                f->fd = open(f->path, f->flags|O_CLOEXEC, f->mode);
+                if (f->fd < 0) {
+                        r = -errno;
+                        goto fail;
+                }
+
+                /* fds we opened here by us should also be closed by us. */
+                f->close_fd = true;
         }
 
         r = journal_file_fstat(f);
@@ -3090,6 +3160,9 @@ int journal_file_open(
                         goto fail;
         }
 
+        /* The file is opened now successfully, thus we take possession of any passed in fd. */
+        f->close_fd = true;
+
         *ret = f;
         return 0;
 
@@ -3116,6 +3189,11 @@ int journal_file_rotate(JournalFile **f, bool compress, bool seal, Set *deferred
         if (!old_file->writable)
                 return -EINVAL;
 
+        /* Is this a journal file that was passed to us as fd? If so, we synthesized a path name for it, and we refuse
+         * rotation, since we don't know the actual path, and couldn't rename the file hence.*/
+        if (path_startswith(old_file->path, "/proc/self/fd"))
+                return -EINVAL;
+
         if (!endswith(old_file->path, ".journal"))
                 return -EINVAL;
 
@@ -3135,14 +3213,23 @@ int journal_file_rotate(JournalFile **f, bool compress, bool seal, Set *deferred
         if (r < 0 && errno != ENOENT)
                 return -errno;
 
-        old_file->header->state = STATE_ARCHIVED;
+        /* Sync the rename to disk */
+        (void) fsync_directory_of_file(old_file->fd);
+
+        /* Set as archive so offlining commits w/state=STATE_ARCHIVED.
+         * Previously we would set old_file->header->state to STATE_ARCHIVED directly here,
+         * but journal_file_set_offline() short-circuits when state != STATE_ONLINE, which
+         * would result in the rotated journal never getting fsync() called before closing.
+         * Now we simply queue the archive state by setting an archive bit, leaving the state
+         * as STATE_ONLINE so proper offlining occurs. */
+        old_file->archive = true;
 
         /* Currently, btrfs is not very good with out write patterns
          * and fragments heavily. Let's defrag our journal files when
          * we archive them */
         old_file->defrag_on_close = true;
 
-        r = journal_file_open(old_file->path, old_file->flags, old_file->mode, compress, seal, NULL, old_file->mmap, deferred_closes, old_file, &new_file);
+        r = journal_file_open(-1, old_file->path, old_file->flags, old_file->mode, compress, seal, NULL, old_file->mmap, deferred_closes, old_file, &new_file);
 
         if (deferred_closes &&
             set_put(deferred_closes, old_file) >= 0)
@@ -3170,7 +3257,7 @@ int journal_file_open_reliably(
         size_t l;
         _cleanup_free_ char *p = NULL;
 
-        r = journal_file_open(fname, flags, mode, compress, seal, metrics, mmap_cache, deferred_closes, template, ret);
+        r = journal_file_open(-1, fname, flags, mode, compress, seal, metrics, mmap_cache, deferred_closes, template, ret);
         if (!IN_SET(r,
                     -EBADMSG,           /* corrupted */
                     -ENODATA,           /* truncated */
@@ -3206,12 +3293,12 @@ int journal_file_open_reliably(
         /* btrfs doesn't cope well with our write pattern and
          * fragments heavily. Let's defrag all files we rotate */
 
-        (void) chattr_path(p, false, FS_NOCOW_FL);
+        (void) chattr_path(p, 0, FS_NOCOW_FL);
         (void) btrfs_defrag(p);
 
         log_warning_errno(r, "File %s corrupted or uncleanly shut down, renaming and replacing.", fname);
 
-        return journal_file_open(fname, flags, mode, compress, seal, metrics, mmap_cache, deferred_closes, template, ret);
+        return journal_file_open(-1, fname, flags, mode, compress, seal, metrics, mmap_cache, deferred_closes, template, ret);
 }
 
 int journal_file_copy_entry(JournalFile *from, JournalFile *to, Object *o, uint64_t p, uint64_t *seqnum, Object **ret, uint64_t *offset) {

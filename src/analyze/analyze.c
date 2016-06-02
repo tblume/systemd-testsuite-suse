@@ -28,6 +28,7 @@
 #include "alloc-util.h"
 #include "analyze-verify.h"
 #include "bus-error.h"
+#include "bus-unit-util.h"
 #include "bus-util.h"
 #include "glob-util.h"
 #include "hashmap.h"
@@ -751,9 +752,9 @@ static int list_dependencies_print(const char *name, unsigned int level, unsigne
         char ts[FORMAT_TIMESPAN_MAX], ts2[FORMAT_TIMESPAN_MAX];
 
         for (i = level; i != 0; i--)
-                printf("%s", draw_special_char(branches & (1 << (i-1)) ? DRAW_TREE_VERTICAL : DRAW_TREE_SPACE));
+                printf("%s", special_glyph(branches & (1 << (i-1)) ? TREE_VERTICAL : TREE_SPACE));
 
-        printf("%s", draw_special_char(last ? DRAW_TREE_RIGHT : DRAW_TREE_BRANCH));
+        printf("%s", special_glyph(last ? TREE_RIGHT : TREE_BRANCH));
 
         if (times) {
                 if (times->time)
@@ -1443,7 +1444,7 @@ int main(int argc, char *argv[]) {
 
         if (streq_ptr(argv[optind], "verify"))
                 r = verify_units(argv+optind+1,
-                                 arg_user ? MANAGER_USER : MANAGER_SYSTEM,
+                                 arg_user ? UNIT_FILE_USER : UNIT_FILE_SYSTEM,
                                  arg_man);
         else {
                 _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;

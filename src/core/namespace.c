@@ -44,6 +44,8 @@
 #include "user-util.h"
 #include "util.h"
 
+#define DEV_MOUNT_OPTIONS (MS_NOSUID|MS_STRICTATIME|MS_NOEXEC)
+
 typedef enum MountMode {
         /* This is ordered by priority! */
         INACCESSIBLE,
@@ -153,7 +155,7 @@ static int mount_dev(BindMount *m) {
 
         dev = strjoina(temporary_mount, "/dev");
         (void) mkdir(dev, 0755);
-        if (mount("tmpfs", dev, "tmpfs", MS_NOSUID|MS_STRICTATIME, "mode=755") < 0) {
+        if (mount("tmpfs", dev, "tmpfs", DEV_MOUNT_OPTIONS, "mode=755") < 0) {
                 r = -errno;
                 goto fail;
         }
@@ -237,6 +239,8 @@ static int mount_dev(BindMount *m) {
          */
         (void) mkdir_p_label(m->path, 0755);
 
+        /* Unmount everything in old /dev */
+        umount_recursive(m->path, 0);
         if (mount(dev, m->path, NULL, MS_MOVE, NULL) < 0) {
                 r = -errno;
                 goto fail;
@@ -328,9 +332,11 @@ static int make_read_only(BindMount *m) {
 
         if (IN_SET(m->mode, INACCESSIBLE, READONLY))
                 r = bind_remount_recursive(m->path, true);
-        else if (IN_SET(m->mode, READWRITE, PRIVATE_TMP, PRIVATE_VAR_TMP, PRIVATE_DEV))
+        else if (IN_SET(m->mode, READWRITE, PRIVATE_TMP, PRIVATE_VAR_TMP, PRIVATE_DEV)) {
                 r = bind_remount_recursive(m->path, false);
-        else
+                if (r == 0 && m->mode == PRIVATE_DEV) /* can be readonly but the submounts can't*/
+                        r = mount(NULL, m->path, NULL, MS_REMOUNT|DEV_MOUNT_OPTIONS|MS_RDONLY, NULL);
+        } else
                 r = 0;
 
         if (m->ignore && r == -ENOENT)

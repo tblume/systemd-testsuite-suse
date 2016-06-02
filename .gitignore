@@ -182,7 +182,7 @@
 /test-efi-disk.img
 /test-ellipsize
 /test-engine
-/test-env-replace
+/test-env-util
 /test-escape
 /test-event
 /test-execute
@@ -235,10 +235,13 @@
 /test-ndisc-rs
 /test-netlink
 /test-netlink-manual
+/test-networkd-conf
 /test-network
 /test-network-tables
 /test-ns
+/test-nss
 /test-parse-util
+/test-patch-uid
 /test-path
 /test-path-lookup
 /test-path-util
@@ -248,7 +251,6 @@
 /test-pty
 /test-qcow2
 /test-ratelimit
-/test-rbtree
 /test-replace-var
 /test-resolve
 /test-resolve-tables

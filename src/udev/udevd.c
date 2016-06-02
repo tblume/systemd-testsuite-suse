@@ -368,7 +368,6 @@ static void worker_spawn(Manager *manager, struct event *event) {
                 manager->monitor = udev_monitor_unref(manager->monitor);
                 manager->ctrl_conn_blocking = udev_ctrl_connection_unref(manager->ctrl_conn_blocking);
                 manager->ctrl = udev_ctrl_unref(manager->ctrl);
-                manager->ctrl_conn_blocking = udev_ctrl_connection_unref(manager->ctrl_conn_blocking);
                 manager->worker_watch[READ_END] = safe_close(manager->worker_watch[READ_END]);
 
                 manager->ctrl_event = sd_event_source_unref(manager->ctrl_event);
@@ -400,10 +399,11 @@ static void worker_spawn(Manager *manager, struct event *event) {
                         goto out;
                 }
 
-                /* request TERM signal if parent exits */
-                prctl(PR_SET_PDEATHSIG, SIGTERM);
+                /* Request TERM signal if parent exits.
+                   Ignore error, not much we can do in that case. */
+                (void) prctl(PR_SET_PDEATHSIG, SIGTERM);
 
-                /* reset OOM score, we only protect the main daemon */
+                /* Reset OOM score, we only protect the main daemon. */
                 write_string_file("/proc/self/oom_score_adj", "0", 0);
 
                 for (;;) {
