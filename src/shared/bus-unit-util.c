@@ -27,6 +27,8 @@
 #include "hashmap.h"
 #include "list.h"
 #include "locale-util.h"
+#include "mount-util.h"
+#include "nsflags.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
@@ -61,6 +63,7 @@ int bus_parse_unit_info(sd_bus_message *message, UnitInfo *u) {
 
 int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignment) {
         const char *eq, *field;
+        UnitDependency dep;
         int r, rl;
 
         assert(m);
@@ -83,18 +86,14 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
 
                 if (isempty(eq))
                         r = sd_bus_message_append(m, "sv", "CPUQuotaPerSecUSec", "t", USEC_INFINITY);
-                else if (endswith(eq, "%")) {
-                        double percent;
-
-                        if (sscanf(eq, "%lf%%", &percent) != 1 || percent <= 0) {
-                                log_error("CPU quota '%s' invalid.", eq);
+                else {
+                        r = parse_percent_unbounded(eq);
+                        if (r <= 0) {
+                                log_error_errno(r, "CPU quota '%s' invalid.", eq);
                                 return -EINVAL;
                         }
 
-                        r = sd_bus_message_append(m, "sv", "CPUQuotaPerSecUSec", "t", (usec_t) percent * USEC_PER_SEC / 100);
-                } else {
-                        log_error("CPU quota needs to be in percent.");
-                        return -EINVAL;
+                        r = sd_bus_message_append(m, "sv", "CPUQuotaPerSecUSec", "t", (usec_t) r * USEC_PER_SEC / 100U);
                 }
 
                 goto finish;
@@ -110,6 +109,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 char *n;
                 usec_t t;
                 size_t l;
+
                 r = parse_sec(eq, &t);
                 if (r < 0)
                         return log_error_errno(r, "Failed to parse %s= parameter: %s", field, eq);
@@ -122,6 +122,54 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 /* Change suffix Sec → USec */
                 strcpy(mempcpy(n, field, l - 3), "USec");
                 r = sd_bus_message_append(m, "sv", n, "t", t);
+                goto finish;
+
+        } else if (STR_IN_SET(field, "MemoryLow", "MemoryHigh", "MemoryMax", "MemoryLimit")) {
+                uint64_t bytes;
+
+                if (isempty(eq) || streq(eq, "infinity"))
+                        bytes = CGROUP_LIMIT_MAX;
+                else {
+                        r = parse_percent(eq);
+                        if (r >= 0) {
+                                char *n;
+
+                                /* When this is a percentage we'll convert this into a relative value in the range
+                                 * 0…UINT32_MAX and pass it in the MemoryLowScale property (and related
+                                 * ones). This way the physical memory size can be determined server-side */
+
+                                n = strjoina(field, "Scale");
+                                r = sd_bus_message_append(m, "sv", n, "u", (uint32_t) (((uint64_t) UINT32_MAX * r) / 100U));
+                                goto finish;
+
+                        } else {
+                                r = parse_size(eq, 1024, &bytes);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse bytes specification %s", assignment);
+                        }
+                }
+
+                r = sd_bus_message_append(m, "sv", field, "t", bytes);
+                goto finish;
+        } else if (streq(field, "TasksMax")) {
+                uint64_t t;
+
+                if (isempty(eq) || streq(eq, "infinity"))
+                        t = (uint64_t) -1;
+                else {
+                        r = parse_percent(eq);
+                        if (r >= 0) {
+                                r = sd_bus_message_append(m, "sv", "TasksMaxScale", "u", (uint32_t) (((uint64_t) UINT32_MAX * r) / 100U));
+                                goto finish;
+                        } else {
+                                r = safe_atou64(eq, &t);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse maximum tasks specification %s", assignment);
+                        }
+
+                }
+
+                r = sd_bus_message_append(m, "sv", "TasksMax", "t", t);
                 goto finish;
         }
 
@@ -154,11 +202,13 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 r = sd_bus_message_append(m, "sv", sn, "t", l.rlim_cur);
 
         } else if (STR_IN_SET(field,
-                       "CPUAccounting", "MemoryAccounting", "IOAccounting", "BlockIOAccounting", "TasksAccounting",
-                       "SendSIGHUP", "SendSIGKILL", "WakeSystem", "DefaultDependencies",
-                       "IgnoreSIGPIPE", "TTYVHangup", "TTYReset", "RemainAfterExit",
-                       "PrivateTmp", "PrivateDevices", "PrivateNetwork", "NoNewPrivileges",
-                       "SyslogLevelPrefix", "Delegate", "RemainAfterElapse", "MemoryDenyWriteExecute")) {
+                              "CPUAccounting", "MemoryAccounting", "IOAccounting", "BlockIOAccounting", "TasksAccounting",
+                              "SendSIGHUP", "SendSIGKILL", "WakeSystem", "DefaultDependencies",
+                              "IgnoreSIGPIPE", "TTYVHangup", "TTYReset", "RemainAfterExit",
+                              "PrivateTmp", "PrivateDevices", "PrivateNetwork", "PrivateUsers", "NoNewPrivileges",
+                              "SyslogLevelPrefix", "Delegate", "RemainAfterElapse", "MemoryDenyWriteExecute",
+                              "RestrictRealtime", "DynamicUser", "RemoveIPC", "ProtectKernelTunables",
+                              "ProtectKernelModules", "ProtectControlGroups", "MountAPIVFS")) {
 
                 r = parse_boolean(eq);
                 if (r < 0)
@@ -166,35 +216,16 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
 
                 r = sd_bus_message_append(m, "v", "b", r);
 
-        } else if (STR_IN_SET(field, "MemoryLow", "MemoryHigh", "MemoryMax", "MemoryLimit")) {
-                uint64_t bytes;
+        } else if (STR_IN_SET(field, "CPUWeight", "StartupCPUWeight")) {
+                uint64_t u;
 
-                if (isempty(eq) || streq(eq, "infinity"))
-                        bytes = CGROUP_LIMIT_MAX;
-                else {
-                        r = parse_size(eq, 1024, &bytes);
-                        if (r < 0) {
-                                log_error("Failed to parse bytes specification %s", assignment);
-                                return -EINVAL;
-                        }
+                r = cg_weight_parse(eq, &u);
+                if (r < 0) {
+                        log_error("Failed to parse %s value %s.", field, eq);
+                        return -EINVAL;
                 }
 
-                r = sd_bus_message_append(m, "v", "t", bytes);
-
-        } else if (streq(field, "TasksMax")) {
-                uint64_t n;
-
-                if (isempty(eq) || streq(eq, "infinity"))
-                        n = (uint64_t) -1;
-                else {
-                        r = safe_atou64(eq, &n);
-                        if (r < 0) {
-                                log_error("Failed to parse maximum tasks specification %s", assignment);
-                                return -EINVAL;
-                        }
-                }
-
-                r = sd_bus_message_append(m, "v", "t", n);
+                r = sd_bus_message_append(m, "v", "t", u);
 
         } else if (STR_IN_SET(field, "CPUShares", "StartupCPUShares")) {
                 uint64_t u;
@@ -235,7 +266,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                               "StandardInput", "StandardOutput", "StandardError",
                               "Description", "Slice", "Type", "WorkingDirectory",
                               "RootDirectory", "SyslogIdentifier", "ProtectSystem",
-                              "ProtectHome", "SELinuxContext"))
+                              "ProtectHome", "SELinuxContext", "Restart", "RootImage"))
                 r = sd_bus_message_append(m, "v", "s", eq);
 
         else if (streq(field, "SyslogLevel")) {
@@ -276,7 +307,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                                 rwm = "";
                         }
 
-                        if (!path_startswith(path, "/dev")) {
+                        if (!is_deviceallow_pattern(path)) {
                                 log_error("%s is not a device file in /dev.", path);
                                 return -EINVAL;
                         }
@@ -350,15 +381,13 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 }
 
         } else if (streq(field, "Nice")) {
-                int32_t i;
+                int n;
 
-                r = safe_atoi32(eq, &i);
-                if (r < 0) {
-                        log_error("Failed to parse %s value %s.", field, eq);
-                        return -EINVAL;
-                }
+                r = parse_nice(eq, &n);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to parse nice value: %s", eq);
 
-                r = sd_bus_message_append(m, "v", "i", i);
+                r = sd_bus_message_append(m, "v", "i", (int32_t) n);
 
         } else if (STR_IN_SET(field, "Environment", "PassEnvironment")) {
                 const char *p;
@@ -371,9 +400,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 if (r < 0)
                         return bus_log_create_error(r);
 
-                p = eq;
-
-                for (;;) {
+                for (p = eq;;) {
                         _cleanup_free_ char *word = NULL;
 
                         r = extract_first_word(&p, &word, NULL, EXTRACT_QUOTES|EXTRACT_CUNESCAPE);
@@ -443,7 +470,8 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 }
 
                 r = sd_bus_message_append(m, "v", "i", oa);
-        } else if (STR_IN_SET(field, "ReadWriteDirectories", "ReadOnlyDirectories", "InaccessibleDirectories")) {
+        } else if (STR_IN_SET(field, "ReadWriteDirectories", "ReadOnlyDirectories", "InaccessibleDirectories",
+                              "ReadWritePaths", "ReadOnlyPaths", "InaccessiblePaths")) {
                 const char *p;
 
                 r = sd_bus_message_open_container(m, 'v', "as");
@@ -454,11 +482,9 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 if (r < 0)
                         return bus_log_create_error(r);
 
-                p = eq;
-
-                for (;;) {
+                for (p = eq;;) {
                         _cleanup_free_ char *word = NULL;
-                        int offset;
+                        size_t offset;
 
                         r = extract_first_word(&p, &word, NULL, EXTRACT_QUOTES);
                         if (r < 0) {
@@ -474,6 +500,8 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                         }
 
                         offset = word[0] == '-';
+                        offset += word[offset] == '+';
+
                         if (!path_is_absolute(word + offset)) {
                                 log_error("Failed to parse %s value %s", field, eq);
                                 return -EINVAL;
@@ -503,9 +531,7 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
                 if (r < 0)
                         return bus_log_create_error(r);
 
-                p = eq;
-
-                for (;;) {
+                for (p = eq;;) {
                         _cleanup_free_ char *word = NULL;
 
                         r = extract_first_word(&p, &word, NULL, EXTRACT_QUOTES);
@@ -526,6 +552,110 @@ int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignmen
 
                 r = sd_bus_message_close_container(m);
 
+        } else if (streq(field, "RestrictNamespaces")) {
+                bool invert = false;
+                unsigned long flags = 0;
+
+                if (eq[0] == '~') {
+                        invert = true;
+                        eq++;
+                }
+
+                r = parse_boolean(eq);
+                if (r > 0)
+                        flags = 0;
+                else if (r == 0)
+                        flags = NAMESPACE_FLAGS_ALL;
+                else {
+                        r = namespace_flag_from_string_many(eq, &flags);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse %s value %s.", field, eq);
+                }
+
+                if (invert)
+                        flags = (~flags) & NAMESPACE_FLAGS_ALL;
+
+                r = sd_bus_message_append(m, "v", "t", (uint64_t) flags);
+        } else if ((dep = unit_dependency_from_string(field)) >= 0)
+                r = sd_bus_message_append(m, "v", "as", 1, eq);
+        else if (streq(field, "MountFlags")) {
+                unsigned long f;
+
+                r = mount_propagation_flags_from_string(eq, &f);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to parse mount propagation flags: %s", eq);
+
+                r = sd_bus_message_append(m, "v", "t", (uint64_t) f);
+        } else if (STR_IN_SET(field, "BindPaths", "BindReadOnlyPaths")) {
+                const char *p = eq;
+
+                r = sd_bus_message_open_container(m, 'v', "a(ssbt)");
+                if (r < 0)
+                        return r;
+
+                r = sd_bus_message_open_container(m, 'a', "(ssbt)");
+                if (r < 0)
+                        return r;
+
+                for (;;) {
+                        _cleanup_free_ char *source = NULL, *destination = NULL;
+                        char *s = NULL, *d = NULL;
+                        bool ignore_enoent = false;
+                        uint64_t flags = MS_REC;
+
+                        r = extract_first_word(&p, &source, ":" WHITESPACE, EXTRACT_QUOTES|EXTRACT_DONT_COALESCE_SEPARATORS);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse argument: %m");
+                        if (r == 0)
+                                break;
+
+                        s = source;
+                        if (s[0] == '-') {
+                                ignore_enoent = true;
+                                s++;
+                        }
+
+                        if (p && p[-1] == ':') {
+                                r = extract_first_word(&p, &destination, ":" WHITESPACE, EXTRACT_QUOTES|EXTRACT_DONT_COALESCE_SEPARATORS);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse argument: %m");
+                                if (r == 0) {
+                                        log_error("Missing argument after ':': %s", eq);
+                                        return -EINVAL;
+                                }
+
+                                d = destination;
+
+                                if (p && p[-1] == ':') {
+                                        _cleanup_free_ char *options = NULL;
+
+                                        r = extract_first_word(&p, &options, NULL, EXTRACT_QUOTES);
+                                        if (r < 0)
+                                                return log_error_errno(r, "Failed to parse argument: %m");
+
+                                        if (isempty(options) || streq(options, "rbind"))
+                                                flags = MS_REC;
+                                        else if (streq(options, "norbind"))
+                                                flags = 0;
+                                        else {
+                                                log_error("Unknown options: %s", eq);
+                                                return -EINVAL;
+                                        }
+                                }
+                        } else
+                                d = s;
+
+
+                        r = sd_bus_message_append(m, "(ssbt)", s, d, ignore_enoent, flags);
+                        if (r < 0)
+                                return r;
+                }
+
+                r = sd_bus_message_close_container(m);
+                if (r < 0)
+                        return r;
+
+                r = sd_bus_message_close_container(m);
         } else {
                 log_error("Unknown assignment %s.", assignment);
                 return -EINVAL;
@@ -538,6 +668,21 @@ finish:
         r = sd_bus_message_close_container(m);
         if (r < 0)
                 return bus_log_create_error(r);
+
+        return 0;
+}
+
+int bus_append_unit_property_assignment_many(sd_bus_message *m, char **l) {
+        char **i;
+        int r;
+
+        assert(m);
+
+        STRV_FOREACH(i, l) {
+                r = bus_append_unit_property_assignment(m, *i);
+                if (r < 0)
+                        return r;
+        }
 
         return 0;
 }
@@ -700,6 +845,7 @@ static const struct {
         const char *result, *explanation;
 } explanations [] = {
         { "resources",   "of unavailable resources or another system error" },
+        { "protocol",    "the service did not take the steps required by its unit configuration" },
         { "timeout",     "a timeout was exceeded" },
         { "exit-code",   "the control process exited with error code" },
         { "signal",      "a fatal signal was delivered to the control process" },
@@ -716,7 +862,7 @@ static void log_job_error_with_service_result(const char* service, const char *r
 
         service_shell_quoted = shell_maybe_quote(service);
 
-        if (extra_args && extra_args[1]) {
+        if (extra_args) {
                 _cleanup_free_ char *t;
 
                 t = strv_join((char**) extra_args, " ");
@@ -777,6 +923,8 @@ static int check_wait_response(BusWaitForJobs *d, bool quiet, const char* const*
                         log_error("Assertion failed on job for %s.", strna(d->name));
                 else if (streq(d->result, "unsupported"))
                         log_error("Operation on or unit type of %s not supported on this system.", strna(d->name));
+                else if (streq(d->result, "collected"))
+                        log_error("Queued job for %s was garbage collected.", strna(d->name));
                 else if (!streq(d->result, "done") && !streq(d->result, "skipped")) {
                         if (d->name) {
                                 int q;
@@ -792,7 +940,7 @@ static int check_wait_response(BusWaitForJobs *d, bool quiet, const char* const*
                 }
         }
 
-        if (streq(d->result, "canceled"))
+        if (STR_IN_SET(d->result, "canceled", "collected"))
                 r = -ECANCELED;
         else if (streq(d->result, "timeout"))
                 r = -ETIME;
@@ -1113,7 +1261,8 @@ static int dump_processes(
                 assert(n == cg->n_children);
                 qsort_safe(children, n, sizeof(struct CGroupInfo*), cgroup_info_compare_func);
 
-                n_columns = MAX(LESS_BY(n_columns, 2U), 20U);
+                if (n_columns != 0)
+                        n_columns = MAX(LESS_BY(n_columns, 2U), 20U);
 
                 for (i = 0; i < n; i++) {
                         _cleanup_free_ char *pp = NULL;

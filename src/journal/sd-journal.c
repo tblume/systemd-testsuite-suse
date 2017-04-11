@@ -35,7 +35,7 @@
 #include "dirent-util.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "hashmap.h"
 #include "hostname-util.h"
@@ -387,7 +387,7 @@ _public_ int sd_journal_add_disjunction(sd_journal *j) {
 }
 
 static char *match_make_string(Match *m) {
-        char *p, *r;
+        char *p = NULL, *r;
         Match *i;
         bool enclose = false;
 
@@ -397,18 +397,15 @@ static char *match_make_string(Match *m) {
         if (m->type == MATCH_DISCRETE)
                 return strndup(m->data, m->size);
 
-        p = NULL;
         LIST_FOREACH(matches, i, m->matches) {
                 char *t, *k;
 
                 t = match_make_string(i);
-                if (!t) {
-                        free(p);
-                        return NULL;
-                }
+                if (!t)
+                        return mfree(p);
 
                 if (p) {
-                        k = strjoin(p, m->type == MATCH_OR_TERM ? " OR " : " AND ", t, NULL);
+                        k = strjoin(p, m->type == MATCH_OR_TERM ? " OR " : " AND ", t);
                         free(p);
                         free(t);
 
@@ -423,7 +420,7 @@ static char *match_make_string(Match *m) {
         }
 
         if (enclose) {
-                r = strjoin("(", p, ")", NULL);
+                r = strjoin("(", p, ")");
                 free(p);
                 return r;
         }
@@ -1419,7 +1416,7 @@ static int add_directory(sd_journal *j, const char *prefix, const char *dirname)
          * and reenumerates directory contents */
 
         if (dirname)
-                path = strjoin(prefix, "/", dirname, NULL);
+                path = strjoin(prefix, "/", dirname);
         else
                 path = strdup(prefix);
         if (!path) {
@@ -1438,7 +1435,7 @@ static int add_directory(sd_journal *j, const char *prefix, const char *dirname)
         if (j->toplevel_fd < 0)
                 d = opendir(path);
         else
-                /* Open the specified directory relative to the the toplevel fd. Enforce that the path specified is
+                /* Open the specified directory relative to the toplevel fd. Enforce that the path specified is
                  * relative, by dropping the initial slash */
                 d = xopendirat(j->toplevel_fd, skip_slash(path), 0);
         if (!d) {
@@ -1664,6 +1661,9 @@ static int add_search_paths(sd_journal *j) {
         NULSTR_FOREACH(p, search_paths)
                 (void) add_root_directory(j, p, true);
 
+        if (!(j->flags & SD_JOURNAL_LOCAL_ONLY))
+                (void) add_root_directory(j, "/var/log/journal/remote", true);
+
         return 0;
 }
 
@@ -1719,9 +1719,16 @@ static sd_journal *journal_new(int flags, const char *path) {
         j->data_threshold = DEFAULT_DATA_THRESHOLD;
 
         if (path) {
-                j->path = strdup(path);
-                if (!j->path)
+                char *t;
+
+                t = strdup(path);
+                if (!t)
                         goto fail;
+
+                if (flags & SD_JOURNAL_OS_ROOT)
+                        j->prefix = t;
+                else
+                        j->path = t;
         }
 
         j->files = ordered_hashmap_new(&string_hash_ops);
@@ -1737,12 +1744,17 @@ fail:
         return NULL;
 }
 
+#define OPEN_ALLOWED_FLAGS                              \
+        (SD_JOURNAL_LOCAL_ONLY |                        \
+         SD_JOURNAL_RUNTIME_ONLY |                      \
+         SD_JOURNAL_SYSTEM | SD_JOURNAL_CURRENT_USER)
+
 _public_ int sd_journal_open(sd_journal **ret, int flags) {
         sd_journal *j;
         int r;
 
         assert_return(ret, -EINVAL);
-        assert_return((flags & ~(SD_JOURNAL_LOCAL_ONLY|SD_JOURNAL_RUNTIME_ONLY|SD_JOURNAL_SYSTEM|SD_JOURNAL_CURRENT_USER)) == 0, -EINVAL);
+        assert_return((flags & ~OPEN_ALLOWED_FLAGS) == 0, -EINVAL);
 
         j = journal_new(flags, NULL);
         if (!j)
@@ -1761,6 +1773,9 @@ fail:
         return r;
 }
 
+#define OPEN_CONTAINER_ALLOWED_FLAGS                    \
+        (SD_JOURNAL_LOCAL_ONLY | SD_JOURNAL_SYSTEM)
+
 _public_ int sd_journal_open_container(sd_journal **ret, const char *machine, int flags) {
         _cleanup_free_ char *root = NULL, *class = NULL;
         sd_journal *j;
@@ -1772,7 +1787,7 @@ _public_ int sd_journal_open_container(sd_journal **ret, const char *machine, in
 
         assert_return(machine, -EINVAL);
         assert_return(ret, -EINVAL);
-        assert_return((flags & ~(SD_JOURNAL_LOCAL_ONLY|SD_JOURNAL_SYSTEM)) == 0, -EINVAL);
+        assert_return((flags & ~OPEN_CONTAINER_ALLOWED_FLAGS) == 0, -EINVAL);
         assert_return(machine_name_is_valid(machine), -EINVAL);
 
         p = strjoina("/run/systemd/machines/", machine);
@@ -1787,12 +1802,9 @@ _public_ int sd_journal_open_container(sd_journal **ret, const char *machine, in
         if (!streq_ptr(class, "container"))
                 return -EIO;
 
-        j = journal_new(flags, NULL);
+        j = journal_new(flags, root);
         if (!j)
                 return -ENOMEM;
-
-        j->prefix = root;
-        root = NULL;
 
         r = add_search_paths(j);
         if (r < 0)
@@ -1806,13 +1818,17 @@ fail:
         return r;
 }
 
+#define OPEN_DIRECTORY_ALLOWED_FLAGS                    \
+        (SD_JOURNAL_OS_ROOT |                           \
+         SD_JOURNAL_SYSTEM | SD_JOURNAL_CURRENT_USER )
+
 _public_ int sd_journal_open_directory(sd_journal **ret, const char *path, int flags) {
         sd_journal *j;
         int r;
 
         assert_return(ret, -EINVAL);
         assert_return(path, -EINVAL);
-        assert_return((flags & ~SD_JOURNAL_OS_ROOT) == 0, -EINVAL);
+        assert_return((flags & ~OPEN_DIRECTORY_ALLOWED_FLAGS) == 0, -EINVAL);
 
         j = journal_new(flags, path);
         if (!j)
@@ -1861,6 +1877,10 @@ fail:
         return r;
 }
 
+#define OPEN_DIRECTORY_FD_ALLOWED_FLAGS         \
+        (SD_JOURNAL_OS_ROOT |                           \
+         SD_JOURNAL_SYSTEM | SD_JOURNAL_CURRENT_USER )
+
 _public_ int sd_journal_open_directory_fd(sd_journal **ret, int fd, int flags) {
         sd_journal *j;
         struct stat st;
@@ -1868,7 +1888,7 @@ _public_ int sd_journal_open_directory_fd(sd_journal **ret, int fd, int flags) {
 
         assert_return(ret, -EINVAL);
         assert_return(fd >= 0, -EBADF);
-        assert_return((flags & ~SD_JOURNAL_OS_ROOT) == 0, -EINVAL);
+        assert_return((flags & ~OPEN_DIRECTORY_FD_ALLOWED_FLAGS) == 0, -EINVAL);
 
         if (fstat(fd, &st) < 0)
                 return -errno;
@@ -2290,6 +2310,8 @@ _public_ int sd_journal_get_fd(sd_journal *j) {
          * inotify */
         if (j->no_new_files)
                 r = add_current_paths(j);
+        else if (j->flags & SD_JOURNAL_OS_ROOT)
+                r = add_search_paths(j);
         else if (j->toplevel_fd >= 0)
                 r = add_root_directory(j, NULL, false);
         else if (j->path)

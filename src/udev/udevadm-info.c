@@ -16,7 +16,6 @@
  */
 
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -26,6 +25,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "dirent-util.h"
 #include "fd-util.h"
 #include "string-util.h"
 #include "udev-util.h"
@@ -196,7 +196,7 @@ static void cleanup_dir(DIR *dir, mode_t mask, int depth) {
         if (depth <= 0)
                 return;
 
-        for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
+        FOREACH_DIRENT_ALL(dent, dir, break) {
                 struct stat stats;
 
                 if (dent->d_name[0] == '.')
@@ -433,17 +433,13 @@ static int uinfo(struct udev *udev, int argc, char *argv[]) {
                 case QUERY_PROPERTY:
                         list_entry = udev_device_get_properties_list_entry(device);
                         while (list_entry != NULL) {
-                                if (export) {
-                                        const char *prefix = export_prefix;
-
-                                        if (prefix == NULL)
-                                                prefix = "";
-                                        printf("%s%s='%s'\n", prefix,
+                                if (export)
+                                        printf("%s%s='%s'\n", strempty(export_prefix),
                                                udev_list_entry_get_name(list_entry),
                                                udev_list_entry_get_value(list_entry));
-                                } else {
+                                else
                                         printf("%s=%s\n", udev_list_entry_get_name(list_entry), udev_list_entry_get_value(list_entry));
-                                }
+
                                 list_entry = udev_list_entry_get_next(list_entry);
                         }
                         break;

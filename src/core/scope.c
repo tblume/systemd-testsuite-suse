@@ -147,6 +147,32 @@ static int scope_verify(Scope *s) {
         return 0;
 }
 
+static int scope_load_init_scope(Unit *u) {
+        assert(u);
+
+        if (!unit_has_name(u, SPECIAL_INIT_SCOPE))
+                return 0;
+
+        u->transient = true;
+        u->perpetual = true;
+
+        /* init.scope is a bit special, as it has to stick around forever. Because of its special semantics we
+         * synthesize it here, instead of relying on the unit file on disk. */
+
+        u->default_dependencies = false;
+        u->ignore_on_isolate = true;
+
+        SCOPE(u)->kill_context.kill_signal = SIGRTMIN+14;
+
+        /* Prettify things, if we can. */
+        if (!u->description)
+                u->description = strdup("System and Service Manager");
+        if (!u->documentation)
+                (void) strv_extend(&u->documentation, "man:systemd(1)");
+
+        return 1;
+}
+
 static int scope_load(Unit *u) {
         Scope *s = SCOPE(u);
         int r;
@@ -158,6 +184,9 @@ static int scope_load(Unit *u) {
                 /* Refuse to load non-transient scope units, but allow them while reloading. */
                 return -ENOENT;
 
+        r = scope_load_init_scope(u);
+        if (r < 0)
+                return r;
         r = unit_load_fragment_and_dropin_optional(u);
         if (r < 0)
                 return r;
@@ -221,7 +250,7 @@ static void scope_dump(Unit *u, FILE *f, const char *prefix) {
 static void scope_enter_dead(Scope *s, ScopeResult f) {
         assert(s);
 
-        if (f != SCOPE_SUCCESS)
+        if (s->result == SCOPE_SUCCESS)
                 s->result = f;
 
         scope_set_state(s, s->result != SCOPE_SUCCESS ? SCOPE_FAILED : SCOPE_DEAD);
@@ -233,27 +262,30 @@ static void scope_enter_signal(Scope *s, ScopeState state, ScopeResult f) {
 
         assert(s);
 
-        if (f != SCOPE_SUCCESS)
+        if (s->result == SCOPE_SUCCESS)
                 s->result = f;
 
         unit_watch_all_pids(UNIT(s));
 
         /* If we have a controller set let's ask the controller nicely
          * to terminate the scope, instead of us going directly into
-         * SIGTERM beserk mode */
+         * SIGTERM berserk mode */
         if (state == SCOPE_STOP_SIGTERM)
                 skip_signal = bus_scope_send_request_stop(s) > 0;
 
-        if (!skip_signal) {
+        if (skip_signal)
+                r = 1; /* wait */
+        else {
                 r = unit_kill_context(
                                 UNIT(s),
                                 &s->kill_context,
-                                state != SCOPE_STOP_SIGTERM ? KILL_KILL : KILL_TERMINATE,
+                                state != SCOPE_STOP_SIGTERM ? KILL_KILL :
+                                s->was_abandoned            ? KILL_TERMINATE_AND_LOG :
+                                                              KILL_TERMINATE,
                                 -1, -1, false);
                 if (r < 0)
                         goto fail;
-        } else
-                r = 1;
+        }
 
         if (r > 0) {
                 r = scope_arm_timer(s, usec_add(now(CLOCK_MONOTONIC), s->timeout_stop_usec));
@@ -295,6 +327,10 @@ static int scope_start(Unit *u) {
 
         if (!u->transient && !MANAGER_IS_RELOADING(u->manager))
                 return -ENOENT;
+
+        r = unit_acquire_invocation_id(u);
+        if (r < 0)
+                return r;
 
         (void) unit_realize_cgroup(u);
         (void) unit_reset_cpu_usage(u);
@@ -369,6 +405,7 @@ static int scope_serialize(Unit *u, FILE *f, FDSet *fds) {
         assert(fds);
 
         unit_serialize_item(u, f, "state", scope_state_to_string(s->state));
+        unit_serialize_item(u, f, "was-abandoned", yes_no(s->was_abandoned));
         return 0;
 }
 
@@ -389,6 +426,14 @@ static int scope_deserialize_item(Unit *u, const char *key, const char *value, F
                 else
                         s->deserialized_state = state;
 
+        } else if (streq(key, "was-abandoned")) {
+                int k;
+
+                k = parse_boolean(value);
+                if (k < 0)
+                        log_unit_debug(u, "Failed to parse boolean value: %s", value);
+                else
+                        s->was_abandoned = k;
         } else
                 log_unit_debug(u, "Unknown serialization key: %s", key);
 
@@ -428,8 +473,9 @@ static void scope_sigchld_event(Unit *u, pid_t pid, int code, int status) {
         unit_tidy_watch_pids(u, 0, 0);
         unit_watch_all_pids(u);
 
-        /* If the PID set is empty now, then let's finish this off */
-        if (set_isempty(u->pids))
+        /* If the PID set is empty now, then let's finish this off
+           (On unified we use proper notifications) */
+        if (cg_unified_controller(SYSTEMD_CGROUP_CONTROLLER) == 0 && set_isempty(u->pids))
                 scope_notify_cgroup_empty_event(u);
 }
 
@@ -473,6 +519,7 @@ int scope_abandon(Scope *s) {
         if (!IN_SET(s->state, SCOPE_RUNNING, SCOPE_ABANDONED))
                 return -ESTALE;
 
+        s->was_abandoned = true;
         s->controller = mfree(s->controller);
 
         /* The client is no longer watching the remaining processes,
@@ -517,34 +564,16 @@ static void scope_enumerate(Manager *m) {
 
         u = manager_get_unit(m, SPECIAL_INIT_SCOPE);
         if (!u) {
-                u = unit_new(m, sizeof(Scope));
-                if (!u) {
-                        log_oom();
-                        return;
-                }
-
-                r = unit_add_name(u, SPECIAL_INIT_SCOPE);
+                r = unit_new_for_name(m, sizeof(Scope), SPECIAL_INIT_SCOPE, &u);
                 if (r < 0)  {
-                        unit_free(u);
-                        log_error_errno(r, "Failed to add init.scope name");
+                        log_error_errno(r, "Failed to allocate the special " SPECIAL_INIT_SCOPE " unit: %m");
                         return;
                 }
         }
 
         u->transient = true;
-        u->default_dependencies = false;
-        u->no_gc = true;
-        u->ignore_on_isolate = true;
-        u->refuse_manual_start = true;
-        u->refuse_manual_stop = true;
+        u->perpetual = true;
         SCOPE(u)->deserialized_state = SCOPE_RUNNING;
-        SCOPE(u)->kill_context.kill_signal = SIGRTMIN+14;
-
-        /* Prettify things, if we can. */
-        if (!u->description)
-                u->description = strdup("System and Service Manager");
-        if (!u->documentation)
-                (void) strv_extend(&u->documentation, "man:systemd(1)");
 
         unit_add_to_load_queue(u);
         unit_add_to_dbus_queue(u);

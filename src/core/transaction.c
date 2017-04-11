@@ -373,7 +373,7 @@ static int transaction_verify_order_one(Transaction *tr, Job *j, Job *from, unsi
                 delete = NULL;
                 for (k = from; k; k = ((k->generation == generation && k->marker != k) ? k->marker : NULL)) {
 
-                        /* logging for j not k here here to provide consistent narrative */
+                        /* logging for j not k here to provide consistent narrative */
                         log_unit_warning(j->unit,
                                          "Found dependency on %s/%s",
                                          k->unit->id, job_type_to_string(k->type));
@@ -392,7 +392,7 @@ static int transaction_verify_order_one(Transaction *tr, Job *j, Job *from, unsi
 
                 if (delete) {
                         const char *status;
-                        /* logging for j not k here here to provide consistent narrative */
+                        /* logging for j not k here to provide consistent narrative */
                         log_unit_warning(j->unit,
                                          "Breaking ordering cycle by deleting job %s/%s",
                                          delete->unit->id, job_type_to_string(delete->type));
@@ -590,6 +590,9 @@ static int transaction_apply(Transaction *tr, Manager *m, JobMode mode) {
                  * aren't part of the new transaction */
                 HASHMAP_FOREACH(j, m->jobs, i) {
                         assert(j->installed);
+
+                        if (j->unit->ignore_on_isolate)
+                                continue;
 
                         if (hashmap_get(tr->jobs, j->unit))
                                 continue;
@@ -904,7 +907,10 @@ int transaction_add_job_and_dependencies(
                         SET_FOREACH(dep, following, i) {
                                 r = transaction_add_job_and_dependencies(tr, type, dep, ret, false, false, false, ignore_order, e);
                                 if (r < 0) {
-                                        log_unit_warning(dep, "Cannot add dependency job for, ignoring: %s", bus_error_message(e, r));
+                                        log_unit_full(dep,
+                                                      r == -ERFKILL ? LOG_INFO : LOG_WARNING,
+                                                      r, "Cannot add dependency job, ignoring: %s",
+                                                      bus_error_message(e, r));
                                         sd_bus_error_free(e);
                                 }
                         }
@@ -1082,10 +1088,8 @@ Transaction *transaction_new(bool irreversible) {
                 return NULL;
 
         tr->jobs = hashmap_new(NULL);
-        if (!tr->jobs) {
-                free(tr);
-                return NULL;
-        }
+        if (!tr->jobs)
+                return mfree(tr);
 
         tr->irreversible = irreversible;
 

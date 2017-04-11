@@ -36,7 +36,8 @@ _systemd_run() {
                 -r --remain-after-exit --send-sighup -H --host -M --machine --service-type
                 --on-active --on-boot --on-startup --on-unit-active --on-unit-inactive
                 --on-calendar --timer-property -t --pty -q --quiet --no-block
-                --uid --gid --nice --setenv -p --property --no-ask-password'
+                --uid --gid --nice --setenv -p --property --no-ask-password
+                --wait'
 
     local mode=--system
     local i
@@ -84,8 +85,8 @@ _systemd_run() {
                          LimitNICE= LimitRTPRIO= LimitRTTIME= PrivateTmp= PrivateDevices=
                          PrivateNetwork= NoNewPrivileges= WorkingDirectory= RootDirectory=
                          TTYPath= SyslogIdentifier= SyslogLevelPrefix= SyslogLevel=
-                         SyslogFacility= TimerSlackNSec= OOMScoreAdjust= ReadWriteDirectories=
-                         ReadOnlyDirectories= InaccessibleDirectories= EnvironmentFile=
+                         SyslogFacility= TimerSlackNSec= OOMScoreAdjust= ReadWritePaths=
+                         ReadOnlyPaths= InaccessiblePaths= EnvironmentFile=
                          ProtectSystem= ProtectHome= RuntimeDirectory= PassEnvironment='
 
             COMPREPLY=( $(compgen -W '$comps' -- "$cur") )

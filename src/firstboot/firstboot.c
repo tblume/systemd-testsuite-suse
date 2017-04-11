@@ -33,6 +33,7 @@
 #include "mkdir.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "proc-cmdline.h"
 #include "random-util.h"
 #include "string-util.h"
 #include "strv.h"
@@ -251,7 +252,7 @@ static int process_locale(void) {
         if (arg_copy_locale && arg_root) {
 
                 mkdir_parents(etc_localeconf, 0755);
-                r = copy_file("/etc/locale.conf", etc_localeconf, 0, 0644, 0);
+                r = copy_file("/etc/locale.conf", etc_localeconf, 0, 0644, 0, COPY_REFLINK);
                 if (r != -ENOENT) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to copy %s: %m", etc_localeconf);
@@ -427,7 +428,7 @@ static int process_machine_id(void) {
         if (laccess(etc_machine_id, F_OK) >= 0)
                 return 0;
 
-        if (sd_id128_equal(arg_machine_id, SD_ID128_NULL))
+        if (sd_id128_is_null(arg_machine_id))
                 return 0;
 
         mkdir_parents(etc_machine_id, 0755);
@@ -825,6 +826,7 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
+        bool enabled;
         int r;
 
         r = parse_argv(argc, argv);
@@ -836,6 +838,16 @@ int main(int argc, char *argv[]) {
         log_open();
 
         umask(0022);
+
+        r = proc_cmdline_get_bool("systemd.firstboot", &enabled);
+        if (r < 0) {
+                log_error_errno(r, "Failed to parse systemd.firstboot= kernel command line argument, ignoring.");
+                goto finish;
+        }
+        if (r > 0 && !enabled) {
+                r = 0; /* disabled */
+                goto finish;
+        }
 
         r = process_locale();
         if (r < 0)

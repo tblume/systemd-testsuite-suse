@@ -27,6 +27,10 @@
 
 #define NSS_SIGNALS_BLOCK SIGALRM,SIGVTALRM,SIGPIPE,SIGCHLD,SIGTSTP,SIGIO,SIGHUP,SIGUSR1,SIGUSR2,SIGPROF,SIGURG,SIGWINCH
 
+#ifndef DEPRECATED_RES_USE_INET6
+#  define DEPRECATED_RES_USE_INET6 0x00002000
+#endif
+
 #define NSS_GETHOSTBYNAME_PROTOTYPES(module)            \
 enum nss_status _nss_##module##_gethostbyname4_r(       \
                 const char *name,                       \
@@ -92,7 +96,7 @@ enum nss_status _nss_##module##_gethostbyname_r(        \
                 int *errnop, int *h_errnop) {           \
         enum nss_status ret = NSS_STATUS_NOTFOUND;      \
                                                         \
-        if (_res.options & RES_USE_INET6)               \
+        if (_res.options & DEPRECATED_RES_USE_INET6)    \
                 ret = _nss_##module##_gethostbyname3_r( \
                         name,                           \
                         AF_INET6,                       \
@@ -137,7 +141,7 @@ enum nss_status _nss_##module##_getpwnam_r(             \
                 struct passwd *pwd,                     \
                 char *buffer, size_t buflen,            \
                 int *errnop) _public_;                  \
-enum nss_status _nss_mymachines_getpwuid_r(             \
+enum nss_status _nss_##module##_getpwuid_r(             \
                 uid_t uid,                              \
                 struct passwd *pwd,                     \
                 char *buffer, size_t buflen,            \

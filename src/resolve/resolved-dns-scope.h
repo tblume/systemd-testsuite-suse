@@ -26,7 +26,10 @@ typedef struct DnsScope DnsScope;
 #include "resolved-dns-cache.h"
 #include "resolved-dns-dnssec.h"
 #include "resolved-dns-packet.h"
+#include "resolved-dns-query.h"
+#include "resolved-dns-search-domain.h"
 #include "resolved-dns-server.h"
+#include "resolved-dns-stream.h"
 #include "resolved-dns-zone.h"
 #include "resolved-link.h"
 
@@ -52,6 +55,9 @@ struct DnsScope {
 
         OrderedHashmap *conflict_queue;
         sd_event_source *conflict_event_source;
+
+        bool announced:1;
+        sd_event_source *announce_event_source;
 
         RateLimit ratelimit;
 
@@ -93,6 +99,7 @@ void dns_scope_next_dns_server(DnsScope *s);
 int dns_scope_llmnr_membership(DnsScope *s, bool b);
 int dns_scope_mdns_membership(DnsScope *s, bool b);
 
+int dns_scope_make_reply_packet(DnsScope *s, uint16_t id, int rcode, DnsQuestion *q, DnsAnswer *answer, DnsAnswer *soa, bool tentative, DnsPacket **ret);
 void dns_scope_process_query(DnsScope *s, DnsStream *stream, DnsPacket *p);
 
 DnsTransaction *dns_scope_find_transaction(DnsScope *scope, DnsResourceKey *key, bool cache_ok);
@@ -107,3 +114,7 @@ DnsSearchDomain *dns_scope_get_search_domains(DnsScope *s);
 bool dns_scope_name_needs_search_domain(DnsScope *s, const char *name);
 
 bool dns_scope_network_good(DnsScope *s);
+
+int dns_scope_ifindex(DnsScope *s);
+
+int dns_scope_announce(DnsScope *scope, bool goodbye);

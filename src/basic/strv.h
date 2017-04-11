@@ -69,8 +69,10 @@ bool strv_equal(char **a, char **b);
 char **strv_new(const char *x, ...) _sentinel_;
 char **strv_new_ap(const char *x, va_list ap);
 
+#define STRV_IGNORE ((const char *) -1)
+
 static inline const char* STRV_IFNOTNULL(const char *x) {
-        return x ? x : (const char *) -1;
+        return x ? x : STRV_IGNORE;
 }
 
 static inline bool strv_isempty(char * const *l) {
@@ -94,10 +96,13 @@ bool strv_overlap(char **a, char **b) _pure_;
 #define STRV_FOREACH(s, l)                      \
         for ((s) = (l); (s) && *(s); (s)++)
 
-#define STRV_FOREACH_BACKWARDS(s, l)            \
-        STRV_FOREACH(s, l)                      \
-                ;                               \
-        for ((s)--; (l) && ((s) >= (l)); (s)--)
+#define STRV_FOREACH_BACKWARDS(s, l)                                \
+        for (s = ({                                                 \
+                        char **_l = l;                              \
+                        _l ? _l + strv_length(_l) - 1U : NULL;      \
+                        });                                         \
+             (l) && ((s) >= (l));                                   \
+             (s)--)
 
 #define STRV_FOREACH_PAIR(x, y, l)               \
         for ((x) = (l), (y) = (x+1); (x) && *(x) && *(y); (x) += 2, (y) = (x + 1))
@@ -139,6 +144,11 @@ void strv_print(char **l);
         })
 
 #define STR_IN_SET(x, ...) strv_contains(STRV_MAKE(__VA_ARGS__), x)
+#define STRPTR_IN_SET(x, ...)                                    \
+        ({                                                       \
+                const char* _x = (x);                            \
+                _x && strv_contains(STRV_MAKE(__VA_ARGS__), _x); \
+        })
 
 #define FOREACH_STRING(x, ...)                               \
         for (char **_l = ({                                  \

@@ -235,9 +235,7 @@ CurlGlue *curl_glue_unref(CurlGlue *g) {
 
         sd_event_source_unref(g->timer);
         sd_event_unref(g->event);
-        free(g);
-
-        return NULL;
+        return mfree(g);
 }
 
 int curl_glue_new(CurlGlue **glue, sd_event *event) {
@@ -402,7 +400,7 @@ int curl_header_strdup(const void *contents, size_t sz, const char *field, char 
                 sz--;
         }
 
-        /* Truncate trailing whitespace*/
+        /* Truncate trailing whitespace */
         while (sz > 0 && strchr(WHITESPACE, p[sz-1]))
                 sz--;
 

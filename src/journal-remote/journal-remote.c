@@ -27,10 +27,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#ifdef HAVE_GNUTLS
-#include <gnutls/gnutls.h>
-#endif
-
 #include "sd-daemon.h"
 
 #include "alloc-util.h"
@@ -130,6 +126,10 @@ static int spawn_child(const char* child, char** argv) {
         r = close(fd[1]);
         if (r < 0)
                 log_warning_errno(errno, "Failed to close write end of pipe: %m");
+
+        r = fd_nonblock(fd[0], true);
+        if (r < 0)
+                log_warning_errno(errno, "Failed to set child pipe to non-blocking: %m");
 
         return fd[0];
 }
@@ -512,7 +512,8 @@ static int process_http_upload(
         if (*upload_data_size) {
                 log_trace("Received %zu bytes", *upload_data_size);
 
-                r = push_data(source, upload_data, *upload_data_size);
+                r = journal_importer_push_data(&source->importer,
+                                               upload_data, *upload_data_size);
                 if (r < 0)
                         return mhd_respond_oom(connection);
 
@@ -528,13 +529,12 @@ static int process_http_upload(
                         log_warning("Failed to process data for connection %p", connection);
                         if (r == -E2BIG)
                                 return mhd_respondf(connection,
-                                                    MHD_HTTP_REQUEST_ENTITY_TOO_LARGE,
-                                                    "Entry is too large, maximum is %u bytes.\n",
-                                                    DATA_SIZE_MAX);
+                                                    r, MHD_HTTP_REQUEST_ENTITY_TOO_LARGE,
+                                                    "Entry is too large, maximum is " STRINGIFY(DATA_SIZE_MAX) " bytes.");
                         else
                                 return mhd_respondf(connection,
-                                                    MHD_HTTP_UNPROCESSABLE_ENTITY,
-                                                    "Processing failed: %s.", strerror(-r));
+                                                    r, MHD_HTTP_UNPROCESSABLE_ENTITY,
+                                                    "Processing failed: %m.");
                 }
         }
 
@@ -543,15 +543,16 @@ static int process_http_upload(
 
         /* The upload is finished */
 
-        remaining = source_non_empty(source);
+        remaining = journal_importer_bytes_remaining(&source->importer);
         if (remaining > 0) {
-                log_warning("Premature EOFbyte. %zu bytes lost.", remaining);
-                return mhd_respondf(connection, MHD_HTTP_EXPECTATION_FAILED,
+                log_warning("Premature EOF byte. %zu bytes lost.", remaining);
+                return mhd_respondf(connection,
+                                    0, MHD_HTTP_EXPECTATION_FAILED,
                                     "Premature EOF. %zu bytes of trailing data not processed.",
                                     remaining);
         }
 
-        return mhd_respond(connection, MHD_HTTP_ACCEPTED, "OK.\n");
+        return mhd_respond(connection, MHD_HTTP_ACCEPTED, "OK.");
 };
 
 static int request_handler(
@@ -581,19 +582,16 @@ static int request_handler(
                                            *connection_cls);
 
         if (!streq(method, "POST"))
-                return mhd_respond(connection, MHD_HTTP_NOT_ACCEPTABLE,
-                                   "Unsupported method.\n");
+                return mhd_respond(connection, MHD_HTTP_NOT_ACCEPTABLE, "Unsupported method.");
 
         if (!streq(url, "/upload"))
-                return mhd_respond(connection, MHD_HTTP_NOT_FOUND,
-                                   "Not found.\n");
+                return mhd_respond(connection, MHD_HTTP_NOT_FOUND, "Not found.");
 
         header = MHD_lookup_connection_value(connection,
                                              MHD_HEADER_KIND, "Content-Type");
         if (!header || !streq(header, "application/vnd.fdo.journal"))
                 return mhd_respond(connection, MHD_HTTP_UNSUPPORTED_MEDIA_TYPE,
-                                   "Content-Type: application/vnd.fdo.journal"
-                                   " is required.\n");
+                                   "Content-Type: application/vnd.fdo.journal is required.");
 
         {
                 const union MHD_ConnectionInfo *ci;
@@ -603,7 +601,7 @@ static int request_handler(
                 if (!ci) {
                         log_error("MHD_get_connection_info failed: cannot get remote fd");
                         return mhd_respond(connection, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                                           "Cannot check remote address");
+                                           "Cannot check remote address.");
                 }
 
                 fd = ci->connect_fd;
@@ -618,7 +616,7 @@ static int request_handler(
                 r = getpeername_pretty(fd, false, &hostname);
                 if (r < 0)
                         return mhd_respond(connection, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                                           "Cannot check remote hostname");
+                                           "Cannot check remote hostname.");
         }
 
         assert(hostname);
@@ -627,8 +625,7 @@ static int request_handler(
         if (r == -ENOMEM)
                 return respond_oom(connection);
         else if (r < 0)
-                return mhd_respond(connection, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                                   strerror(-r));
+                return mhd_respondf(connection, r, MHD_HTTP_INTERNAL_SERVER_ERROR, "%m");
 
         hostname = NULL;
         return MHD_YES;
@@ -652,9 +649,9 @@ static int setup_microhttpd_server(RemoteServer *s,
         int flags =
                 MHD_USE_DEBUG |
                 MHD_USE_DUAL_STACK |
-                MHD_USE_EPOLL_LINUX_ONLY |
+                MHD_USE_EPOLL |
                 MHD_USE_PEDANTIC_CHECKS |
-                MHD_USE_PIPE_FOR_SHUTDOWN;
+                MHD_USE_ITC;
 
         const union MHD_DaemonInfo *info;
         int r, epoll_fd;
@@ -1040,19 +1037,19 @@ static int handle_raw_source(sd_event_source *event,
 
         assert(fd >= 0 && fd < (ssize_t) s->sources_size);
         source = s->sources[fd];
-        assert(source->fd == fd);
+        assert(source->importer.fd == fd);
 
         r = process_source(source, arg_compress, arg_seal);
-        if (source->state == STATE_EOF) {
+        if (journal_importer_eof(&source->importer)) {
                 size_t remaining;
 
-                log_debug("EOF reached with source fd:%d (%s)",
-                          source->fd, source->name);
+                log_debug("EOF reached with source %s (fd=%d)",
+                          source->importer.name, source->importer.fd);
 
-                remaining = source_non_empty(source);
+                remaining = journal_importer_bytes_remaining(&source->importer);
                 if (remaining > 0)
                         log_notice("Premature EOF. %zu bytes lost.", remaining);
-                remove_source(s, source->fd);
+                remove_source(s, source->importer.fd);
                 log_debug("%zu active sources remaining", s->active);
                 return 0;
         } else if (r == -E2BIG) {
@@ -1076,7 +1073,7 @@ static int dispatch_raw_source_until_block(sd_event_source *event,
         /* Make sure event stays around even if source is destroyed */
         sd_event_source_ref(event);
 
-        r = handle_raw_source(event, source->fd, EPOLLIN, server);
+        r = handle_raw_source(event, source->importer.fd, EPOLLIN, server);
         if (r != 1)
                 /* No more data for now */
                 sd_event_source_set_enabled(event, SD_EVENT_OFF);
@@ -1109,7 +1106,7 @@ static int dispatch_blocking_source_event(sd_event_source *event,
                                           void *userdata) {
         RemoteSource *source = userdata;
 
-        return handle_raw_source(event, source->fd, EPOLLIN, server);
+        return handle_raw_source(event, source->importer.fd, EPOLLIN, server);
 }
 
 static int accept_connection(const char* type, int fd,
@@ -1202,7 +1199,7 @@ static int parse_config(void) {
                 { "Remote",  "TrustedCertificateFile", config_parse_path,             0, &arg_trust      },
                 {}};
 
-        return config_parse_many(PKGSYSCONFDIR "/journal-remote.conf",
+        return config_parse_many_nulstr(PKGSYSCONFDIR "/journal-remote.conf",
                                  CONF_PATHS_NULSTR("systemd/journal-remote.conf.d"),
                                  "Remote\0", config_item_table_lookup, items,
                                  false, NULL);
@@ -1564,7 +1561,7 @@ int main(int argc, char **argv) {
         if (r < 0)
                 log_error_errno(r, "Failed to enable watchdog: %m");
         else
-                log_debug("Watchdog is %s.", r > 0 ? "enabled" : "disabled");
+                log_debug("Watchdog is %sd.", enable_disable(r > 0));
 
         log_debug("%s running as pid "PID_FMT,
                   program_invocation_short_name, getpid());

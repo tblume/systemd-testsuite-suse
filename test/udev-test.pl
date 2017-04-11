@@ -37,7 +37,7 @@ my $EXIT_TEST_SKIP      = 77;
 
 my $rules_10k_tags      = "";
 for (my $i = 1; $i <= 10000; ++$i) {
-    $rules_10k_tags .= 'KERNEL=="sda", TAG+="test' . $i . "\"\n";
+        $rules_10k_tags .= 'KERNEL=="sda", TAG+="test' . $i . "\"\n";
 }
 
 my @tests = (
@@ -738,6 +738,86 @@ EOF
                 not_exp_name        => " ",
                 rules           => <<EOF
 KERNEL=="ttyACM[0-9]*", SYMLINK="  one     two        "
+EOF
+        },
+        {
+                desc            => "symlink with spaces in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="one two three"
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with leading space in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one two three"
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with trailing space in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="one two three   "
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with lots of space in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one two three   "
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with multiple spaces in substituted variable",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one  two  three   "
+SYMLINK="name-\$env{WITH_WS}-end"
+EOF
+        },
+        {
+                desc            => "symlink with space and var with space, part 1",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "first",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one  two  three   "
+SYMLINK="  first  name-\$env{WITH_WS}-end another_symlink a b c "
+EOF
+        },
+        {
+                desc            => "symlink with space and var with space, part 2",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "name-one_two_three-end",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one  two  three   "
+SYMLINK="  first  name-\$env{WITH_WS}-end another_symlink a b c "
+EOF
+        },
+        {
+                desc            => "symlink with space and var with space, part 3",
+                devpath         => "/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0/tty/ttyACM0",
+                exp_name        => "another_symlink",
+                not_exp_name    => " ",
+                rules           => <<EOF
+ENV{WITH_WS}="   one  two  three   "
+SYMLINK="  first  name-\$env{WITH_WS}-end another_symlink a b c "
 EOF
         },
         {
@@ -1535,11 +1615,18 @@ if (!($<==0)) {
         exit($EXIT_TEST_SKIP);
 }
 
+# skip the test when running in a chroot
+system("systemd-detect-virt", "-r", "-q");
+if ($? >> 8 == 0) {
+        print "Running in a chroot, skipping the test.\n";
+        exit($EXIT_TEST_SKIP);
+}
+
 # skip the test when running in a container
 system("systemd-detect-virt", "-c", "-q");
 if ($? >> 8 == 0) {
-    print "Running in a container, skipping the test.\n";
-    exit($EXIT_TEST_SKIP);
+        print "Running in a container, skipping the test.\n";
+        exit($EXIT_TEST_SKIP);
 }
 
 udev_setup();
@@ -1589,6 +1676,6 @@ system("umount", "$udev_tmpfs");
 rmdir($udev_tmpfs);
 
 if ($error > 0) {
-    exit(1);
+        exit(1);
 }
 exit(0);

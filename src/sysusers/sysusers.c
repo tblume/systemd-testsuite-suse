@@ -30,7 +30,7 @@
 #include "def.h"
 #include "fd-util.h"
 #include "fileio-label.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "hashmap.h"
 #include "path-util.h"
 #include "selinux-util.h"
@@ -190,7 +190,8 @@ static int load_group_database(void) {
 static int make_backup(const char *target, const char *x) {
         _cleanup_close_ int src = -1;
         _cleanup_fclose_ FILE *dst = NULL;
-        char *backup, *temp;
+        _cleanup_free_ char *temp = NULL;
+        char *backup;
         struct timespec ts[2];
         struct stat st;
         int r;
@@ -210,7 +211,7 @@ static int make_backup(const char *target, const char *x) {
         if (r < 0)
                 return r;
 
-        r = copy_bytes(src, fileno(dst), (uint64_t) -1, true);
+        r = copy_bytes(src, fileno(dst), (uint64_t) -1, COPY_REFLINK);
         if (r < 0)
                 goto fail;
 
@@ -1189,6 +1190,7 @@ static void item_free(Item *i) {
         free(i->uid_path);
         free(i->gid_path);
         free(i->description);
+        free(i->home);
         free(i);
 }
 
@@ -1299,81 +1301,6 @@ static bool item_equal(Item *a, Item *b) {
         return true;
 }
 
-static bool valid_user_group_name(const char *u) {
-        const char *i;
-        long sz;
-
-        if (isempty(u))
-                return false;
-
-        if (!(u[0] >= 'a' && u[0] <= 'z') &&
-            !(u[0] >= 'A' && u[0] <= 'Z') &&
-            u[0] != '_')
-                return false;
-
-        for (i = u+1; *i; i++) {
-                if (!(*i >= 'a' && *i <= 'z') &&
-                    !(*i >= 'A' && *i <= 'Z') &&
-                    !(*i >= '0' && *i <= '9') &&
-                    *i != '_' &&
-                    *i != '-')
-                        return false;
-        }
-
-        sz = sysconf(_SC_LOGIN_NAME_MAX);
-        assert_se(sz > 0);
-
-        if ((size_t) (i-u) > (size_t) sz)
-                return false;
-
-        if ((size_t) (i-u) > UT_NAMESIZE - 1)
-                return false;
-
-        return true;
-}
-
-static bool valid_gecos(const char *d) {
-
-        if (!d)
-                return false;
-
-        if (!utf8_is_valid(d))
-                return false;
-
-        if (string_has_cc(d, NULL))
-                return false;
-
-        /* Colons are used as field separators, and hence not OK */
-        if (strchr(d, ':'))
-                return false;
-
-        return true;
-}
-
-static bool valid_home(const char *p) {
-
-        if (isempty(p))
-                return false;
-
-        if (!utf8_is_valid(p))
-                return false;
-
-        if (string_has_cc(p, NULL))
-                return false;
-
-        if (!path_is_absolute(p))
-                return false;
-
-        if (!path_is_safe(p))
-                return false;
-
-        /* Colons are used as field separators, and hence not OK */
-        if (strchr(p, ':'))
-                return false;
-
-        return true;
-}
-
 static int parse_line(const char *fname, unsigned line, const char *buffer) {
 
         static const Specifier specifier_table[] = {
@@ -1418,7 +1345,7 @@ static int parse_line(const char *fname, unsigned line, const char *buffer) {
         }
 
         if (!IN_SET(action[0], ADD_USER, ADD_GROUP, ADD_MEMBER, ADD_RANGE)) {
-                log_error("[%s:%u] Unknown command command type '%c'.", fname, line, action[0]);
+                log_error("[%s:%u] Unknown command type '%c'.", fname, line, action[0]);
                 return -EBADMSG;
         }
 

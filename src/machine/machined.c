@@ -29,7 +29,7 @@
 #include "cgroup-util.h"
 #include "dirent-util.h"
 #include "fd-util.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "hostname-util.h"
 #include "label.h"
 #include "machine-image.h"
@@ -303,7 +303,7 @@ void manager_gc(Manager *m, bool drop_not_started) {
                     machine_get_state(machine) != MACHINE_CLOSING)
                         machine_stop(machine);
 
-                /* Now, the stop stop probably made this referenced
+                /* Now, the stop probably made this referenced
                  * again, but if it didn't, then it's time to let it
                  * go entirely. */
                 if (!machine_check_gc(machine, drop_not_started)) {

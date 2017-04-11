@@ -70,6 +70,10 @@ static inline const char *empty_to_null(const char *p) {
         return isempty(p) ? NULL : p;
 }
 
+static inline const char *strdash_if_empty(const char *str) {
+        return isempty(str) ? "-" : str;
+}
+
 static inline char *startswith(const char *s, const char *prefix) {
         size_t l;
 
@@ -103,16 +107,14 @@ const char* split(const char **state, size_t *l, const char *separator, bool quo
 #define FOREACH_WORD_SEPARATOR(word, length, s, separator, state)       \
         _FOREACH_WORD(word, length, s, separator, false, state)
 
-#define FOREACH_WORD_QUOTED(word, length, s, state)                     \
-        _FOREACH_WORD(word, length, s, WHITESPACE, true, state)
-
 #define _FOREACH_WORD(word, length, s, separator, quoted, state)        \
         for ((state) = (s), (word) = split(&(state), &(length), (separator), (quoted)); (word); (word) = split(&(state), &(length), (separator), (quoted)))
 
 char *strappend(const char *s, const char *suffix);
 char *strnappend(const char *s, const char *suffix, size_t length);
 
-char *strjoin(const char *x, ...) _sentinel_;
+char *strjoin_real(const char *x, ...) _sentinel_;
+#define strjoin(a, ...) strjoin_real((a), __VA_ARGS__, NULL)
 
 #define strjoina(a, ...)                                                \
         ({                                                              \
@@ -136,6 +138,9 @@ char *truncate_nl(char *s);
 char ascii_tolower(char x);
 char *ascii_strlower(char *s);
 char *ascii_strlower_n(char *s, size_t n);
+
+char ascii_toupper(char x);
+char *ascii_strupper(char *s);
 
 int ascii_strcasecmp_n(const char *a, const char *b, size_t n);
 int ascii_strcasecmp_nn(const char *a, size_t n, const char *b, size_t m);
@@ -184,7 +189,10 @@ static inline void *memmem_safe(const void *haystack, size_t haystacklen, const 
         return memmem(haystack, haystacklen, needle, needlelen);
 }
 
-void* memory_erase(void *p, size_t l);
+#if !HAVE_DECL_EXPLICIT_BZERO
+void explicit_bzero(void *p, size_t l);
+#endif
+
 char *string_erase(char *x);
 
 char *string_free_erase(char *s);

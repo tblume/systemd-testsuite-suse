@@ -325,10 +325,8 @@ static FileDescriptor* fd_add(MMapCache *m, int fd) {
         f->fd = fd;
 
         r = hashmap_put(m->fds, FD_TO_PTR(fd), f);
-        if (r < 0) {
-                free(f);
-                return NULL;
-        }
+        if (r < 0)
+                return mfree(f);
 
         return f;
 }
@@ -481,7 +479,7 @@ static int mmap_try_harder(MMapCache *m, void *addr, int fd, int prot, int flags
                 if (ptr != MAP_FAILED)
                         break;
                 if (errno != ENOMEM)
-                        return -errno;
+                        return negative_errno();
 
                 r = make_room(m);
                 if (r < 0)
@@ -571,7 +569,7 @@ static int add_mmap(
         return 1;
 
 outofmem:
-        munmap(d, wsize);
+        (void) munmap(d, wsize);
         return -ENOMEM;
 }
 

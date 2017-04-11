@@ -29,6 +29,7 @@
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
+#include "fs-util.h"
 #include "hashmap.h"
 #include "mount-util.h"
 #include "parse-util.h"
@@ -36,6 +37,7 @@
 #include "set.h"
 #include "stdio-util.h"
 #include "string-util.h"
+#include "strv.h"
 
 static int fd_fdinfo_mnt_id(int fd, const char *filename, int flags, int *mnt_id) {
         char path[strlen("/proc/self/fdinfo/") + DECIMAL_STR_MAX(int)];
@@ -75,7 +77,6 @@ static int fd_fdinfo_mnt_id(int fd, const char *filename, int flags, int *mnt_id
         return safe_atoi(p, mnt_id);
 }
 
-
 int fd_is_mount_point(int fd, const char *filename, int flags) {
         union file_handle_union h = FILE_HANDLE_INIT, h_parent = FILE_HANDLE_INIT;
         int mount_id = -1, mount_id_parent = -1;
@@ -104,16 +105,17 @@ int fd_is_mount_point(int fd, const char *filename, int flags) {
          *
          * As last fallback we do traditional fstat() based st_dev
          * comparisons. This is how things were traditionally done,
-         * but unionfs breaks breaks this since it exposes file
+         * but unionfs breaks this since it exposes file
          * systems with a variety of st_dev reported. Also, btrfs
          * subvolumes have different st_dev, even though they aren't
          * real mounts of their own. */
 
         r = name_to_handle_at(fd, filename, &h.handle, &mount_id, flags);
         if (r < 0) {
-                if (errno == ENOSYS)
-                        /* This kernel does not support name_to_handle_at()
-                         * fall back to simpler logic. */
+                if (IN_SET(errno, ENOSYS, EACCES, EPERM))
+                        /* This kernel does not support name_to_handle_at() at all, or the syscall was blocked (maybe
+                         * through seccomp, because we are running inside of a container?): fall back to simpler
+                         * logic. */
                         goto fallback_fdinfo;
                 else if (errno == EOPNOTSUPP)
                         /* This kernel or file system does not support
@@ -162,7 +164,7 @@ int fd_is_mount_point(int fd, const char *filename, int flags) {
 
 fallback_fdinfo:
         r = fd_fdinfo_mnt_id(fd, filename, flags, &mount_id);
-        if (r == -EOPNOTSUPP)
+        if (IN_SET(r, -EOPNOTSUPP, -EACCES, -EPERM))
                 goto fallback_fstat;
         if (r < 0)
                 return r;
@@ -205,9 +207,10 @@ fallback_fstat:
 }
 
 /* flags can be AT_SYMLINK_FOLLOW or 0 */
-int path_is_mount_point(const char *t, int flags) {
-        _cleanup_close_ int fd = -1;
+int path_is_mount_point(const char *t, const char *root, int flags) {
         _cleanup_free_ char *canonical = NULL, *parent = NULL;
+        _cleanup_close_ int fd = -1;
+        int r;
 
         assert(t);
 
@@ -219,9 +222,9 @@ int path_is_mount_point(const char *t, int flags) {
          * /bin -> /usr/bin/ and /usr is a mount point, then the parent that we
          * look at needs to be /usr, not /. */
         if (flags & AT_SYMLINK_FOLLOW) {
-                canonical = canonicalize_file_name(t);
-                if (!canonical)
-                        return -errno;
+                r = chase_symlinks(t, root, 0, &canonical);
+                if (r < 0)
+                        return r;
 
                 t = canonical;
         }
@@ -288,9 +291,11 @@ int umount_recursive(const char *prefix, int flags) {
                                 continue;
 
                         if (umount2(p, flags) < 0) {
-                                r = -errno;
+                                r = log_debug_errno(errno, "Failed to umount %s: %m", p);
                                 continue;
                         }
+
+                        log_debug("Successfully unmounted %s", p);
 
                         again = true;
                         n++;
@@ -312,24 +317,21 @@ static int get_mount_flags(const char *path, unsigned long *flags) {
         return 0;
 }
 
-int bind_remount_recursive(const char *prefix, bool ro) {
+int bind_remount_recursive(const char *prefix, bool ro, char **blacklist) {
         _cleanup_set_free_free_ Set *done = NULL;
         _cleanup_free_ char *cleaned = NULL;
         int r;
 
-        /* Recursively remount a directory (and all its submounts)
-         * read-only or read-write. If the directory is already
-         * mounted, we reuse the mount and simply mark it
-         * MS_BIND|MS_RDONLY (or remove the MS_RDONLY for read-write
-         * operation). If it isn't we first make it one. Afterwards we
-         * apply MS_BIND|MS_RDONLY (or remove MS_RDONLY) to all
-         * submounts we can access, too. When mounts are stacked on
-         * the same mount point we only care for each individual
-         * "top-level" mount on each point, as we cannot
-         * influence/access the underlying mounts anyway. We do not
-         * have any effect on future submounts that might get
-         * propagated, they migt be writable. This includes future
-         * submounts that have been triggered via autofs. */
+        /* Recursively remount a directory (and all its submounts) read-only or read-write. If the directory is already
+         * mounted, we reuse the mount and simply mark it MS_BIND|MS_RDONLY (or remove the MS_RDONLY for read-write
+         * operation). If it isn't we first make it one. Afterwards we apply MS_BIND|MS_RDONLY (or remove MS_RDONLY) to
+         * all submounts we can access, too. When mounts are stacked on the same mount point we only care for each
+         * individual "top-level" mount on each point, as we cannot influence/access the underlying mounts anyway. We
+         * do not have any effect on future submounts that might get propagated, they migt be writable. This includes
+         * future submounts that have been triggered via autofs.
+         *
+         * If the "blacklist" parameter is specified it may contain a list of subtrees to exclude from the
+         * remount operation. Note that we'll ignore the blacklist for the top-level path. */
 
         cleaned = strdup(prefix);
         if (!cleaned)
@@ -386,6 +388,33 @@ int bind_remount_recursive(const char *prefix, bool ro) {
                         if (r < 0)
                                 return r;
 
+                        if (!path_startswith(p, cleaned))
+                                continue;
+
+                        /* Ignore this mount if it is blacklisted, but only if it isn't the top-level mount we shall
+                         * operate on. */
+                        if (!path_equal(cleaned, p)) {
+                                bool blacklisted = false;
+                                char **i;
+
+                                STRV_FOREACH(i, blacklist) {
+
+                                        if (path_equal(*i, cleaned))
+                                                continue;
+
+                                        if (!path_startswith(*i, cleaned))
+                                                continue;
+
+                                        if (path_startswith(p, *i)) {
+                                                blacklisted = true;
+                                                log_debug("Not remounting %s, because blacklisted by %s, called for %s", p, *i, cleaned);
+                                                break;
+                                        }
+                                }
+                                if (blacklisted)
+                                        continue;
+                        }
+
                         /* Let's ignore autofs mounts.  If they aren't
                          * triggered yet, we want to avoid triggering
                          * them, as we don't make any guarantees for
@@ -397,12 +426,9 @@ int bind_remount_recursive(const char *prefix, bool ro) {
                                 continue;
                         }
 
-                        if (path_startswith(p, cleaned) &&
-                            !set_contains(done, p)) {
-
+                        if (!set_contains(done, p)) {
                                 r = set_consume(todo, p);
                                 p = NULL;
-
                                 if (r == -EEXIST)
                                         continue;
                                 if (r < 0)
@@ -419,8 +445,7 @@ int bind_remount_recursive(const char *prefix, bool ro) {
 
                 if (!set_contains(done, cleaned) &&
                     !set_contains(todo, cleaned)) {
-                        /* The prefix directory itself is not yet a
-                         * mount, make it one. */
+                        /* The prefix directory itself is not yet a mount, make it one. */
                         if (mount(cleaned, cleaned, NULL, MS_BIND|MS_REC, NULL) < 0)
                                 return -errno;
 
@@ -430,6 +455,8 @@ int bind_remount_recursive(const char *prefix, bool ro) {
 
                         if (mount(NULL, prefix, NULL, orig_flags|MS_BIND|MS_REMOUNT|(ro ? MS_RDONLY : 0), NULL) < 0)
                                 return -errno;
+
+                        log_debug("Made top-level directory %s a mount point.", prefix);
 
                         x = strdup(cleaned);
                         if (!x)
@@ -448,22 +475,22 @@ int bind_remount_recursive(const char *prefix, bool ro) {
                         if (r < 0)
                                 return r;
 
-                        /* Try to reuse the original flag set, but
-                         * don't care for errors, in case of
-                         * obstructed mounts */
+                        /* Deal with mount points that are obstructed by a later mount */
+                        r = path_is_mount_point(x, NULL, 0);
+                        if (r == -ENOENT || r == 0)
+                                continue;
+                        if (r < 0)
+                                return r;
+
+                        /* Try to reuse the original flag set */
                         orig_flags = 0;
                         (void) get_mount_flags(x, &orig_flags);
                         orig_flags &= ~MS_RDONLY;
 
-                        if (mount(NULL, x, NULL, orig_flags|MS_BIND|MS_REMOUNT|(ro ? MS_RDONLY : 0), NULL) < 0) {
+                        if (mount(NULL, x, NULL, orig_flags|MS_BIND|MS_REMOUNT|(ro ? MS_RDONLY : 0), NULL) < 0)
+                                return -errno;
 
-                                /* Deal with mount points that are
-                                 * obstructed by a later mount */
-
-                                if (errno != ENOENT)
-                                        return -errno;
-                        }
-
+                        log_debug("Remounted %s read-only.", x);
                 }
         }
 }
@@ -500,6 +527,8 @@ bool fstype_is_network(const char *fstype) {
                 "gfs2\0"
                 "glusterfs\0"
                 "pvfs2\0" /* OrangeFS */
+                "ocfs2\0"
+                "lustre\0"
                 ;
 
         const char *x;
@@ -530,4 +559,169 @@ int repeat_unmount(const char *path, int flags) {
 
                 done = true;
         }
+}
+
+const char* mode_to_inaccessible_node(mode_t mode) {
+        /* This function maps a node type to the correspondent inaccessible node type.
+         * Character and block inaccessible devices may not be created (because major=0 and minor=0),
+         * in such case we map character and block devices to the inaccessible node type socket. */
+        switch(mode & S_IFMT) {
+                case S_IFREG:
+                        return "/run/systemd/inaccessible/reg";
+                case S_IFDIR:
+                        return "/run/systemd/inaccessible/dir";
+                case S_IFCHR:
+                        if (access("/run/systemd/inaccessible/chr", F_OK) == 0)
+                                return "/run/systemd/inaccessible/chr";
+                        return "/run/systemd/inaccessible/sock";
+                case S_IFBLK:
+                        if (access("/run/systemd/inaccessible/blk", F_OK) == 0)
+                                return "/run/systemd/inaccessible/blk";
+                        return "/run/systemd/inaccessible/sock";
+                case S_IFIFO:
+                        return "/run/systemd/inaccessible/fifo";
+                case S_IFSOCK:
+                        return "/run/systemd/inaccessible/sock";
+        }
+        return NULL;
+}
+
+#define FLAG(name) (flags & name ? STRINGIFY(name) "|" : "")
+static char* mount_flags_to_string(long unsigned flags) {
+        char *x;
+        _cleanup_free_ char *y = NULL;
+        long unsigned overflow;
+
+        overflow = flags & ~(MS_RDONLY |
+                             MS_NOSUID |
+                             MS_NODEV |
+                             MS_NOEXEC |
+                             MS_SYNCHRONOUS |
+                             MS_REMOUNT |
+                             MS_MANDLOCK |
+                             MS_DIRSYNC |
+                             MS_NOATIME |
+                             MS_NODIRATIME |
+                             MS_BIND |
+                             MS_MOVE |
+                             MS_REC |
+                             MS_SILENT |
+                             MS_POSIXACL |
+                             MS_UNBINDABLE |
+                             MS_PRIVATE |
+                             MS_SLAVE |
+                             MS_SHARED |
+                             MS_RELATIME |
+                             MS_KERNMOUNT |
+                             MS_I_VERSION |
+                             MS_STRICTATIME |
+                             MS_LAZYTIME);
+
+        if (flags == 0 || overflow != 0)
+                if (asprintf(&y, "%lx", overflow) < 0)
+                        return NULL;
+
+        x = strjoin(FLAG(MS_RDONLY),
+                    FLAG(MS_NOSUID),
+                    FLAG(MS_NODEV),
+                    FLAG(MS_NOEXEC),
+                    FLAG(MS_SYNCHRONOUS),
+                    FLAG(MS_REMOUNT),
+                    FLAG(MS_MANDLOCK),
+                    FLAG(MS_DIRSYNC),
+                    FLAG(MS_NOATIME),
+                    FLAG(MS_NODIRATIME),
+                    FLAG(MS_BIND),
+                    FLAG(MS_MOVE),
+                    FLAG(MS_REC),
+                    FLAG(MS_SILENT),
+                    FLAG(MS_POSIXACL),
+                    FLAG(MS_UNBINDABLE),
+                    FLAG(MS_PRIVATE),
+                    FLAG(MS_SLAVE),
+                    FLAG(MS_SHARED),
+                    FLAG(MS_RELATIME),
+                    FLAG(MS_KERNMOUNT),
+                    FLAG(MS_I_VERSION),
+                    FLAG(MS_STRICTATIME),
+                    FLAG(MS_LAZYTIME),
+                    y);
+        if (!x)
+                return NULL;
+        if (!y)
+                x[strlen(x) - 1] = '\0'; /* truncate the last | */
+        return x;
+}
+
+int mount_verbose(
+                int error_log_level,
+                const char *what,
+                const char *where,
+                const char *type,
+                unsigned long flags,
+                const char *options) {
+
+        _cleanup_free_ char *fl = NULL;
+
+        fl = mount_flags_to_string(flags);
+
+        if ((flags & MS_REMOUNT) && !what && !type)
+                log_debug("Remounting %s (%s \"%s\")...",
+                          where, strnull(fl), strempty(options));
+        else if (!what && !type)
+                log_debug("Mounting %s (%s \"%s\")...",
+                          where, strnull(fl), strempty(options));
+        else if ((flags & MS_BIND) && !type)
+                log_debug("Bind-mounting %s on %s (%s \"%s\")...",
+                          what, where, strnull(fl), strempty(options));
+        else if (flags & MS_MOVE)
+                log_debug("Moving mount %s → %s (%s \"%s\")...",
+                          what, where, strnull(fl), strempty(options));
+        else
+                log_debug("Mounting %s on %s (%s \"%s\")...",
+                          strna(type), where, strnull(fl), strempty(options));
+        if (mount(what, where, type, flags, options) < 0)
+                return log_full_errno(error_log_level, errno,
+                                      "Failed to mount %s on %s (%s \"%s\"): %m",
+                                      strna(type), where, strnull(fl), strempty(options));
+        return 0;
+}
+
+int umount_verbose(const char *what) {
+        log_debug("Umounting %s...", what);
+        if (umount(what) < 0)
+                return log_error_errno(errno, "Failed to unmount %s: %m", what);
+        return 0;
+}
+
+const char *mount_propagation_flags_to_string(unsigned long flags) {
+
+        switch (flags & (MS_SHARED|MS_SLAVE|MS_PRIVATE)) {
+        case 0:
+                return "";
+        case MS_SHARED:
+                return "shared";
+        case MS_SLAVE:
+                return "slave";
+        case MS_PRIVATE:
+                return "private";
+        }
+
+        return NULL;
+}
+
+
+int mount_propagation_flags_from_string(const char *name, unsigned long *ret) {
+
+        if (isempty(name))
+                *ret = 0;
+        else if (streq(name, "shared"))
+                *ret = MS_SHARED;
+        else if (streq(name, "slave"))
+                *ret = MS_SLAVE;
+        else if (streq(name, "private"))
+                *ret = MS_PRIVATE;
+        else
+                return -EINVAL;
+        return 0;
 }

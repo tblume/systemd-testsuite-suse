@@ -62,7 +62,7 @@
     partitions and creates mount and swap units for them, based on the
     partition type GUIDs of GUID partition tables (GPT). It implements
     the <ulink
-    url="http://www.freedesktop.org/wiki/Specifications/DiscoverablePartitionsSpec/">Discoverable
+    url="https://www.freedesktop.org/wiki/Specifications/DiscoverablePartitionsSpec/">Discoverable
     Partitions Specification</ulink>. Note that this generator has no
     effect on non-GPT systems, or where the directories under the
     mount points are already non-empty. Also, on systems where the
@@ -123,6 +123,11 @@
             <entry>On 64-bit ARM systems, the first ARM root partition on the disk the EFI ESP is located on is mounted to the root directory <filename>/</filename>.</entry>
           </row>
           <row>
+            <entry>993d8d3d-f80e-4225-855a-9daf8ed7ea97</entry>
+            <entry><filename>Root Partition (Itanium/IA-64)</filename></entry>
+            <entry>On Itanium systems, the first Itanium root partition on the disk the EFI ESP is located on is mounted to the root directory <filename>/</filename>.</entry>
+          </row>
+          <row>
             <entry>933ac7e1-2eb4-4f13-b844-0e14e2aef915</entry>
             <entry>Home Partition</entry>
             <entry>The first home partition on the disk the root partition is located on is mounted to <filename>/home</filename>.</entry>
@@ -137,6 +142,11 @@
             <entry>Swap</entry>
             <entry>All swap partitions located on the disk the root partition is located on are enabled.</entry>
           </row>
+          <row>
+            <entry>c12a7328-f81f-11d2-ba4b-00a0c93ec93b</entry>
+            <entry>EFI System Partition (ESP)</entry>
+            <entry>The first ESP located on the disk the root partition is located on is mounted to <filename>/boot</filename> or <filename>/efi</filename>, see below.</entry>
+          </row>
         </tbody>
       </tgroup>
     </table>
@@ -150,16 +160,14 @@
     <filename>/etc/crypttab</filename> with a different device mapper
     device name.</para>
 
-    <para>Mount and automount units for the EFI System Partition (ESP),
-    mounting it to <filename>/boot</filename>, are generated on EFI
-    systems where the boot loader communicates the used ESP to the operating
-    system. Since this generator creates an automount unit, the mount will
-    only be activated on-demand, when accessed. On systems where
-    <filename>/boot</filename> is an explicitly configured mount
-    (for example, listed in
-    <citerefentry project='man-pages'><refentrytitle>fstab</refentrytitle><manvolnum>5</manvolnum></citerefentry>)
-    or where the <filename>/boot</filename> mount point is non-empty, no
-    mount units are generated.</para>
+    <para>Mount and automount units for the EFI System Partition (ESP) are generated on EFI systems. The ESP is mounted
+    to <filename>/boot</filename>, unless a mount point directory <filename>/efi</filename> exists, in which case it is
+    mounted there. Since this generator creates an automount unit, the mount will only be activated on-demand, when
+    accessed. On systems where <filename>/boot</filename> (or <filename>/efi</filename> if it exists) is an explicitly
+    configured mount (for example, listed in <citerefentry
+    project='man-pages'><refentrytitle>fstab</refentrytitle><manvolnum>5</manvolnum></citerefentry>) or where the
+    <filename>/boot</filename> (or <filename>/efi</filename>) mount point is non-empty, no mount units are
+    generated.</para>
 
     <para>When using this generator in conjunction with btrfs file
     systems, make sure to set the correct default subvolumes on them,

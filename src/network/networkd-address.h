@@ -33,10 +33,11 @@ typedef struct Address Address;
 
 typedef struct Network Network;
 typedef struct Link Link;
+typedef struct NetworkConfigSection NetworkConfigSection;
 
 struct Address {
         Network *network;
-        unsigned section;
+        NetworkConfigSection *section;
 
         Link *link;
 
@@ -53,17 +54,22 @@ struct Address {
         union in_addr_union in_addr_peer;
 
         bool ip_masquerade_done:1;
+        bool duplicate_address_detection;
+        bool manage_temporary_address;
+        bool home_address;
+        bool prefix_route;
+        bool autojoin;
 
         LIST_FIELDS(Address, addresses);
 };
 
-int address_new_static(Network *network, unsigned section, Address **ret);
+int address_new_static(Network *network, const char *filename, unsigned section, Address **ret);
 int address_new(Address **ret);
 void address_free(Address *address);
 int address_add_foreign(Link *link, int family, const union in_addr_union *in_addr, unsigned char prefixlen, Address **ret);
 int address_add(Link *link, int family, const union in_addr_union *in_addr, unsigned char prefixlen, Address **ret);
 int address_get(Link *link, int family, const union in_addr_union *in_addr, unsigned char prefixlen, Address **ret);
-int address_update(Address *address, unsigned char flags, unsigned char scope, struct ifa_cacheinfo *cinfo);
+int address_update(Address *address, unsigned char flags, unsigned char scope, const struct ifa_cacheinfo *cinfo);
 int address_drop(Address *address);
 int address_configure(Address *address, Link *link, sd_netlink_message_handler_t callback, bool update);
 int address_remove(Address *address, Link *link, sd_netlink_message_handler_t callback);
@@ -77,3 +83,4 @@ int config_parse_address(const char *unit, const char *filename, unsigned line, 
 int config_parse_broadcast(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_label(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_lifetime(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_address_flags(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);

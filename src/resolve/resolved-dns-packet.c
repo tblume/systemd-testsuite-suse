@@ -264,6 +264,7 @@ int dns_packet_validate_query(DnsPacket *p) {
         switch (p->protocol) {
 
         case DNS_PROTOCOL_LLMNR:
+        case DNS_PROTOCOL_DNS:
                 /* RFC 4795, Section 2.1.1. says to discard all queries with QDCOUNT != 1 */
                 if (DNS_PACKET_QDCOUNT(p) != 1)
                         return -EBADMSG;
@@ -568,8 +569,9 @@ fail:
         return r;
 }
 
-int dns_packet_append_key(DnsPacket *p, const DnsResourceKey *k, size_t *start) {
+int dns_packet_append_key(DnsPacket *p, const DnsResourceKey *k, const DnsAnswerFlags flags, size_t *start) {
         size_t saved_size;
+        uint16_t class;
         int r;
 
         assert(p);
@@ -585,7 +587,8 @@ int dns_packet_append_key(DnsPacket *p, const DnsResourceKey *k, size_t *start) 
         if (r < 0)
                 goto fail;
 
-        r = dns_packet_append_uint16(p, k->class, NULL);
+        class = flags & DNS_ANSWER_CACHE_FLUSH ? k->class | MDNS_RR_CACHE_FLUSH : k->class;
+        r = dns_packet_append_uint16(p, class, NULL);
         if (r < 0)
                 goto fail;
 
@@ -676,13 +679,15 @@ fail:
 }
 
 /* Append the OPT pseudo-RR described in RFC6891 */
-int dns_packet_append_opt(DnsPacket *p, uint16_t max_udp_size, bool edns0_do, size_t *start) {
+int dns_packet_append_opt(DnsPacket *p, uint16_t max_udp_size, bool edns0_do, int rcode, size_t *start) {
         size_t saved_size;
         int r;
 
         assert(p);
         /* we must never advertise supported packet size smaller than the legacy max */
         assert(max_udp_size >= DNS_PACKET_UNICAST_SIZE_MAX);
+        assert(rcode >= 0);
+        assert(rcode <= _DNS_RCODE_MAX);
 
         if (p->opt_start != (size_t) -1)
                 return -EBUSY;
@@ -701,13 +706,13 @@ int dns_packet_append_opt(DnsPacket *p, uint16_t max_udp_size, bool edns0_do, si
         if (r < 0)
                 goto fail;
 
-        /* maximum udp packet that can be received */
+        /* class: maximum udp packet that can be received */
         r = dns_packet_append_uint16(p, max_udp_size, NULL);
         if (r < 0)
                 goto fail;
 
         /* extended RCODE and VERSION */
-        r = dns_packet_append_uint16(p, 0, NULL);
+        r = dns_packet_append_uint16(p, ((uint16_t) rcode & 0x0FF0) << 4, NULL);
         if (r < 0)
                 goto fail;
 
@@ -717,9 +722,8 @@ int dns_packet_append_opt(DnsPacket *p, uint16_t max_udp_size, bool edns0_do, si
                 goto fail;
 
         /* RDLENGTH */
-
-        if (edns0_do) {
-                /* If DO is on, also append RFC6975 Algorithm data */
+        if (edns0_do && !DNS_PACKET_QR(p)) {
+                /* If DO is on and this is not a reply, also append RFC6975 Algorithm data */
 
                 static const uint8_t rfc6975[] = {
 
@@ -750,7 +754,6 @@ int dns_packet_append_opt(DnsPacket *p, uint16_t max_udp_size, bool edns0_do, si
                 r = dns_packet_append_blob(p, rfc6975, sizeof(rfc6975), NULL);
         } else
                 r = dns_packet_append_uint16(p, 0, NULL);
-
         if (r < 0)
                 goto fail;
 
@@ -790,8 +793,10 @@ int dns_packet_truncate_opt(DnsPacket *p) {
         return 1;
 }
 
-int dns_packet_append_rr(DnsPacket *p, const DnsResourceRecord *rr, size_t *start, size_t *rdata_start) {
+int dns_packet_append_rr(DnsPacket *p, const DnsResourceRecord *rr, const DnsAnswerFlags flags, size_t *start, size_t *rdata_start) {
+
         size_t saved_size, rdlength_offset, end, rdlength, rds;
+        uint32_t ttl;
         int r;
 
         assert(p);
@@ -799,11 +804,12 @@ int dns_packet_append_rr(DnsPacket *p, const DnsResourceRecord *rr, size_t *star
 
         saved_size = p->size;
 
-        r = dns_packet_append_key(p, rr->key, NULL);
+        r = dns_packet_append_key(p, rr->key, flags, NULL);
         if (r < 0)
                 goto fail;
 
-        r = dns_packet_append_uint32(p, rr->ttl, NULL);
+        ttl = flags & DNS_ANSWER_GOODBYE ? 0 : rr->ttl;
+        r = dns_packet_append_uint32(p, ttl, NULL);
         if (r < 0)
                 goto fail;
 
@@ -1132,6 +1138,37 @@ int dns_packet_append_rr(DnsPacket *p, const DnsResourceRecord *rr, size_t *star
 fail:
         dns_packet_truncate(p, saved_size);
         return r;
+}
+
+int dns_packet_append_question(DnsPacket *p, DnsQuestion *q) {
+        DnsResourceKey *key;
+        int r;
+
+        assert(p);
+
+        DNS_QUESTION_FOREACH(key, q) {
+                r = dns_packet_append_key(p, key, 0, NULL);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
+}
+
+int dns_packet_append_answer(DnsPacket *p, DnsAnswer *a) {
+        DnsResourceRecord *rr;
+        DnsAnswerFlags flags;
+        int r;
+
+        assert(p);
+
+        DNS_ANSWER_FOREACH_FLAGS(rr, flags, a) {
+                r = dns_packet_append_rr(p, rr, flags, NULL, NULL);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
 }
 
 int dns_packet_read(DnsPacket *p, size_t sz, const void **ret, size_t *start) {
@@ -2029,8 +2066,10 @@ static bool opt_is_good(DnsResourceRecord *rr, bool *rfc6975) {
         assert(rr->key->type == DNS_TYPE_OPT);
 
         /* Check that the version is 0 */
-        if (((rr->ttl >> 16) & UINT32_C(0xFF)) != 0)
-                return false;
+        if (((rr->ttl >> 16) & UINT32_C(0xFF)) != 0) {
+                *rfc6975 = false;
+                return true; /* if it's not version 0, it's OK, but we will ignore the OPT field contents */
+        }
 
         p = rr->opt.data;
         l = rr->opt.data_size;
@@ -2109,7 +2148,7 @@ int dns_packet_extract(DnsPacket *p) {
 
                 for (i = 0; i < n; i++) {
                         _cleanup_(dns_resource_record_unrefp) DnsResourceRecord *rr = NULL;
-                        bool cache_flush;
+                        bool cache_flush = false;
 
                         r = dns_packet_read_rr(p, &rr, &cache_flush, NULL);
                         if (r < 0)
@@ -2153,16 +2192,27 @@ int dns_packet_extract(DnsPacket *p) {
                                         continue;
                                 }
 
-                                if (has_rfc6975) {
-                                        /* If the OPT RR contains RFC6975 algorithm data, then this is indication that
-                                         * the server just copied the OPT it got from us (which contained that data)
-                                         * back into the reply. If so, then it doesn't properly support EDNS, as
-                                         * RFC6975 makes it very clear that the algorithm data should only be contained
-                                         * in questions, never in replies. Crappy Belkin routers copy the OPT data for
-                                         * example, hence let's detect this so that we downgrade early. */
-                                        log_debug("OPT RR contained RFC6975 data, ignoring.");
-                                        bad_opt = true;
-                                        continue;
+                                if (DNS_PACKET_QR(p)) {
+                                        /* Additional checks for responses */
+
+                                        if (!DNS_RESOURCE_RECORD_OPT_VERSION_SUPPORTED(rr)) {
+                                                /* If this is a reply and we don't know the EDNS version then something
+                                                 * is weird... */
+                                                log_debug("EDNS version newer that our request, bad server.");
+                                                return -EBADMSG;
+                                        }
+
+                                        if (has_rfc6975) {
+                                                /* If the OPT RR contains RFC6975 algorithm data, then this is indication that
+                                                 * the server just copied the OPT it got from us (which contained that data)
+                                                 * back into the reply. If so, then it doesn't properly support EDNS, as
+                                                 * RFC6975 makes it very clear that the algorithm data should only be contained
+                                                 * in questions, never in replies. Crappy Belkin routers copy the OPT data for
+                                                 * example, hence let's detect this so that we downgrade early. */
+                                                log_debug("OPT RR contained RFC6975 data, ignoring.");
+                                                bad_opt = true;
+                                                continue;
+                                        }
                                 }
 
                                 p->opt = dns_resource_record_ref(rr);
@@ -2244,6 +2294,7 @@ static const char* const dns_rcode_table[_DNS_RCODE_MAX_DEFINED] = {
         [DNS_RCODE_BADNAME] = "BADNAME",
         [DNS_RCODE_BADALG] = "BADALG",
         [DNS_RCODE_BADTRUNC] = "BADTRUNC",
+        [DNS_RCODE_BADCOOKIE] = "BADCOOKIE",
 };
 DEFINE_STRING_TABLE_LOOKUP(dns_rcode, int);
 

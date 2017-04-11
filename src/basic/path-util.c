@@ -34,9 +34,11 @@
 #include "alloc-util.h"
 #include "extract-word.h"
 #include "fs-util.h"
+#include "glob-util.h"
 #include "log.h"
 #include "macro.h"
 #include "missing.h"
+#include "parse-util.h"
 #include "path-util.h"
 #include "stat-util.h"
 #include "string-util.h"
@@ -81,7 +83,7 @@ char *path_make_absolute(const char *p, const char *prefix) {
         if (path_is_absolute(p) || !prefix)
                 return strdup(p);
 
-        return strjoin(prefix, "/", p, NULL);
+        return strjoin(prefix, "/", p);
 }
 
 int path_make_absolute_cwd(const char *p, char **ret) {
@@ -102,7 +104,7 @@ int path_make_absolute_cwd(const char *p, char **ret) {
                 if (!cwd)
                         return negative_errno();
 
-                c = strjoin(cwd, "/", p, NULL);
+                c = strjoin(cwd, "/", p);
         }
         if (!c)
                 return -ENOMEM;
@@ -218,10 +220,11 @@ int path_strv_make_absolute_cwd(char **l) {
         return 0;
 }
 
-char **path_strv_resolve(char **l, const char *prefix) {
+char **path_strv_resolve(char **l, const char *root) {
         char **s;
         unsigned k = 0;
         bool enomem = false;
+        int r;
 
         if (strv_isempty(l))
                 return l;
@@ -231,17 +234,17 @@ char **path_strv_resolve(char **l, const char *prefix) {
          * changes on failure. */
 
         STRV_FOREACH(s, l) {
-                char *t, *u;
                 _cleanup_free_ char *orig = NULL;
+                char *t, *u;
 
                 if (!path_is_absolute(*s)) {
                         free(*s);
                         continue;
                 }
 
-                if (prefix) {
+                if (root) {
                         orig = *s;
-                        t = strappend(prefix, orig);
+                        t = prefix_root(root, orig);
                         if (!t) {
                                 enomem = true;
                                 continue;
@@ -249,28 +252,26 @@ char **path_strv_resolve(char **l, const char *prefix) {
                 } else
                         t = *s;
 
-                errno = 0;
-                u = canonicalize_file_name(t);
-                if (!u) {
-                        if (errno == ENOENT) {
-                                if (prefix) {
-                                        u = orig;
-                                        orig = NULL;
-                                        free(t);
-                                } else
-                                        u = t;
-                        } else {
+                r = chase_symlinks(t, root, 0, &u);
+                if (r == -ENOENT) {
+                        if (root) {
+                                u = orig;
+                                orig = NULL;
                                 free(t);
-                                if (errno == ENOMEM || errno == 0)
-                                        enomem = true;
+                        } else
+                                u = t;
+                } else if (r < 0) {
+                        free(t);
 
-                                continue;
-                        }
-                } else if (prefix) {
+                        if (r == -ENOMEM)
+                                enomem = true;
+
+                        continue;
+                } else if (root) {
                         char *x;
 
                         free(t);
-                        x = path_startswith(u, prefix);
+                        x = path_startswith(u, root);
                         if (x) {
                                 /* restore the slash if it was lost */
                                 if (!startswith(x, "/"))
@@ -286,9 +287,7 @@ char **path_strv_resolve(char **l, const char *prefix) {
                         } else {
                                 /* canonicalized path goes outside of
                                  * prefix, keep the original path instead */
-                                free(u);
-                                u = orig;
-                                orig = NULL;
+                                free_and_replace(u, orig);
                         }
                 } else
                         free(t);
@@ -304,12 +303,12 @@ char **path_strv_resolve(char **l, const char *prefix) {
         return l;
 }
 
-char **path_strv_resolve_uniq(char **l, const char *prefix) {
+char **path_strv_resolve_uniq(char **l, const char *root) {
 
         if (strv_isempty(l))
                 return l;
 
-        if (!path_strv_resolve(l, prefix))
+        if (!path_strv_resolve(l, root))
                 return NULL;
 
         return strv_uniq(l);
@@ -353,6 +352,16 @@ char *path_kill_slashes(char *path) {
 char* path_startswith(const char *path, const char *prefix) {
         assert(path);
         assert(prefix);
+
+        /* Returns a pointer to the start of the first component after the parts matched by
+         * the prefix, iff
+         * - both paths are absolute or both paths are relative,
+         * and
+         * - each component in prefix in turn matches a component in path at the same position.
+         * An empty string will be returned when the prefix and path are equivalent.
+         *
+         * Returns NULL otherwise.
+         */
 
         if ((path[0] == '/') != (prefix[0] == '/'))
                 return NULL;
@@ -444,13 +453,11 @@ char* path_join(const char *root, const char *path, const char *rest) {
                 return strjoin(root, endswith(root, "/") ? "" : "/",
                                path[0] == '/' ? path+1 : path,
                                rest ? (endswith(path, "/") ? "" : "/") : NULL,
-                               rest && rest[0] == '/' ? rest+1 : rest,
-                               NULL);
+                               rest && rest[0] == '/' ? rest+1 : rest);
         else
                 return strjoin(path,
                                rest ? (endswith(path, "/") ? "" : "/") : NULL,
-                               rest && rest[0] == '/' ? rest+1 : rest,
-                               NULL);
+                               rest && rest[0] == '/' ? rest+1 : rest);
 }
 
 int find_binary(const char *name, char **ret) {
@@ -494,7 +501,7 @@ int find_binary(const char *name, char **ret) {
                 if (!path_is_absolute(element))
                         continue;
 
-                j = strjoin(element, "/", name, NULL);
+                j = strjoin(element, "/", name);
                 if (!j)
                         return -ENOMEM;
 
@@ -692,10 +699,7 @@ bool filename_is_valid(const char *p) {
         if (isempty(p))
                 return false;
 
-        if (streq(p, "."))
-                return false;
-
-        if (streq(p, ".."))
+        if (dot_or_dot_dot(p))
                 return false;
 
         e = strchrnul(p, '/');
@@ -713,14 +717,17 @@ bool path_is_safe(const char *p) {
         if (isempty(p))
                 return false;
 
-        if (streq(p, "..") || startswith(p, "../") || endswith(p, "/..") || strstr(p, "/../"))
+        if (dot_or_dot_dot(p))
+                return false;
+
+        if (startswith(p, "../") || endswith(p, "/..") || strstr(p, "/../"))
                 return false;
 
         if (strlen(p)+1 > PATH_MAX)
                 return false;
 
         /* The following two checks are not really dangerous, but hey, they still are confusing */
-        if (streq(p, ".") || startswith(p, "./") || endswith(p, "/.") || strstr(p, "/./"))
+        if (startswith(p, "./") || endswith(p, "/.") || strstr(p, "/./"))
                 return false;
 
         if (strstr(p, "//"))
@@ -810,7 +817,91 @@ bool is_device_path(const char *path) {
         /* Returns true on paths that refer to a device, either in
          * sysfs or in /dev */
 
-        return
-                path_startswith(path, "/dev/") ||
-                path_startswith(path, "/sys/");
+        return path_startswith(path, "/dev/") ||
+               path_startswith(path, "/sys/");
+}
+
+bool is_deviceallow_pattern(const char *path) {
+        return path_startswith(path, "/dev/") ||
+               startswith(path, "block-") ||
+               startswith(path, "char-");
+}
+
+int systemd_installation_has_version(const char *root, unsigned minimal_version) {
+        const char *pattern;
+        int r;
+
+        /* Try to guess if systemd installation is later than the specified version. This
+         * is hacky and likely to yield false negatives, particularly if the installation
+         * is non-standard. False positives should be relatively rare.
+         */
+
+        NULSTR_FOREACH(pattern,
+                       /* /lib works for systems without usr-merge, and for systems with a sane
+                        * usr-merge, where /lib is a symlink to /usr/lib. /usr/lib is necessary
+                        * for Gentoo which does a merge without making /lib a symlink.
+                        */
+                       "lib/systemd/libsystemd-shared-*.so\0"
+                       "usr/lib/systemd/libsystemd-shared-*.so\0") {
+
+                _cleanup_strv_free_ char **names = NULL;
+                _cleanup_free_ char *path = NULL;
+                char *c, **name;
+
+                path = prefix_root(root, pattern);
+                if (!path)
+                        return -ENOMEM;
+
+                r = glob_extend(&names, path);
+                if (r == -ENOENT)
+                        continue;
+                if (r < 0)
+                        return r;
+
+                assert_se((c = endswith(path, "*.so")));
+                *c = '\0'; /* truncate the glob part */
+
+                STRV_FOREACH(name, names) {
+                        /* This is most likely to run only once, hence let's not optimize anything. */
+                        char *t, *t2;
+                        unsigned version;
+
+                        t = startswith(*name, path);
+                        if (!t)
+                                continue;
+
+                        t2 = endswith(t, ".so");
+                        if (!t2)
+                                continue;
+
+                        t2[0] = '\0'; /* truncate the suffix */
+
+                        r = safe_atou(t, &version);
+                        if (r < 0) {
+                                log_debug_errno(r, "Found libsystemd shared at \"%s.so\", but failed to parse version: %m", *name);
+                                continue;
+                        }
+
+                        log_debug("Found libsystemd shared at \"%s.so\", version %u (%s).",
+                                  *name, version,
+                                  version >= minimal_version ? "OK" : "too old");
+                        if (version >= minimal_version)
+                                return true;
+                }
+        }
+
+        return false;
+}
+
+bool dot_or_dot_dot(const char *path) {
+        if (!path)
+                return false;
+        if (path[0] != '.')
+                return false;
+        if (path[1] == 0)
+                return true;
+        if (path[1] != '.')
+                return false;
+
+        return path[2] == 0;
 }

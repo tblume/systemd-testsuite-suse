@@ -28,6 +28,8 @@
 #include "fs-util.h"
 #include "hwdb-internal.h"
 #include "hwdb-util.h"
+#include "label.h"
+#include "mkdir.h"
 #include "strbuf.h"
 #include "string-util.h"
 #include "udev.h"
@@ -651,17 +653,21 @@ static int adm_hwdb(struct udev *udev, int argc, char *argv[]) {
                 log_debug("strings dedup'ed: %8zu bytes (%8zu)",
                           trie->strings->dedup_len, trie->strings->dedup_count);
 
-                hwdb_bin = strjoin(root, "/", hwdb_bin_dir, "/hwdb.bin", NULL);
+                hwdb_bin = strjoin(root, "/", hwdb_bin_dir, "/hwdb.bin");
                 if (!hwdb_bin) {
                         rc = EXIT_FAILURE;
                         goto out;
                 }
-                mkdir_parents(hwdb_bin, 0755);
+
+                mkdir_parents_label(hwdb_bin, 0755);
+
                 err = trie_store(trie, hwdb_bin);
                 if (err < 0) {
                         log_error_errno(err, "Failure writing database %s: %m", hwdb_bin);
                         rc = EXIT_FAILURE;
                 }
+
+                label_fix(hwdb_bin, false, false);
         }
 
         if (test) {

@@ -43,6 +43,7 @@
 #include "escape.h"
 #include "fd-util.h"
 #include "missing.h"
+#include "nsflags.h"
 #include "parse-util.h"
 #include "proc-cmdline.h"
 #include "rlimit-util.h"
@@ -676,7 +677,7 @@ int bus_connect_user_systemd(sd_bus **_bus) {
         if (r < 0)
                 return r;
 
-        bus->address = strjoin("unix:path=", ee, "/systemd/private", NULL);
+        bus->address = strjoin("unix:path=", ee, "/systemd/private");
         if (!bus->address)
                 return -ENOMEM;
 
@@ -769,6 +770,23 @@ int bus_print_property(const char *name, sd_bus_message *property, bool value, b
                         char timespan[FORMAT_TIMESPAN_MAX];
 
                         print_property(name, "%s", format_timespan(timespan, sizeof(timespan), u, 0));
+                } else if (streq(name, "RestrictNamespaces")) {
+                        _cleanup_free_ char *s = NULL;
+                        const char *result = NULL;
+
+                        if ((u & NAMESPACE_FLAGS_ALL) == 0)
+                                result = "yes";
+                        else if ((u & NAMESPACE_FLAGS_ALL) == NAMESPACE_FLAGS_ALL)
+                                result = "no";
+                        else {
+                                r = namespace_flag_to_string_many(u, &s);
+                                if (r < 0)
+                                        return r;
+
+                                result = s;
+                        }
+
+                        print_property(name, "%s", result);
                 } else
                         print_property(name, "%"PRIu64, u);
 
@@ -1016,19 +1034,19 @@ static int map_basic(sd_bus *bus, const char *member, sd_bus_message *m, sd_bus_
                 return r;
 
         switch (type) {
+
         case SD_BUS_TYPE_STRING: {
-                const char *s;
                 char **p = userdata;
+                const char *s;
 
                 r = sd_bus_message_read_basic(m, type, &s);
                 if (r < 0)
-                        break;
+                        return r;
 
                 if (isempty(s))
-                        break;
+                        s = NULL;
 
-                r = free_and_strdup(p, s);
-                break;
+                return free_and_strdup(p, s);
         }
 
         case SD_BUS_TYPE_ARRAY: {
@@ -1037,67 +1055,70 @@ static int map_basic(sd_bus *bus, const char *member, sd_bus_message *m, sd_bus_
 
                 r = bus_message_read_strv_extend(m, &l);
                 if (r < 0)
-                        break;
+                        return r;
 
                 strv_free(*p);
                 *p = l;
                 l = NULL;
-
-                break;
+                return 0;
         }
 
         case SD_BUS_TYPE_BOOLEAN: {
                 unsigned b;
-                bool *p = userdata;
+                int *p = userdata;
 
                 r = sd_bus_message_read_basic(m, type, &b);
                 if (r < 0)
-                        break;
+                        return r;
 
                 *p = b;
-
-                break;
+                return 0;
         }
 
+        case SD_BUS_TYPE_INT32:
         case SD_BUS_TYPE_UINT32: {
-                uint32_t u;
-                uint32_t *p = userdata;
+                uint32_t u, *p = userdata;
 
                 r = sd_bus_message_read_basic(m, type, &u);
                 if (r < 0)
-                        break;
+                        return r;
 
                 *p = u;
-
-                break;
+                return 0;
         }
 
+        case SD_BUS_TYPE_INT64:
         case SD_BUS_TYPE_UINT64: {
-                uint64_t t;
-                uint64_t *p = userdata;
+                uint64_t t, *p = userdata;
 
                 r = sd_bus_message_read_basic(m, type, &t);
                 if (r < 0)
-                        break;
+                        return r;
 
                 *p = t;
-
-                break;
+                return 0;
         }
 
-        default:
-                break;
-        }
+        case SD_BUS_TYPE_DOUBLE: {
+                double d, *p = userdata;
 
-        return r;
+                r = sd_bus_message_read_basic(m, type, &d);
+                if (r < 0)
+                        return r;
+
+                *p = d;
+                return 0;
+        }}
+
+        return -EOPNOTSUPP;
 }
 
 int bus_message_map_all_properties(
                 sd_bus_message *m,
                 const struct bus_properties_map *map,
+                sd_bus_error *error,
                 void *userdata) {
 
-        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
         assert(m);
@@ -1135,9 +1156,9 @@ int bus_message_map_all_properties(
 
                         v = (uint8_t *)userdata + prop->offset;
                         if (map[i].set)
-                                r = prop->set(sd_bus_message_get_bus(m), member, m, &error, v);
+                                r = prop->set(sd_bus_message_get_bus(m), member, m, error, v);
                         else
-                                r = map_basic(sd_bus_message_get_bus(m), member, m, &error, v);
+                                r = map_basic(sd_bus_message_get_bus(m), member, m, error, v);
                         if (r < 0)
                                 return r;
 
@@ -1163,6 +1184,7 @@ int bus_message_map_all_properties(
 int bus_message_map_properties_changed(
                 sd_bus_message *m,
                 const struct bus_properties_map *map,
+                sd_bus_error *error,
                 void *userdata) {
 
         const char *member;
@@ -1171,7 +1193,7 @@ int bus_message_map_properties_changed(
         assert(m);
         assert(map);
 
-        r = bus_message_map_all_properties(m, map, userdata);
+        r = bus_message_map_all_properties(m, map, error, userdata);
         if (r < 0)
                 return r;
 
@@ -1201,10 +1223,10 @@ int bus_map_all_properties(
                 const char *destination,
                 const char *path,
                 const struct bus_properties_map *map,
+                sd_bus_error *error,
                 void *userdata) {
 
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
-        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
         assert(bus);
@@ -1218,21 +1240,22 @@ int bus_map_all_properties(
                         path,
                         "org.freedesktop.DBus.Properties",
                         "GetAll",
-                        &error,
+                        error,
                         &m,
                         "s", "");
         if (r < 0)
                 return r;
 
-        return bus_message_map_all_properties(m, map, userdata);
+        return bus_message_map_all_properties(m, map, error, userdata);
 }
 
-int bus_connect_transport(BusTransport transport, const char *host, bool user, sd_bus **bus) {
+int bus_connect_transport(BusTransport transport, const char *host, bool user, sd_bus **ret) {
+        _cleanup_(sd_bus_unrefp) sd_bus *bus = NULL;
         int r;
 
         assert(transport >= 0);
         assert(transport < _BUS_TRANSPORT_MAX);
-        assert(bus);
+        assert(ret);
 
         assert_return((transport == BUS_TRANSPORT_LOCAL) == !host, -EINVAL);
         assert_return(transport == BUS_TRANSPORT_LOCAL || !user, -EOPNOTSUPP);
@@ -1241,25 +1264,34 @@ int bus_connect_transport(BusTransport transport, const char *host, bool user, s
 
         case BUS_TRANSPORT_LOCAL:
                 if (user)
-                        r = sd_bus_default_user(bus);
+                        r = sd_bus_default_user(&bus);
                 else
-                        r = sd_bus_default_system(bus);
+                        r = sd_bus_default_system(&bus);
 
                 break;
 
         case BUS_TRANSPORT_REMOTE:
-                r = sd_bus_open_system_remote(bus, host);
+                r = sd_bus_open_system_remote(&bus, host);
                 break;
 
         case BUS_TRANSPORT_MACHINE:
-                r = sd_bus_open_system_machine(bus, host);
+                r = sd_bus_open_system_machine(&bus, host);
                 break;
 
         default:
                 assert_not_reached("Hmm, unknown transport type.");
         }
+        if (r < 0)
+                return r;
 
-        return r;
+        r = sd_bus_set_exit_on_disconnect(bus, true);
+        if (r < 0)
+                return r;
+
+        *ret = bus;
+        bus = NULL;
+
+        return 0;
 }
 
 int bus_connect_transport_systemd(BusTransport transport, const char *host, bool user, sd_bus **bus) {
@@ -1309,6 +1341,23 @@ int bus_property_get_bool(
         int b = *(bool*) userdata;
 
         return sd_bus_message_append_basic(reply, 'b', &b);
+}
+
+int bus_property_get_id128(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        sd_id128_t *id = userdata;
+
+        if (sd_id128_is_null(*id)) /* Add an empty array if the ID is zero */
+                return sd_bus_message_append(reply, "ay", 0);
+        else
+                return sd_bus_message_append_array(reply, 'y', id->bytes, 16);
 }
 
 #if __SIZEOF_SIZE_T__ != 8
@@ -1430,7 +1479,7 @@ int bus_path_encode_unique(sd_bus *b, const char *prefix, const char *sender_id,
         if (!external_label)
                 return -ENOMEM;
 
-        p = strjoin(prefix, "/", sender_label, "/", external_label, NULL);
+        p = strjoin(prefix, "/", sender_label, "/", external_label);
         if (!p)
                 return -ENOMEM;
 
@@ -1492,40 +1541,6 @@ int bus_path_decode_unique(const char *path, const char *prefix, char **ret_send
         return 1;
 }
 
-bool is_kdbus_wanted(void) {
-        _cleanup_free_ char *value = NULL;
-#ifdef ENABLE_KDBUS
-        const bool configured = true;
-#else
-        const bool configured = false;
-#endif
-
-        int r;
-
-        if (get_proc_cmdline_key("kdbus", NULL) > 0)
-                return true;
-
-        r = get_proc_cmdline_key("kdbus=", &value);
-        if (r <= 0)
-                return configured;
-
-        return parse_boolean(value) == 1;
-}
-
-bool is_kdbus_available(void) {
-        _cleanup_close_ int fd = -1;
-        struct kdbus_cmd cmd = { .size = sizeof(cmd), .flags = KDBUS_FLAG_NEGOTIATE };
-
-        if (!is_kdbus_wanted())
-                return false;
-
-        fd = open("/sys/fs/kdbus/control", O_RDWR | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
-        if (fd < 0)
-                return false;
-
-        return ioctl(fd, KDBUS_CMD_BUS_MAKE, &cmd) >= 0;
-}
-
 int bus_property_get_rlimit(
                 sd_bus *bus,
                 const char *path,
@@ -1568,4 +1583,23 @@ int bus_property_get_rlimit(
         u = x == RLIM_INFINITY ? (uint64_t) -1 : (uint64_t) x;
 
         return sd_bus_message_append(reply, "t", u);
+}
+
+int bus_track_add_name_many(sd_bus_track *t, char **l) {
+        int r = 0;
+        char **i;
+
+        assert(t);
+
+        /* Continues adding after failure, and returns the first failure. */
+
+        STRV_FOREACH(i, l) {
+                int k;
+
+                k = sd_bus_track_add_name(t, *i);
+                if (k < 0 && r >= 0)
+                        r = k;
+        }
+
+        return r;
 }

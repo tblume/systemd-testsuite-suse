@@ -33,7 +33,7 @@
 
 #include "alloc-util.h"
 #include "fd-util.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "hashmap.h"
 #include "hostname-util.h"
 #include "io-util.h"
@@ -45,6 +45,7 @@
 #include "parse-util.h"
 #include "process-util.h"
 #include "sparse-endian.h"
+#include "stdio-util.h"
 #include "string-table.h"
 #include "string-util.h"
 #include "terminal-util.h"
@@ -206,6 +207,110 @@ static bool print_multiline(FILE *f, unsigned prefix, unsigned n_columns, Output
         return ellipsized;
 }
 
+static int output_timestamp_monotonic(FILE *f, sd_journal *j, const char *monotonic) {
+        sd_id128_t boot_id;
+        uint64_t t;
+        int r;
+
+        assert(f);
+        assert(j);
+
+        r = -ENXIO;
+        if (monotonic)
+                r = safe_atou64(monotonic, &t);
+        if (r < 0)
+                r = sd_journal_get_monotonic_usec(j, &t, &boot_id);
+        if (r < 0)
+                return log_error_errno(r, "Failed to get monotonic timestamp: %m");
+
+        fprintf(f, "[%5"PRI_USEC".%06"PRI_USEC"]", t / USEC_PER_SEC, t % USEC_PER_SEC);
+        return 1 + 5 + 1 + 6 + 1;
+}
+
+static int output_timestamp_realtime(FILE *f, sd_journal *j, OutputMode mode, OutputFlags flags, const char *realtime) {
+        char buf[MAX(FORMAT_TIMESTAMP_MAX, 64)];
+        struct tm *(*gettime_r)(const time_t *, struct tm *);
+        struct tm tm;
+        uint64_t x;
+        time_t t;
+        int r;
+
+        assert(f);
+        assert(j);
+
+        r = -ENXIO;
+        if (realtime)
+                r = safe_atou64(realtime, &x);
+        if (r < 0)
+                r = sd_journal_get_realtime_usec(j, &x);
+        if (r < 0)
+                return log_error_errno(r, "Failed to get realtime timestamp: %m");
+
+        if (x > USEC_TIMESTAMP_FORMATTABLE_MAX) {
+                log_error("Timestamp cannot be printed");
+                return -EINVAL;
+        }
+
+        if (mode == OUTPUT_SHORT_FULL) {
+                const char *k;
+
+                if (flags & OUTPUT_UTC)
+                        k = format_timestamp_utc(buf, sizeof(buf), x);
+                else
+                        k = format_timestamp(buf, sizeof(buf), x);
+                if (!k) {
+                        log_error("Failed to format timestamp.");
+                        return -EINVAL;
+                }
+
+        } else {
+                gettime_r = (flags & OUTPUT_UTC) ? gmtime_r : localtime_r;
+                t = (time_t) (x / USEC_PER_SEC);
+
+                switch (mode) {
+
+                case OUTPUT_SHORT_UNIX:
+                        xsprintf(buf, "%10"PRI_TIME".%06"PRIu64, t, x % USEC_PER_SEC);
+                        break;
+
+                case OUTPUT_SHORT_ISO:
+                        if (strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", gettime_r(&t, &tm)) <= 0) {
+                                log_error("Failed for format ISO time");
+                                return -EINVAL;
+                        }
+                        break;
+
+                case OUTPUT_SHORT:
+                case OUTPUT_SHORT_PRECISE:
+
+                        if (strftime(buf, sizeof(buf), "%b %d %H:%M:%S", gettime_r(&t, &tm)) <= 0) {
+                                log_error("Failed to format syslog time");
+                                return -EINVAL;
+                        }
+
+                        if (mode == OUTPUT_SHORT_PRECISE) {
+                                size_t k;
+
+                                assert(sizeof(buf) > strlen(buf));
+                                k = sizeof(buf) - strlen(buf);
+
+                                r = snprintf(buf + strlen(buf), k, ".%06"PRIu64, x % USEC_PER_SEC);
+                                if (r <= 0 || (size_t) r >= k) { /* too long? */
+                                        log_error("Failed to format precise time");
+                                        return -EINVAL;
+                                }
+                        }
+                        break;
+
+                default:
+                        assert_not_reached("Unknown time format");
+                }
+        }
+
+        fputs(buf, f);
+        return (int) strlen(buf);
+}
+
 static int output_short(
                 FILE *f,
                 sd_journal *j,
@@ -305,80 +410,17 @@ static int output_short(
         if (priority_len == 1 && *priority >= '0' && *priority <= '7')
                 p = *priority - '0';
 
-        if (mode == OUTPUT_SHORT_MONOTONIC) {
-                uint64_t t;
-                sd_id128_t boot_id;
+        if (mode == OUTPUT_SHORT_MONOTONIC)
+                r = output_timestamp_monotonic(f, j, monotonic);
+        else
+                r = output_timestamp_realtime(f, j, mode, flags, realtime);
+        if (r < 0)
+                return r;
+        n += r;
 
-                r = -ENOENT;
-
-                if (monotonic)
-                        r = safe_atou64(monotonic, &t);
-
-                if (r < 0)
-                        r = sd_journal_get_monotonic_usec(j, &t, &boot_id);
-
-                if (r < 0)
-                        return log_error_errno(r, "Failed to get monotonic timestamp: %m");
-
-                fprintf(f, "[%5llu.%06llu]",
-                        (unsigned long long) (t / USEC_PER_SEC),
-                        (unsigned long long) (t % USEC_PER_SEC));
-
-                n += 1 + 5 + 1 + 6 + 1;
-
-        } else {
-                char buf[64];
-                uint64_t x;
-                time_t t;
-                struct tm tm;
-                struct tm *(*gettime_r)(const time_t *, struct tm *);
-
-                r = -ENOENT;
-                gettime_r = (flags & OUTPUT_UTC) ? gmtime_r : localtime_r;
-
-                if (realtime)
-                        r = safe_atou64(realtime, &x);
-
-                if (r < 0)
-                        r = sd_journal_get_realtime_usec(j, &x);
-
-                if (r < 0)
-                        return log_error_errno(r, "Failed to get realtime timestamp: %m");
-
-                t = (time_t) (x / USEC_PER_SEC);
-
-                switch (mode) {
-
-                case OUTPUT_SHORT_UNIX:
-                        r = snprintf(buf, sizeof(buf), "%10llu.%06llu", (unsigned long long) t, (unsigned long long) (x % USEC_PER_SEC));
-                        break;
-
-                case OUTPUT_SHORT_ISO:
-                        r = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", gettime_r(&t, &tm));
-                        break;
-
-                case OUTPUT_SHORT_PRECISE:
-                        r = strftime(buf, sizeof(buf), "%b %d %H:%M:%S", gettime_r(&t, &tm));
-                        if (r > 0)
-                                snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), ".%06llu", (unsigned long long) (x % USEC_PER_SEC));
-                        break;
-
-                default:
-                        r = strftime(buf, sizeof(buf), "%b %d %H:%M:%S", gettime_r(&t, &tm));
-                }
-
-                if (r <= 0) {
-                        log_error("Failed to format time.");
-                        return -EINVAL;
-                }
-
-                fputs(buf, f);
-                n += strlen(buf);
-        }
-
-        if (hostname && (flags & OUTPUT_NO_HOSTNAME)) {
+        if (flags & OUTPUT_NO_HOSTNAME) {
                 /* Suppress display of the hostname if this is requested. */
-                hostname = NULL;
+                hostname = mfree(hostname);
                 hostname_len = 0;
         }
 
@@ -489,7 +531,7 @@ static int output_verbose(
                         off = ANSI_NORMAL;
                 }
 
-                if (flags & OUTPUT_SHOW_ALL ||
+                if ((flags & OUTPUT_SHOW_ALL) ||
                     (((length < PRINT_CHAR_THRESHOLD) || flags & OUTPUT_FULL_WIDTH)
                      && utf8_is_printable(data, length))) {
                         fprintf(f, "    %s%.*s=", on, fieldlen, (const char*)data);
@@ -607,7 +649,7 @@ void json_escape(
         if (!(flags & OUTPUT_SHOW_ALL) && l >= JSON_THRESHOLD)
                 fputs("null", f);
 
-        else if (!utf8_is_printable(p, l)) {
+        else if (!(flags & OUTPUT_SHOW_ALL) && !utf8_is_printable(p, l)) {
                 bool not_first = false;
 
                 fputs("[ ", f);
@@ -910,6 +952,7 @@ static int (*output_funcs[_OUTPUT_MODE_MAX])(
         [OUTPUT_SHORT_PRECISE] = output_short,
         [OUTPUT_SHORT_MONOTONIC] = output_short,
         [OUTPUT_SHORT_UNIX] = output_short,
+        [OUTPUT_SHORT_FULL] = output_short,
         [OUTPUT_VERBOSE] = output_verbose,
         [OUTPUT_EXPORT] = output_export,
         [OUTPUT_JSON] = output_json,

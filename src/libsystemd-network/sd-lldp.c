@@ -19,6 +19,7 @@
 ***/
 
 #include <arpa/inet.h>
+#include <linux/sockios.h>
 
 #include "sd-lldp.h"
 
@@ -374,9 +375,7 @@ _public_ sd_lldp* sd_lldp_unref(sd_lldp *lldp) {
 
         hashmap_free(lldp->neighbor_by_id);
         prioq_free(lldp->neighbor_by_expiry);
-        free(lldp);
-
-        return NULL;
+        return mfree(lldp);
 }
 
 _public_ int sd_lldp_new(sd_lldp **ret) {

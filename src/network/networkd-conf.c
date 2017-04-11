@@ -22,14 +22,16 @@
 #include "conf-parser.h"
 #include "def.h"
 #include "dhcp-identifier.h"
+#include "extract-word.h"
 #include "hexdecoct.h"
 #include "networkd-conf.h"
+#include "networkd-network.h"
 #include "string-table.h"
 
 int manager_parse_config_file(Manager *m) {
         assert(m);
 
-        return config_parse_many(PKGSYSCONFDIR "/networkd.conf",
+        return config_parse_many_nulstr(PKGSYSCONFDIR "/networkd.conf",
                                  CONF_PATHS_NULSTR("systemd/networkd.conf.d"),
                                  "DHCP\0",
                                  config_item_perf_lookup, networkd_gperf_lookup,
@@ -70,7 +72,7 @@ int config_parse_duid_rawdata(
         for (;;) {
                 int n1, n2, len, r;
                 uint32_t byte;
-                 _cleanup_free_ char *cbyte = NULL;
+                _cleanup_free_ char *cbyte = NULL;
 
                 r = extract_first_word(&rvalue, &cbyte, ":", 0);
                 if (r < 0) {

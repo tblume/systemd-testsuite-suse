@@ -1102,7 +1102,7 @@ static int monitor(sd_bus *bus, char *argv[], int (*dump)(sd_bus_message *m, FIL
                         return -EINVAL;
                 }
 
-                m = strjoin("sender='", *i, "'", NULL);
+                m = strjoin("sender='", *i, "'");
                 if (!m)
                         return log_oom();
 
@@ -1111,7 +1111,7 @@ static int monitor(sd_bus *bus, char *argv[], int (*dump)(sd_bus_message *m, FIL
                         return bus_log_create_error(r);
 
                 free(m);
-                m = strjoin("destination='", *i, "'", NULL);
+                m = strjoin("destination='", *i, "'");
                 if (!m)
                         return log_oom();
 
@@ -1987,7 +1987,7 @@ static int busctl_main(sd_bus *bus, int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
-        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        sd_bus *bus = NULL;
         int r;
 
         log_parse_environment();
@@ -2003,8 +2003,7 @@ int main(int argc, char *argv[]) {
                 goto finish;
         }
 
-        if (streq_ptr(argv[optind], "monitor") ||
-            streq_ptr(argv[optind], "capture")) {
+        if (STRPTR_IN_SET(argv[optind], "monitor", "capture")) {
 
                 r = sd_bus_set_monitor(bus, true);
                 if (r < 0) {
@@ -2078,6 +2077,7 @@ int main(int argc, char *argv[]) {
         r = busctl_main(bus, argc, argv);
 
 finish:
+        sd_bus_flush_close_unref(bus);
         pager_close();
 
         strv_free(arg_matches);

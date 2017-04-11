@@ -48,6 +48,10 @@ on 1 byte), but shoehorning those bytes into integers efficiently is messy.
 # include <endian.h>    /* attempt to define endianness */
 #endif
 
+#if __GNUC__ >= 7
+_Pragma("GCC diagnostic ignored \"-Wimplicit-fallthrough\"")
+#endif
+
 /*
  * My best guess at if you are big-endian or little-endian.  This may
  * need adjustment.
@@ -317,7 +321,7 @@ uint32_t jenkins_hashlittle( const void *key, size_t length, uint32_t initval)
      * still catch it and complain.  The masking trick does make the hash
      * noticeably faster for short strings (like English words).
      */
-#ifndef VALGRIND
+#if !defined(VALGRIND) && !defined(__SANITIZE_ADDRESS__)
 
     switch(length)
     {
@@ -503,7 +507,7 @@ void jenkins_hashlittle2(
      * still catch it and complain.  The masking trick does make the hash
      * noticeably faster for short strings (like English words).
      */
-#ifndef VALGRIND
+#if !defined(VALGRIND) && !defined(__SANITIZE_ADDRESS__)
 
     switch(length)
     {
@@ -681,7 +685,7 @@ uint32_t jenkins_hashbig( const void *key, size_t length, uint32_t initval)
      * still catch it and complain.  The masking trick does make the hash
      * noticeably faster for short strings (like English words).
      */
-#ifndef VALGRIND
+#if !defined(VALGRIND) && !defined(__SANITIZE_ADDRESS__)
 
     switch(length)
     {

@@ -50,9 +50,7 @@ PullJob* pull_job_unref(PullJob *j) {
         free(j->payload);
         free(j->checksum);
 
-        free(j);
-
-        return NULL;
+        return mfree(j);
 }
 
 static void pull_job_finish(PullJob *j, int ret) {
@@ -529,7 +527,7 @@ int pull_job_new(PullJob **ret, const char *url, CurlGlue *glue, void *userdata)
         j->glue = glue;
         j->content_length = (uint64_t) -1;
         j->start_usec = now(CLOCK_MONOTONIC);
-        j->compressed_max = j->uncompressed_max = 8LLU * 1024LLU * 1024LLU * 1024LLU; /* 8GB */
+        j->compressed_max = j->uncompressed_max = 64LLU * 1024LLU * 1024LLU * 1024LLU; /* 64GB safety limit */
 
         j->url = strdup(url);
         if (!j->url)

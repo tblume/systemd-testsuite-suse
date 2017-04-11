@@ -24,13 +24,16 @@
 #include "firewall-util.h"
 #include "netlink-util.h"
 #include "networkd-address.h"
-#include "networkd.h"
+#include "networkd-manager.h"
 #include "parse-util.h"
 #include "set.h"
 #include "socket-util.h"
 #include "string-util.h"
 #include "utf8.h"
 #include "util.h"
+
+#define ADDRESSES_PER_LINK_MAX 2048U
+#define STATIC_ADDRESSES_PER_NETWORK_MAX 1024U
 
 int address_new(Address **ret) {
         _cleanup_address_free_ Address *address = NULL;
@@ -50,12 +53,21 @@ int address_new(Address **ret) {
         return 0;
 }
 
-int address_new_static(Network *network, unsigned section, Address **ret) {
+int address_new_static(Network *network, const char *filename, unsigned section_line, Address **ret) {
+        _cleanup_network_config_section_free_ NetworkConfigSection *n = NULL;
         _cleanup_address_free_ Address *address = NULL;
         int r;
 
-        if (section) {
-                address = hashmap_get(network->addresses_by_section, UINT_TO_PTR(section));
+        assert(network);
+        assert(ret);
+        assert(!!filename == (section_line > 0));
+
+        if (filename) {
+                r = network_config_section_new(filename, section_line, &n);
+                if (r < 0)
+                        return r;
+
+                address = hashmap_get(network->addresses_by_section, n);
                 if (address) {
                         *ret = address;
                         address = NULL;
@@ -64,18 +76,25 @@ int address_new_static(Network *network, unsigned section, Address **ret) {
                 }
         }
 
+        if (network->n_static_addresses >= STATIC_ADDRESSES_PER_NETWORK_MAX)
+                return -E2BIG;
+
         r = address_new(&address);
         if (r < 0)
                 return r;
 
-        if (section) {
-                address->section = section;
-                hashmap_put(network->addresses_by_section,
-                            UINT_TO_PTR(address->section), address);
+        if (filename) {
+                address->section = n;
+                n = NULL;
+
+                r = hashmap_put(network->addresses_by_section, address->section, address);
+                if (r < 0)
+                        return r;
         }
 
         address->network = network;
         LIST_APPEND(addresses, network->static_addresses, address);
+        network->n_static_addresses++;
 
         *ret = address;
         address = NULL;
@@ -89,10 +108,13 @@ void address_free(Address *address) {
 
         if (address->network) {
                 LIST_REMOVE(addresses, address->network->static_addresses, address);
+                assert(address->network->n_static_addresses > 0);
+                address->network->n_static_addresses--;
 
-                if (address->section)
-                        hashmap_remove(address->network->addresses_by_section,
-                                       UINT_TO_PTR(address->section));
+                if (address->section) {
+                        hashmap_remove(address->network->addresses_by_section, address->section);
+                        network_config_section_free(address->section);
+                }
         }
 
         if (address->link) {
@@ -328,7 +350,12 @@ static int address_release(Address *address) {
         return 0;
 }
 
-int address_update(Address *address, unsigned char flags, unsigned char scope, struct ifa_cacheinfo *cinfo) {
+int address_update(
+                Address *address,
+                unsigned char flags,
+                unsigned char scope,
+                const struct ifa_cacheinfo *cinfo) {
+
         bool ready;
         int r;
 
@@ -383,31 +410,38 @@ int address_drop(Address *address) {
         return 0;
 }
 
-int address_get(Link *link, int family, const union in_addr_union *in_addr, unsigned char prefixlen, Address **ret) {
-        Address address = {}, *existing;
+int address_get(Link *link,
+                int family,
+                const union in_addr_union *in_addr,
+                unsigned char prefixlen,
+                Address **ret) {
+
+        Address address, *existing;
 
         assert(link);
         assert(in_addr);
-        assert(ret);
 
-        address.family = family;
-        address.in_addr = *in_addr;
-        address.prefixlen = prefixlen;
+        address = (Address) {
+                .family = family,
+                .in_addr = *in_addr,
+                .prefixlen = prefixlen,
+        };
 
         existing = set_get(link->addresses, &address);
         if (existing) {
-                *ret = existing;
-
+                if (ret)
+                        *ret = existing;
                 return 1;
-        } else {
-                existing = set_get(link->addresses_foreign, &address);
-                if (!existing)
-                        return -ENOENT;
         }
 
-        *ret = existing;
+        existing = set_get(link->addresses_foreign, &address);
+        if (existing) {
+                if (ret)
+                        *ret = existing;
+                return 0;
+        }
 
-        return 0;
+        return -ENOENT;
 }
 
 int address_remove(
@@ -509,7 +543,12 @@ static int address_acquire(Link *link, Address *original, Address **ret) {
         return 0;
 }
 
-int address_configure(Address *address, Link *link, sd_netlink_message_handler_t callback, bool update) {
+int address_configure(
+                Address *address,
+                Link *link,
+                sd_netlink_message_handler_t callback,
+                bool update) {
+
         _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *req = NULL;
         int r;
 
@@ -519,6 +558,11 @@ int address_configure(Address *address, Link *link, sd_netlink_message_handler_t
         assert(link->ifindex > 0);
         assert(link->manager);
         assert(link->manager->rtnl);
+
+        /* If this is a new address, then refuse adding more than the limit */
+        if (address_get(link, address->family, &address->in_addr, address->prefixlen, NULL) <= 0 &&
+            set_size(link->addresses) >= ADDRESSES_PER_LINK_MAX)
+                return -E2BIG;
 
         r = address_acquire(link, address, &address);
         if (r < 0)
@@ -538,6 +582,21 @@ int address_configure(Address *address, Link *link, sd_netlink_message_handler_t
                 return log_error_errno(r, "Could not set prefixlen: %m");
 
         address->flags |= IFA_F_PERMANENT;
+
+        if (address->home_address)
+                address->flags |= IFA_F_HOMEADDRESS;
+
+        if (address->duplicate_address_detection)
+                address->flags |= IFA_F_NODAD;
+
+        if (address->manage_temporary_address)
+                address->flags |= IFA_F_MANAGETEMPADDR;
+
+        if (address->prefix_route)
+                address->flags |= IFA_F_NOPREFIXROUTE;
+
+        if (address->autojoin)
+                address->flags |= IFA_F_MCAUTOJOIN;
 
         r = sd_rtnl_message_addr_set_flags(req, (address->flags & 0xff));
         if (r < 0)
@@ -629,7 +688,7 @@ int config_parse_broadcast(
         assert(rvalue);
         assert(data);
 
-        r = address_new_static(network, section_line, &n);
+        r = address_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -676,10 +735,10 @@ int config_parse_address(const char *unit,
         if (streq(section, "Network")) {
                 /* we are not in an Address section, so treat
                  * this as the special '0' section */
-                section_line = 0;
-        }
+                r = address_new_static(network, NULL, 0, &n);
+        } else
+                r = address_new_static(network, filename, section_line, &n);
 
-        r = address_new_static(network, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -758,12 +817,12 @@ int config_parse_label(
         assert(rvalue);
         assert(data);
 
-        r = address_new_static(network, section_line, &n);
+        r = address_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
-        if (!ifname_valid(rvalue)) {
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Interface label is not valid or too long, ignoring assignment: %s", rvalue);
+        if (!address_label_valid(rvalue)) {
+                log_syntax(unit, LOG_ERR, filename, line, 0, "Interface label is too long or invalid, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
@@ -797,7 +856,7 @@ int config_parse_lifetime(const char *unit,
         assert(rvalue);
         assert(data);
 
-        r = address_new_static(network, section_line, &n);
+        r = address_new_static(network, filename, section_line, &n);
         if (r < 0)
                 return r;
 
@@ -820,6 +879,50 @@ int config_parse_lifetime(const char *unit,
                 n->cinfo.ifa_prefered = k;
                 n = NULL;
         }
+
+        return 0;
+}
+
+int config_parse_address_flags(const char *unit,
+                               const char *filename,
+                               unsigned line,
+                               const char *section,
+                               unsigned section_line,
+                               const char *lvalue,
+                               int ltype,
+                               const char *rvalue,
+                               void *data,
+                               void *userdata) {
+        Network *network = userdata;
+        _cleanup_address_free_ Address *n = NULL;
+        int r;
+
+        assert(filename);
+        assert(section);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        r = address_new_static(network, filename, section_line, &n);
+        if (r < 0)
+                return r;
+
+        r = parse_boolean(rvalue);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse address flag, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        if (streq(lvalue, "HomeAddress"))
+                n->home_address = r;
+        else if (streq(lvalue, "DuplicateAddressDetection"))
+                n->duplicate_address_detection = r;
+        else if (streq(lvalue, "ManageTemporaryAddress"))
+                n->manage_temporary_address = r;
+        else if (streq(lvalue, "PrefixRoute"))
+                n->prefix_route = r;
+        else if (streq(lvalue, "AutoJoin"))
+                n->autojoin = r;
 
         return 0;
 }

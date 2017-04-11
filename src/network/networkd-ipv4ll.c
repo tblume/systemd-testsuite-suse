@@ -21,7 +21,9 @@
 #include <linux/if.h>
 
 #include "network-internal.h"
-#include "networkd.h"
+#include "networkd-address.h"
+#include "networkd-manager.h"
+#include "networkd-link.h"
 
 static int ipv4ll_address_lost(Link *link) {
         _cleanup_address_free_ Address *address = NULL;
@@ -138,7 +140,7 @@ static int ipv4ll_address_claimed(sd_ipv4ll *ll, Link *link) {
         ll_addr->family = AF_INET;
         ll_addr->in_addr.in = address;
         ll_addr->prefixlen = 16;
-        ll_addr->broadcast.s_addr = ll_addr->in_addr.in.s_addr | htonl(0xfffffffflu >> ll_addr->prefixlen);
+        ll_addr->broadcast.s_addr = ll_addr->in_addr.in.s_addr | htobe32(0xfffffffflu >> ll_addr->prefixlen);
         ll_addr->scope = RT_SCOPE_LINK;
 
         r = address_configure(ll_addr, link, ipv4ll_address_handler, false);
@@ -171,7 +173,6 @@ static void ipv4ll_handler(sd_ipv4ll *ll, int event, void *userdata) {
 
         assert(link);
         assert(link->network);
-        assert(link->manager);
 
         if (IN_SET(link->state, LINK_STATE_FAILED, LINK_STATE_LINGER))
                 return;

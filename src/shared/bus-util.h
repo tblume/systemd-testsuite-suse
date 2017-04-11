@@ -50,9 +50,9 @@ struct bus_properties_map {
 
 int bus_map_id128(sd_bus *bus, const char *member, sd_bus_message *m, sd_bus_error *error, void *userdata);
 
-int bus_message_map_all_properties(sd_bus_message *m, const struct bus_properties_map *map,  void *userdata);
-int bus_message_map_properties_changed(sd_bus_message *m, const struct bus_properties_map *map, void *userdata);
-int bus_map_all_properties(sd_bus *bus, const char *destination, const char *path, const struct bus_properties_map *map, void *userdata);
+int bus_message_map_all_properties(sd_bus_message *m, const struct bus_properties_map *map, sd_bus_error *error, void *userdata);
+int bus_message_map_properties_changed(sd_bus_message *m, const struct bus_properties_map *map, sd_bus_error *error, void *userdata);
+int bus_map_all_properties(sd_bus *bus, const char *destination, const char *path, const struct bus_properties_map *map, sd_bus_error *error, void *userdata);
 
 int bus_async_unregister_and_exit(sd_event *e, sd_bus *bus, const char *name);
 
@@ -79,6 +79,7 @@ int bus_print_property(const char *name, sd_bus_message *property, bool value, b
 int bus_print_all_properties(sd_bus *bus, const char *dest, const char *path, char **filter, bool value, bool all);
 
 int bus_property_get_bool(sd_bus *bus, const char *path, const char *interface, const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *error);
+int bus_property_get_id128(sd_bus *bus, const char *path, const char *interface, const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *error);
 
 #define bus_property_get_usec ((sd_bus_property_get_t) NULL)
 #define bus_property_set_usec ((sd_bus_property_set_t) NULL)
@@ -157,7 +158,6 @@ int bus_log_create_error(int r);
 int bus_path_encode_unique(sd_bus *b, const char *prefix, const char *sender_id, const char *external_id, char **ret_path);
 int bus_path_decode_unique(const char *path, const char *prefix, char **ret_sender, char **ret_external);
 
-bool is_kdbus_wanted(void);
-bool is_kdbus_available(void);
-
 int bus_property_get_rlimit(sd_bus *bus, const char *path, const char *interface, const char *property, sd_bus_message *reply, void *userdata, sd_bus_error *error);
+
+int bus_track_add_name_many(sd_bus_track *t, char **l);

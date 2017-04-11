@@ -101,7 +101,7 @@ int config_item_perf_lookup(
         else {
                 char *key;
 
-                key = strjoin(section, ".", lvalue, NULL);
+                key = strjoin(section, ".", lvalue);
                 if (!key)
                         return -ENOMEM;
 
@@ -323,8 +323,7 @@ int config_parse(const char *unit,
                         if (feof(f))
                                 break;
 
-                        log_error_errno(errno, "Failed to read configuration file '%s': %m", filename);
-                        return -errno;
+                        return log_error_errno(errno, "Failed to read configuration file '%s': %m", filename);
                 }
 
                 l = buf;
@@ -397,21 +396,17 @@ int config_parse(const char *unit,
         return 0;
 }
 
-/* Parse each config file in the specified directories. */
-int config_parse_many(const char *conf_file,
-                      const char *conf_file_dirs,
-                      const char *sections,
-                      ConfigItemLookup lookup,
-                      const void *table,
-                      bool relaxed,
-                      void *userdata) {
-        _cleanup_strv_free_ char **files = NULL;
+static int config_parse_many_files(
+                const char *conf_file,
+                char **files,
+                const char *sections,
+                ConfigItemLookup lookup,
+                const void *table,
+                bool relaxed,
+                void *userdata) {
+
         char **fn;
         int r;
-
-        r = conf_files_list_nulstr(&files, ".conf", NULL, conf_file_dirs);
-        if (r < 0)
-                return r;
 
         if (conf_file) {
                 r = config_parse(NULL, conf_file, NULL, sections, lookup, table, relaxed, false, true, userdata);
@@ -426,6 +421,56 @@ int config_parse_many(const char *conf_file,
         }
 
         return 0;
+}
+
+/* Parse each config file in the directories specified as nulstr. */
+int config_parse_many_nulstr(
+                const char *conf_file,
+                const char *conf_file_dirs,
+                const char *sections,
+                ConfigItemLookup lookup,
+                const void *table,
+                bool relaxed,
+                void *userdata) {
+
+        _cleanup_strv_free_ char **files = NULL;
+        int r;
+
+        r = conf_files_list_nulstr(&files, ".conf", NULL, conf_file_dirs);
+        if (r < 0)
+                return r;
+
+        return config_parse_many_files(conf_file, files,
+                                       sections, lookup, table, relaxed, userdata);
+}
+
+/* Parse each config file in the directories specified as strv. */
+int config_parse_many(
+                const char *conf_file,
+                const char* const* conf_file_dirs,
+                const char *dropin_dirname,
+                const char *sections,
+                ConfigItemLookup lookup,
+                const void *table,
+                bool relaxed,
+                void *userdata) {
+
+        _cleanup_strv_free_ char **dropin_dirs = NULL;
+        _cleanup_strv_free_ char **files = NULL;
+        const char *suffix;
+        int r;
+
+        suffix = strjoina("/", dropin_dirname);
+        r = strv_extend_strv_concat(&dropin_dirs, (char**) conf_file_dirs, suffix);
+        if (r < 0)
+                return r;
+
+        r = conf_files_list_strv(&files, ".conf", NULL, (const char* const*) dropin_dirs);
+        if (r < 0)
+                return r;
+
+        return config_parse_many_files(conf_file, files,
+                                       sections, lookup, table, relaxed, userdata);
 }
 
 #define DEFINE_PARSER(type, vartype, conv_func)                         \
@@ -461,6 +506,7 @@ int config_parse_many(const char *conf_file,
 
 DEFINE_PARSER(int, int, safe_atoi);
 DEFINE_PARSER(long, long, safe_atoli);
+DEFINE_PARSER(uint16, uint16_t, safe_atou16);
 DEFINE_PARSER(uint32, uint32_t, safe_atou32);
 DEFINE_PARSER(uint64, uint64_t, safe_atou64);
 DEFINE_PARSER(unsigned, unsigned, safe_atou);
@@ -708,6 +754,7 @@ int config_parse_strv(const char *unit,
                       void *userdata) {
 
         char ***sv = data;
+        int r;
 
         assert(filename);
         assert(lvalue);
@@ -721,19 +768,20 @@ int config_parse_strv(const char *unit,
                  * we actually fill in a real empty array here rather
                  * than NULL, since some code wants to know if
                  * something was set at all... */
-                empty = strv_new(NULL, NULL);
+                empty = new0(char*, 1);
                 if (!empty)
                         return log_oom();
 
                 strv_free(*sv);
                 *sv = empty;
+
                 return 0;
         }
 
         for (;;) {
                 char *word = NULL;
-                int r;
-                r = extract_first_word(&rvalue, &word, WHITESPACE, EXTRACT_QUOTES|EXTRACT_RETAIN_ESCAPE);
+
+                r = extract_first_word(&rvalue, &word, NULL, EXTRACT_QUOTES|EXTRACT_RETAIN_ESCAPE);
                 if (r == 0)
                         break;
                 if (r == -ENOMEM)

@@ -147,7 +147,7 @@ static int timer_setup_persistent(Timer *t) {
 
                 e = getenv("XDG_DATA_HOME");
                 if (e)
-                        t->stamp_path = strjoin(e, "/systemd/timers/stamp-", UNIT(t)->id, NULL);
+                        t->stamp_path = strjoin(e, "/systemd/timers/stamp-", UNIT(t)->id);
                 else {
 
                         _cleanup_free_ char *h = NULL;
@@ -156,7 +156,7 @@ static int timer_setup_persistent(Timer *t) {
                         if (r < 0)
                                 return log_unit_error_errno(UNIT(t), r, "Failed to determine home directory: %m");
 
-                        t->stamp_path = strjoin(h, "/.local/share/systemd/timers/stamp-", UNIT(t)->id, NULL);
+                        t->stamp_path = strjoin(h, "/.local/share/systemd/timers/stamp-", UNIT(t)->id);
                 }
         }
 
@@ -232,7 +232,7 @@ static void timer_dump(Unit *u, FILE *f, const char *prefix) {
                 if (v->base == TIMER_CALENDAR) {
                         _cleanup_free_ char *p = NULL;
 
-                        calendar_spec_to_string(v->calendar_spec, &p);
+                        (void) calendar_spec_to_string(v->calendar_spec, &p);
 
                         fprintf(f,
                                 "%s%s: %s\n",
@@ -261,6 +261,8 @@ static void timer_set_state(Timer *t, TimerState state) {
         if (state != TIMER_WAITING) {
                 t->monotonic_event_source = sd_event_source_unref(t->monotonic_event_source);
                 t->realtime_event_source = sd_event_source_unref(t->realtime_event_source);
+                t->next_elapse_monotonic_or_boottime = USEC_INFINITY;
+                t->next_elapse_realtime = USEC_INFINITY;
         }
 
         if (state != old_state)
@@ -291,7 +293,7 @@ static int timer_coldplug(Unit *u) {
 static void timer_enter_dead(Timer *t, TimerResult f) {
         assert(t);
 
-        if (f != TIMER_SUCCESS)
+        if (t->result == TIMER_SUCCESS)
                 t->result = f;
 
         timer_set_state(t, t->result != TIMER_SUCCESS ? TIMER_FAILED : TIMER_DEAD);
@@ -348,7 +350,7 @@ static void add_random(Timer *t, usec_t *v) {
         else
                 *v += add;
 
-        log_unit_info(UNIT(t), "Adding %s random time.", format_timespan(s, sizeof(s), add, 0));
+        log_unit_debug(UNIT(t), "Adding %s random time.", format_timespan(s, sizeof(s), add, 0));
 }
 
 static void timer_enter_waiting(Timer *t, bool initial) {
@@ -420,7 +422,8 @@ static void timer_enter_waiting(Timer *t, bool initial) {
                                 }
                                 /* In a container we don't want to include the time the host
                                  * was already up when the container started, so count from
-                                 * our own startup. Fall through. */
+                                 * our own startup. */
+                                /* fall through */
                         case TIMER_STARTUP:
                                 base = UNIT(t)->manager->userspace_timestamp.monotonic;
                                 break;
@@ -616,6 +619,10 @@ static int timer_start(Unit *u) {
                 return r;
         }
 
+        r = unit_acquire_invocation_id(u);
+        if (r < 0)
+                return r;
+
         t->last_trigger = DUAL_TIMESTAMP_NULL;
 
         /* Reenable all timers that depend on unit activation time */
@@ -632,7 +639,7 @@ static int timer_start(Unit *u) {
                         /* The timer has never run before,
                          * make sure a stamp file exists.
                          */
-                        touch_file(t->stamp_path, true, USEC_INFINITY, UID_INVALID, GID_INVALID, MODE_INVALID);
+                        (void) touch_file(t->stamp_path, true, USEC_INFINITY, UID_INVALID, GID_INVALID, MODE_INVALID);
         }
 
         t->result = TIMER_SUCCESS;

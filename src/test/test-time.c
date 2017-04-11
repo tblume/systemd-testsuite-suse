@@ -17,6 +17,8 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include "random-util.h"
+#include "string-util.h"
 #include "strv.h"
 #include "time-util.h"
 
@@ -41,6 +43,10 @@ static void test_parse_sec(void) {
         assert_se(u == 2500 * USEC_PER_MSEC);
         assert_se(parse_sec(".7", &u) >= 0);
         assert_se(u == 700 * USEC_PER_MSEC);
+        assert_se(parse_sec("23us", &u) >= 0);
+        assert_se(u == 23);
+        assert_se(parse_sec("23µs", &u) >= 0);
+        assert_se(u == 23);
         assert_se(parse_sec("infinity", &u) >= 0);
         assert_se(u == USEC_INFINITY);
         assert_se(parse_sec(" infinity ", &u) >= 0);
@@ -201,6 +207,72 @@ static void test_usec_sub(void) {
         assert_se(usec_sub(USEC_INFINITY, 5) == USEC_INFINITY);
 }
 
+static void test_format_timestamp(void) {
+        unsigned i;
+
+        for (i = 0; i < 100; i++) {
+                char buf[MAX(FORMAT_TIMESTAMP_MAX, FORMAT_TIMESPAN_MAX)];
+                usec_t x, y;
+
+                random_bytes(&x, sizeof(x));
+                x = x % (2147483600 * USEC_PER_SEC) + 1;
+
+                assert_se(format_timestamp(buf, sizeof(buf), x));
+                log_info("%s", buf);
+                assert_se(parse_timestamp(buf, &y) >= 0);
+                assert_se(x / USEC_PER_SEC == y / USEC_PER_SEC);
+
+                assert_se(format_timestamp_utc(buf, sizeof(buf), x));
+                log_info("%s", buf);
+                assert_se(parse_timestamp(buf, &y) >= 0);
+                assert_se(x / USEC_PER_SEC == y / USEC_PER_SEC);
+
+                assert_se(format_timestamp_us(buf, sizeof(buf), x));
+                log_info("%s", buf);
+                assert_se(parse_timestamp(buf, &y) >= 0);
+                assert_se(x == y);
+
+                assert_se(format_timestamp_us_utc(buf, sizeof(buf), x));
+                log_info("%s", buf);
+                assert_se(parse_timestamp(buf, &y) >= 0);
+                assert_se(x == y);
+
+                assert_se(format_timestamp_relative(buf, sizeof(buf), x));
+                log_info("%s", buf);
+                assert_se(parse_timestamp(buf, &y) >= 0);
+
+                /* The two calls above will run with a slightly different local time. Make sure we are in the same
+                 * range however, but give enough leeway that this is unlikely to explode. And of course,
+                 * format_timestamp_relative() scales the accuracy with the distance from the current time up to one
+                 * month, cover for that too. */
+                assert_se(y > x ? y - x : x - y <= USEC_PER_MONTH + USEC_PER_DAY);
+        }
+}
+
+static void test_format_timestamp_utc_one(usec_t t, const char *result) {
+        char buf[FORMAT_TIMESTAMP_MAX];
+
+        assert_se(!format_timestamp_utc(buf, sizeof(buf), t) == !result);
+
+        if (result)
+                assert_se(streq(result, buf));
+}
+
+static void test_format_timestamp_utc(void) {
+        test_format_timestamp_utc_one(0, NULL);
+        test_format_timestamp_utc_one(1, "Thu 1970-01-01 00:00:00 UTC");
+        test_format_timestamp_utc_one(USEC_PER_SEC, "Thu 1970-01-01 00:00:01 UTC");
+
+#if SIZEOF_TIME_T == 8
+        test_format_timestamp_utc_one(USEC_TIMESTAMP_FORMATTABLE_MAX, "Thu 9999-12-30 23:59:59 UTC");
+#elif SIZEOF_TIME_T == 4
+        test_format_timestamp_utc_one(USEC_TIMESTAMP_FORMATTABLE_MAX, "Tue 2038-01-19 03:14:07 UTC");
+#endif
+
+        test_format_timestamp_utc_one(USEC_TIMESTAMP_FORMATTABLE_MAX+1, NULL);
+        test_format_timestamp_utc_one(USEC_INFINITY, NULL);
+}
+
 int main(int argc, char *argv[]) {
         uintmax_t x;
 
@@ -214,6 +286,8 @@ int main(int argc, char *argv[]) {
         test_get_timezones();
         test_usec_add();
         test_usec_sub();
+        test_format_timestamp();
+        test_format_timestamp_utc();
 
         /* Ensure time_t is signed */
         assert_cc((time_t) -1 < (time_t) 1);

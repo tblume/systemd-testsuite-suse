@@ -186,12 +186,11 @@
       <varlistentry>
          <term><option>--uid=</option></term>
 
-         <listitem><para>When used with the <command>shell</command>
-         command, chooses the user ID to open the interactive shell
-         session as. If this switch is not specified, defaults to
-         <literal>root</literal>. Note that this switch is not
-         supported for the <command>login</command> command (see
-         below).</para></listitem>
+         <listitem><para>When used with the <command>shell</command> command, chooses the user ID to
+         open the interactive shell session as. If the argument to the <command>shell</command>
+         command also specifies a user name, this option is ignored. If the name is not specified
+         in either way, <literal>root</literal> will be used by default. Note that this switch is
+         not supported for the <command>login</command> command (see below).</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -285,6 +284,20 @@
         name passed.</para></listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term><option>--max-addresses=</option></term>
+
+        <listitem><para>When used with the <option>list-machines</option>
+        command, limits the number of ip addresses output for every machine.
+        Defaults to 1. All addresses can be requested with <literal>all</literal>
+        as argument to <option>--max-addresses</option> . If the argument to
+        <option>--max-addresses</option> is less than the actual number
+        of addresses, <literal>...</literal>follows the last address.
+        If multiple addresses are to be written for a given machine, every
+        address except the first one is on a new line and is followed by
+        <literal>,</literal> if another address will be output afterwards. </para></listitem>
+      </varlistentry>
+
       <xi:include href="user-system-options.xml" xpointer="host" />
       <xi:include href="user-system-options.xml" xpointer="machine" />
 
@@ -314,7 +327,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>status</command> <replaceable>NAME</replaceable>...</term>
+        <term><command>status</command> <replaceable>NAME</replaceable>…</term>
 
         <listitem><para>Show runtime status information about
         one or more virtual machines and containers, followed by the
@@ -328,24 +341,19 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>show</command> [<replaceable>NAME</replaceable>...]</term>
+        <term><command>show</command> [<replaceable>NAME</replaceable>…]</term>
 
-        <listitem><para>Show properties of one or more registered
-        virtual machines or containers or the manager itself. If no
-        argument is specified, properties of the manager will be
-        shown. If an NAME is specified, properties of this virtual
-        machine or container are shown. By default, empty properties
-        are suppressed. Use <option>--all</option> to show those too.
-        To select specific properties to show, use
-        <option>--property=</option>. This command is intended to be
-        used whenever computer-parsable output is required, and does
-        not print the cgroup tree or journal entries. Use
-        <command>status</command> if you are looking for formatted
-        human-readable output.</para></listitem>
+        <listitem><para>Show properties of one or more registered virtual machines or containers or the manager
+        itself. If no argument is specified, properties of the manager will be shown. If a NAME is specified,
+        properties of this virtual machine or container are shown. By default, empty properties are suppressed. Use
+        <option>--all</option> to show those too.  To select specific properties to show, use
+        <option>--property=</option>. This command is intended to be used whenever computer-parsable output is
+        required, and does not print the control group tree or journal entries. Use <command>status</command> if you
+        are looking for formatted human-readable output.</para></listitem>
       </varlistentry>
 
       <varlistentry>
-        <term><command>start</command> <replaceable>NAME</replaceable>...</term>
+        <term><command>start</command> <replaceable>NAME</replaceable>…</term>
 
         <listitem><para>Start a container as a system service, using
         <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry>.
@@ -402,7 +410,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>shell</command> [[<replaceable>NAME</replaceable>@]<replaceable>NAME</replaceable> [<replaceable>PATH</replaceable> [<replaceable>ARGUMENTS</replaceable>...]]] </term>
+        <term><command>shell</command> [[<replaceable>NAME</replaceable>@]<replaceable>NAME</replaceable> [<replaceable>PATH</replaceable> [<replaceable>ARGUMENTS</replaceable>…]]] </term>
 
         <listitem><para>Open an interactive shell session in a
         container or on the local host. The first argument refers to
@@ -420,6 +428,9 @@
         user may be selected. Use <option>--setenv=</option> to set
         environment variables for the executed process.</para>
 
+        <para>Note that <command>machinectl shell</command> does not propagate the exit code/status of the invoked
+        shell process. Use <command>systemd-run</command> instead if that information is required (see below).</para>
+
         <para>When using the <command>shell</command> command without
         arguments, (thus invoking the executed shell or command on the
         local host), it is in many ways similar to a <citerefentry
@@ -432,17 +443,20 @@
         environment variables or resource limits, among other
         properties.</para>
 
-        <para>Note that
-        <citerefentry><refentrytitle>systemd-run</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-        may be used in place of the <command>shell</command> command,
-        and allows more detailed, low-level configuration of the
-        invoked unit. However, it is frequently more privileged than
-        the <command>shell</command> command.</para></listitem>
+        <para>Note that <citerefentry><refentrytitle>systemd-run</refentrytitle><manvolnum>1</manvolnum></citerefentry>
+        with its <option>--machine=</option> switch may be used in place of the <command>machinectl shell</command>
+        command, and allows non-interactive operation, more detailed and low-level configuration of the invoked unit,
+        as well as access to runtime and exit code/status information of the invoked shell process. In particular, use
+        <command>systemd-run</command>'s <option>--wait</option> switch to propagate exit status information of the
+        invoked process. Use <command>systemd-run</command>'s <option>--pty</option> switch for acquiring an
+        interactive shell, similar to <command>machinectl shell</command>. In general, <command>systemd-run</command>
+        is preferable for scripting purposes. However, note that <command>systemd-run</command> might require higher
+        privileges than <command>machinectl shell</command>.</para></listitem>
       </varlistentry>
 
       <varlistentry>
-        <term><command>enable</command> <replaceable>NAME</replaceable>...</term>
-        <term><command>disable</command> <replaceable>NAME</replaceable>...</term>
+        <term><command>enable</command> <replaceable>NAME</replaceable>…</term>
+        <term><command>disable</command> <replaceable>NAME</replaceable>…</term>
 
         <listitem><para>Enable or disable a container as a system
         service to start at system boot, using
@@ -455,7 +469,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>poweroff</command> <replaceable>NAME</replaceable>...</term>
+        <term><command>poweroff</command> <replaceable>NAME</replaceable>…</term>
 
         <listitem><para>Power off one or more containers. This will
         trigger a reboot by sending SIGRTMIN+4 to the container's init
@@ -470,7 +484,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>reboot</command> <replaceable>NAME</replaceable>...</term>
+        <term><command>reboot</command> <replaceable>NAME</replaceable>…</term>
 
         <listitem><para>Reboot one or more containers. This will
         trigger a reboot by sending SIGINT to the container's init
@@ -480,7 +494,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>terminate</command> <replaceable>NAME</replaceable>...</term>
+        <term><command>terminate</command> <replaceable>NAME</replaceable>…</term>
 
         <listitem><para>Immediately terminates a virtual machine or
         container, without cleanly shutting it down. This kills all
@@ -491,7 +505,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>kill</command> <replaceable>NAME</replaceable>...</term>
+        <term><command>kill</command> <replaceable>NAME</replaceable>…</term>
 
         <listitem><para>Send a signal to one or more processes of the
         virtual machine or container. This means processes as seen by
@@ -504,19 +518,14 @@
       <varlistentry>
         <term><command>bind</command> <replaceable>NAME</replaceable> <replaceable>PATH</replaceable> [<replaceable>PATH</replaceable>]</term>
 
-        <listitem><para>Bind mounts a directory from the host into the
-        specified container. The first directory argument is the
-        source directory on the host, the second directory argument
-        is the destination directory in the container. When the
-        latter is omitted, the destination path in the container is
-        the same as the source path on the host. When combined with
-        the <option>--read-only</option> switch, a ready-only bind
-        mount is created. When combined with the
-        <option>--mkdir</option> switch, the destination path is first
-        created before the mount is applied. Note that this option is
-        currently only supported for
-        <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-        containers.</para></listitem>
+        <listitem><para>Bind mounts a directory from the host into the specified container. The first directory
+        argument is the source directory on the host, the second directory argument is the destination directory in the
+        container. When the latter is omitted, the destination path in the container is the same as the source path on
+        the host. When combined with the <option>--read-only</option> switch, a ready-only bind mount is created. When
+        combined with the <option>--mkdir</option> switch, the destination path is first created before the mount is
+        applied. Note that this option is currently only supported for
+        <citerefentry><refentrytitle>systemd-nspawn</refentrytitle><manvolnum>1</manvolnum></citerefentry> containers,
+        and only if user namespacing (<option>--private-users</option>) is not used.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -526,9 +535,12 @@
         system into a running container. Takes a container name,
         followed by the source path on the host and the destination
         path in the container. If the destination path is omitted, the
-        same as the source path is used.</para></listitem>
-      </varlistentry>
+        same as the source path is used.</para>
 
+        <para>If host and container share the same user and group namespace, file ownership by numeric user ID and
+        group ID is preserved for the copy, otherwise all files and directories in the copy will be owned by the root
+        user and group (UID/GID 0).</para></listitem>
+      </varlistentry>
 
       <varlistentry>
         <term><command>copy-from</command> <replaceable>NAME</replaceable> <replaceable>PATH</replaceable> [<replaceable>PATH</replaceable>]</term>
@@ -537,7 +549,11 @@
         into the host system. Takes a container name, followed by the
         source path in the container the destination path on the host.
         If the destination path is omitted, the same as the source path
-        is used.</para></listitem>
+        is used.</para>
+
+        <para>If host and container share the same user and group namespace, file ownership by numeric user ID and
+        group ID is preserved for the copy, otherwise all files and directories in the copy will be owned by the root
+        user and group (UID/GID 0).</para></listitem>
       </varlistentry>
     </variablelist></refsect2>
 
@@ -560,7 +576,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>image-status</command> [<replaceable>NAME</replaceable>...]</term>
+        <term><command>image-status</command> [<replaceable>NAME</replaceable>…]</term>
 
         <listitem><para>Show terse status information about one or
         more container or VM images. This function is intended to
@@ -570,12 +586,12 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>show-image</command> [<replaceable>NAME</replaceable>...]</term>
+        <term><command>show-image</command> [<replaceable>NAME</replaceable>…]</term>
 
         <listitem><para>Show properties of one or more registered
         virtual machine or container images, or the manager itself. If
         no argument is specified, properties of the manager will be
-        shown. If an NAME is specified, properties of this virtual
+        shown. If a NAME is specified, properties of this virtual
         machine or container image are shown. By default, empty
         properties are suppressed. Use <option>--all</option> to show
         those too. To select specific properties to show, use
@@ -591,8 +607,8 @@
         <listitem><para>Clones a container or VM image. The arguments specify the name of the image to clone and the
         name of the newly cloned image. Note that plain directory container images are cloned into btrfs subvolume
         images with this command, if the underlying file system supports this.  Note that cloning a container or VM
-        image is optimized for btrfs file systems, and might not be efficient on others, due to file system
-        limitations.</para>
+        image is optimized for file systems that support copy-on-write, and might not be efficient on others, due to
+        file system limitations.</para>
 
         <para>Note that this command leaves host name, machine ID and
         all other settings that could identify the instance
@@ -622,7 +638,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>remove</command> <replaceable>NAME</replaceable>...</term>
+        <term><command>remove</command> <replaceable>NAME</replaceable>…</term>
 
         <listitem><para>Removes one or more container or VM images.
         The special image <literal>.host</literal>, which refers to
@@ -841,7 +857,7 @@
       </varlistentry>
 
       <varlistentry>
-        <term><command>cancel-transfers</command> <replaceable>ID</replaceable>...</term>
+        <term><command>cancel-transfers</command> <replaceable>ID</replaceable>…</term>
 
         <listitem><para>Aborts a download, import or export of the
         container or VM image with the specified ID. To list ongoing
@@ -902,7 +918,7 @@
     <filename>/var/lib/machines/</filename> to make them available for
     control with <command>machinectl</command>.</para>
 
-    <para>Note that many image operations are only supported,
+    <para>Note that some image operations are only supported,
     efficient or atomic on btrfs file systems. Due to this, if the
     <command>pull-tar</command>, <command>pull-raw</command>,
     <command>import-tar</command>, <command>import-raw</command> and

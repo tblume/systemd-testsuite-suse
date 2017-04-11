@@ -45,11 +45,11 @@ static void test_parse_env_file(void) {
         char **i;
         unsigned k;
 
-        fd = mkostemp_safe(p, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(p);
         assert_se(fd >= 0);
         close(fd);
 
-        fd = mkostemp_safe(t, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(t);
         assert_se(fd >= 0);
 
         f = fdopen(fd, "w");
@@ -71,6 +71,8 @@ static void test_parse_env_file(void) {
               "seven=\"sevenval\" #nocomment\n"
               "eight=eightval #nocomment\n"
               "export nine=nineval\n"
+              "ten=ignored\n"
+              "ten=ignored\n"
               "ten=", f);
 
         fflush(f);
@@ -158,11 +160,11 @@ static void test_parse_multiline_env_file(void) {
         _cleanup_strv_free_ char **a = NULL, **b = NULL;
         char **i;
 
-        fd = mkostemp_safe(p, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(p);
         assert_se(fd >= 0);
         close(fd);
 
-        fd = mkostemp_safe(t, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(t);
         assert_se(fd >= 0);
 
         f = fdopen(fd, "w");
@@ -204,6 +206,113 @@ static void test_parse_multiline_env_file(void) {
         unlink(p);
 }
 
+static void test_merge_env_file(void) {
+        char t[] = "/tmp/test-fileio-XXXXXX";
+        int fd, r;
+        FILE *f;
+        _cleanup_strv_free_ char **a = NULL;
+        char **i;
+
+        fd = mkostemp_safe(t);
+        assert_se(fd >= 0);
+
+        log_info("/* %s (%s) */", __func__, t);
+
+        f = fdopen(fd, "w");
+        assert_se(f);
+
+        r = write_string_stream(f,
+                                "one=1   \n"
+                                "twelve=${one}2\n"
+                                "twentyone=2${one}\n"
+                                "one=2\n"
+                                "twentytwo=2${one}\n"
+                                "xxx_minus_three=$xxx - 3\n"
+                                "xxx=0x$one$one$one\n"
+                                "yyy=${one:-fallback}\n"
+                                "zzz=${one:+replacement}\n"
+                                "zzzz=${foobar:-${nothing}}\n"
+                                "zzzzz=${nothing:+${nothing}}\n"
+                                , false);
+        assert(r >= 0);
+
+        r = merge_env_file(&a, NULL, t);
+        assert_se(r >= 0);
+        strv_sort(a);
+
+        STRV_FOREACH(i, a)
+                log_info("Got: <%s>", *i);
+
+        assert_se(streq(a[0], "one=2"));
+        assert_se(streq(a[1], "twelve=12"));
+        assert_se(streq(a[2], "twentyone=21"));
+        assert_se(streq(a[3], "twentytwo=22"));
+        assert_se(streq(a[4], "xxx=0x222"));
+        assert_se(streq(a[5], "xxx_minus_three= - 3"));
+        assert_se(streq(a[6], "yyy=2"));
+        assert_se(streq(a[7], "zzz=replacement"));
+        assert_se(streq(a[8], "zzzz="));
+        assert_se(streq(a[9], "zzzzz="));
+        assert_se(a[10] == NULL);
+
+        r = merge_env_file(&a, NULL, t);
+        assert_se(r >= 0);
+        strv_sort(a);
+
+        STRV_FOREACH(i, a)
+                log_info("Got2: <%s>", *i);
+
+        assert_se(streq(a[0], "one=2"));
+        assert_se(streq(a[1], "twelve=12"));
+        assert_se(streq(a[2], "twentyone=21"));
+        assert_se(streq(a[3], "twentytwo=22"));
+        assert_se(streq(a[4], "xxx=0x222"));
+        assert_se(streq(a[5], "xxx_minus_three=0x222 - 3"));
+        assert_se(streq(a[6], "yyy=2"));
+        assert_se(streq(a[7], "zzz=replacement"));
+        assert_se(streq(a[8], "zzzz="));
+        assert_se(streq(a[9], "zzzzz="));
+        assert_se(a[10] == NULL);
+}
+
+static void test_merge_env_file_invalid(void) {
+        char t[] = "/tmp/test-fileio-XXXXXX";
+        int fd, r;
+        FILE *f;
+        _cleanup_strv_free_ char **a = NULL;
+        char **i;
+
+        fd = mkostemp_safe(t);
+        assert_se(fd >= 0);
+
+        log_info("/* %s (%s) */", __func__, t);
+
+        f = fdopen(fd, "w");
+        assert_se(f);
+
+        r = write_string_stream(f,
+                                "unset one   \n"
+                                "unset one=   \n"
+                                "unset one=1   \n"
+                                "one   \n"
+                                "one =  \n"
+                                "one two =\n"
+                                "\x20two=\n"
+                                "#comment=comment\n"
+                                ";comment2=comment2\n"
+                                "#\n"
+                                "\n\n"                  /* empty line */
+                                , false);
+        assert(r >= 0);
+
+        r = merge_env_file(&a, NULL, t);
+        assert_se(r >= 0);
+
+        STRV_FOREACH(i, a)
+                log_info("Got: <%s>", *i);
+
+        assert_se(strv_isempty(a));
+}
 
 static void test_executable_is_script(void) {
         char t[] = "/tmp/test-executable-XXXXXX";
@@ -211,7 +320,7 @@ static void test_executable_is_script(void) {
         FILE *f;
         char *command;
 
-        fd = mkostemp_safe(t, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(t);
         assert_se(fd >= 0);
 
         f = fdopen(fd, "w");
@@ -300,7 +409,7 @@ static void test_write_string_stream(void) {
         int fd;
         char buf[64];
 
-        fd = mkostemp_safe(fn, O_RDWR);
+        fd = mkostemp_safe(fn);
         assert_se(fd >= 0);
 
         f = fdopen(fd, "r");
@@ -334,7 +443,7 @@ static void test_write_string_file(void) {
         char buf[64] = {};
         _cleanup_close_ int fd;
 
-        fd = mkostemp_safe(fn, O_RDWR);
+        fd = mkostemp_safe(fn);
         assert_se(fd >= 0);
 
         assert_se(write_string_file(fn, "boohoo", WRITE_STRING_FILE_CREATE) == 0);
@@ -350,7 +459,7 @@ static void test_write_string_file_no_create(void) {
         _cleanup_close_ int fd;
         char buf[64] = {0};
 
-        fd = mkostemp_safe(fn, O_RDWR);
+        fd = mkostemp_safe(fn);
         assert_se(fd >= 0);
 
         assert_se(write_string_file("/a/file/which/does/not/exists/i/guess", "boohoo", 0) < 0);
@@ -367,7 +476,7 @@ static void test_write_string_file_verify(void) {
         int r;
 
         assert_se(read_one_line_file("/proc/cmdline", &buf) >= 0);
-        assert_se((buf2 = strjoin(buf, "\n", NULL)));
+        assert_se((buf2 = strjoin(buf, "\n")));
 
         r = write_string_file("/proc/cmdline", buf, 0);
         assert_se(r == -EACCES || r == -EIO);
@@ -390,7 +499,7 @@ static void test_load_env_file_pairs(void) {
         _cleanup_strv_free_ char **l = NULL;
         char **k, **v;
 
-        fd = mkostemp_safe(fn, O_RDWR);
+        fd = mkostemp_safe(fn);
         assert_se(fd >= 0);
 
         r = write_string_file(fn,
@@ -433,7 +542,7 @@ static void test_search_and_fopen(void) {
         int r;
         FILE *f;
 
-        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(name);
         assert_se(fd >= 0);
         close(fd);
 
@@ -469,7 +578,7 @@ static void test_search_and_fopen_nulstr(void) {
         int r;
         FILE *f;
 
-        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(name);
         assert_se(fd >= 0);
         close(fd);
 
@@ -504,7 +613,7 @@ static void test_writing_tmpfile(void) {
         IOVEC_SET_STRING(iov[1], ALPHANUMERICAL "\n");
         IOVEC_SET_STRING(iov[2], "");
 
-        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(name);
         printf("tmpfile: %s", name);
 
         r = writev(fd, iov, 3);
@@ -555,11 +664,14 @@ static void test_tempfn(void) {
 }
 
 int main(int argc, char *argv[]) {
+        log_set_max_level(LOG_DEBUG);
         log_parse_environment();
         log_open();
 
         test_parse_env_file();
         test_parse_multiline_env_file();
+        test_merge_env_file();
+        test_merge_env_file_invalid();
         test_executable_is_script();
         test_status_field();
         test_capeff();

@@ -52,6 +52,7 @@
 #include "journal-def.h"
 #include "journal-internal.h"
 #include "journal-qrcode.h"
+#include "journal-util.h"
 #include "journal-vacuum.h"
 #include "journal-verify.h"
 #include "locale-util.h"
@@ -103,7 +104,7 @@ static const char *arg_directory = NULL;
 static char **arg_file = NULL;
 static bool arg_file_stdin = false;
 static int arg_priorities = 0xFF;
-static const char *arg_verify_key = NULL;
+static char *arg_verify_key = NULL;
 #ifdef HAVE_GCRYPT
 static usec_t arg_interval = DEFAULT_FSS_INTERVAL_USEC;
 static bool arg_force = false;
@@ -192,7 +193,7 @@ static int add_matches_for_device(sd_journal *j, const char *devpath) {
                         continue;
                 }
 
-                match = strjoin("_KERNEL_DEVICE=+", subsys, ":", sysname, NULL);
+                match = strjoin("_KERNEL_DEVICE=+", subsys, ":", sysname);
                 if (!match)
                         return log_oom();
 
@@ -297,9 +298,9 @@ static void help(void) {
                "  -n --lines[=INTEGER]     Number of journal entries to show\n"
                "     --no-tail             Show all lines, even in follow mode\n"
                "  -r --reverse             Show the newest entries first\n"
-               "  -o --output=STRING       Change journal output mode (short, short-iso,\n"
-               "                                   short-precise, short-monotonic, verbose,\n"
-               "                                   export, json, json-pretty, json-sse, cat)\n"
+               "  -o --output=STRING       Change journal output mode (short, short-precise,\n"
+               "                             short-iso, short-full, short-monotonic, short-unix,\n"
+               "                             verbose, export, json, json-pretty, json-sse, cat)\n"
                "     --utc                 Express time in Coordinated Universal Time (UTC)\n"
                "  -x --catalog             Add message explanations where available\n"
                "     --no-full             Ellipsize fields\n"
@@ -310,7 +311,7 @@ static void help(void) {
                "  -m --merge               Show entries from all available journals\n"
                "  -D --directory=PATH      Show journal files from directory\n"
                "     --file=PATH           Show journal file\n"
-               "     --root=ROOT           Operate on catalog files below a root directory\n"
+               "     --root=ROOT           Operate on files below a root directory\n"
 #ifdef HAVE_GCRYPT
                "     --interval=TIME       Time interval for changing the FSS sealing key\n"
                "     --verify-key=KEY      Specify FSS verification key\n"
@@ -348,6 +349,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_NO_FULL,
                 ARG_NO_TAIL,
                 ARG_NEW_ID128,
+                ARG_THIS_BOOT,
                 ARG_LIST_BOOTS,
                 ARG_USER,
                 ARG_SYSTEM,
@@ -392,9 +394,9 @@ static int parse_argv(int argc, char *argv[]) {
                 { "new-id128",      no_argument,       NULL, ARG_NEW_ID128      },
                 { "quiet",          no_argument,       NULL, 'q'                },
                 { "merge",          no_argument,       NULL, 'm'                },
+                { "this-boot",      no_argument,       NULL, ARG_THIS_BOOT      }, /* deprecated */
                 { "boot",           optional_argument, NULL, 'b'                },
                 { "list-boots",     no_argument,       NULL, ARG_LIST_BOOTS     },
-                { "this-boot",      optional_argument, NULL, 'b'                }, /* deprecated */
                 { "dmesg",          no_argument,       NULL, 'k'                },
                 { "system",         no_argument,       NULL, ARG_SYSTEM         },
                 { "user",           no_argument,       NULL, ARG_USER           },
@@ -544,6 +546,10 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_merge = true;
                         break;
 
+                case ARG_THIS_BOOT:
+                        arg_boot = true;
+                        break;
+
                 case 'b':
                         arg_boot = true;
 
@@ -678,7 +684,13 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_VERIFY_KEY:
                         arg_action = ACTION_VERIFY;
-                        arg_verify_key = optarg;
+                        r = free_and_strdup(&arg_verify_key, optarg);
+                        if (r < 0)
+                                return r;
+                        /* Use memset not string_erase so this doesn't look confusing
+                         * in ps or htop output. */
+                        memset(optarg, 'x', strlen(optarg));
+
                         arg_merge = false;
                         break;
 
@@ -843,8 +855,8 @@ static int parse_argv(int argc, char *argv[]) {
         if (arg_follow && !arg_no_tail && !arg_since && arg_lines == ARG_LINES_DEFAULT)
                 arg_lines = 10;
 
-        if (!!arg_directory + !!arg_file + !!arg_machine > 1) {
-                log_error("Please specify either -D/--directory= or --file= or -M/--machine=, not more than one.");
+        if (!!arg_directory + !!arg_file + !!arg_machine + !!arg_root > 1) {
+                log_error("Please specify at most one of -D/--directory=, --file=, -M/--machine=, --root.");
                 return -EINVAL;
         }
 
@@ -868,8 +880,8 @@ static int parse_argv(int argc, char *argv[]) {
                 return -EINVAL;
         }
 
-        if ((arg_boot || arg_action == ACTION_LIST_BOOTS) && (arg_file || arg_directory || arg_merge)) {
-                log_error("Using --boot or --list-boots with --file, --directory or --merge is not supported.");
+        if ((arg_boot || arg_action == ACTION_LIST_BOOTS) && arg_merge) {
+                log_error("Using --boot or --list-boots with --merge is not supported.");
                 return -EINVAL;
         }
 
@@ -880,7 +892,7 @@ static int parse_argv(int argc, char *argv[]) {
                  * to users, and automatically turn --unit= into --user-unit= if combined with --user. */
                 r = strv_extend_strv(&arg_user_units, arg_system_units, true);
                 if (r < 0)
-                        return -ENOMEM;
+                        return r;
 
                 arg_system_units = strv_free(arg_system_units);
         }
@@ -901,7 +913,7 @@ static int generate_new_id128(void) {
                SD_ID128_FORMAT_STR "\n\n"
                "As UUID:\n"
                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n\n"
-               "As macro:\n"
+               "As man:sd-id128(3) macro:\n"
                "#define MESSAGE_XYZ SD_ID128_MAKE(",
                SD_ID128_FORMAT_VAL(id),
                SD_ID128_FORMAT_VAL(id));
@@ -933,21 +945,21 @@ static int add_matches(sd_journal *j, char **args) {
                         have_term = false;
 
                 } else if (path_is_absolute(*i)) {
-                        _cleanup_free_ char *p, *t = NULL, *t2 = NULL, *interpreter = NULL;
-                        const char *path;
+                        _cleanup_free_ char *p = NULL, *t = NULL, *t2 = NULL, *interpreter = NULL;
                         struct stat st;
 
-                        p = canonicalize_file_name(*i);
-                        path = p ?: *i;
+                        r = chase_symlinks(*i, NULL, 0, &p);
+                        if (r < 0)
+                                return log_error_errno(r, "Couldn't canonicalize path: %m");
 
-                        if (lstat(path, &st) < 0)
+                        if (lstat(p, &st) < 0)
                                 return log_error_errno(errno, "Couldn't stat file: %m");
 
                         if (S_ISREG(st.st_mode) && (0111 & st.st_mode)) {
-                                if (executable_is_script(path, &interpreter) > 0) {
+                                if (executable_is_script(p, &interpreter) > 0) {
                                         _cleanup_free_ char *comm;
 
-                                        comm = strndup(basename(path), 15);
+                                        comm = strndup(basename(p), 15);
                                         if (!comm)
                                                 return log_oom();
 
@@ -963,7 +975,7 @@ static int add_matches(sd_journal *j, char **args) {
                                                         return log_oom();
                                         }
                                 } else {
-                                        t = strappend("_EXE=", path);
+                                        t = strappend("_EXE=", p);
                                         if (!t)
                                                 return log_oom();
                                 }
@@ -974,7 +986,7 @@ static int add_matches(sd_journal *j, char **args) {
                                         r = sd_journal_add_match(j, t2, 0);
 
                         } else if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) {
-                                r = add_matches_for_device(j, path);
+                                r = add_matches_for_device(j, p);
                                 if (r < 0)
                                         return r;
                         } else {
@@ -1086,8 +1098,10 @@ static int discover_next_boot(sd_journal *j,
                 r = sd_journal_previous(j);
         if (r < 0)
                 return r;
-        else if (r == 0)
+        else if (r == 0) {
+                log_debug("Whoopsie! We found a boot ID but can't read its last entry.");
                 return -ENODATA; /* This shouldn't happen. We just came from this very boot ID. */
+        }
 
         r = sd_journal_get_realtime_usec(j, &next_boot->last);
         if (r < 0)
@@ -1102,13 +1116,13 @@ static int discover_next_boot(sd_journal *j,
 static int get_boots(
                 sd_journal *j,
                 BootId **boots,
-                sd_id128_t *query_ref_boot,
-                int ref_boot_offset) {
+                sd_id128_t *boot_id,
+                int offset) {
 
         bool skip_once;
         int r, count = 0;
-        BootId *head = NULL, *tail = NULL;
-        const bool advance_older = query_ref_boot && ref_boot_offset <= 0;
+        BootId *head = NULL, *tail = NULL, *id;
+        const bool advance_older = boot_id && offset <= 0;
         sd_id128_t previous_boot_id;
 
         assert(j);
@@ -1116,19 +1130,19 @@ static int get_boots(
         /* Adjust for the asymmetry that offset 0 is
          * the last (and current) boot, while 1 is considered the
          * (chronological) first boot in the journal. */
-        skip_once = query_ref_boot && sd_id128_is_null(*query_ref_boot) && ref_boot_offset < 0;
+        skip_once = boot_id && sd_id128_is_null(*boot_id) && offset <= 0;
 
         /* Advance to the earliest/latest occurrence of our reference
          * boot ID (taking our lookup direction into account), so that
          * discover_next_boot() can do its job.
          * If no reference is given, the journal head/tail will do,
          * they're "virtual" boots after all. */
-        if (query_ref_boot && !sd_id128_is_null(*query_ref_boot)) {
+        if (boot_id && !sd_id128_is_null(*boot_id)) {
                 char match[9+32+1] = "_BOOT_ID=";
 
                 sd_journal_flush_matches(j);
 
-                sd_id128_to_string(*query_ref_boot, match + 9);
+                sd_id128_to_string(*boot_id, match + 9);
                 r = sd_journal_add_match(j, match, sizeof(match) - 1);
                 if (r < 0)
                         return r;
@@ -1148,7 +1162,7 @@ static int get_boots(
                         return r;
                 else if (r == 0)
                         goto finish;
-                else if (ref_boot_offset == 0) {
+                else if (offset == 0) {
                         count = 1;
                         goto finish;
                 }
@@ -1187,17 +1201,24 @@ static int get_boots(
 
                 previous_boot_id = current->id;
 
-                if (query_ref_boot) {
+                if (boot_id) {
                         if (!skip_once)
-                                ref_boot_offset += advance_older ? 1 : -1;
+                                offset += advance_older ? 1 : -1;
                         skip_once = false;
 
-                        if (ref_boot_offset == 0) {
+                        if (offset == 0) {
                                 count = 1;
-                                *query_ref_boot = current->id;
+                                *boot_id = current->id;
                                 break;
                         }
                 } else {
+                        LIST_FOREACH(boot_list, id, head) {
+                                if (sd_id128_equal(id->id, current->id)) {
+                                        /* boot id already stored, something wrong with the journal files */
+                                        /* exiting as otherwise this problem would cause forever loop */
+                                        goto finish;
+                                }
+                        }
                         LIST_INSERT_AFTER(boot_list, head, tail, current);
                         tail = current;
                         current = NULL;
@@ -1250,7 +1271,7 @@ static int list_boots(sd_journal *j) {
 
 static int add_boot(sd_journal *j) {
         char match[9+32+1] = "_BOOT_ID=";
-        sd_id128_t ref_boot_id;
+        sd_id128_t boot_id;
         int r;
 
         assert(j);
@@ -1258,11 +1279,16 @@ static int add_boot(sd_journal *j) {
         if (!arg_boot)
                 return 0;
 
-        if (arg_boot_offset == 0 && sd_id128_equal(arg_boot_id, SD_ID128_NULL))
+        /* Take a shortcut and use the current boot_id, which we can do very quickly.
+         * We can do this only when we logs are coming from the current machine,
+         * so take the slow path if log location is specified. */
+        if (arg_boot_offset == 0 && sd_id128_is_null(arg_boot_id) &&
+            !arg_directory && !arg_file && !arg_root)
+
                 return add_match_this_boot(j, arg_machine);
 
-        ref_boot_id = arg_boot_id;
-        r = get_boots(j, NULL, &ref_boot_id, arg_boot_offset);
+        boot_id = arg_boot_id;
+        r = get_boots(j, NULL, &boot_id, arg_boot_offset);
         assert(r <= 1);
         if (r <= 0) {
                 const char *reason = (r == 0) ? "No such boot ID in journal" : strerror(-r);
@@ -1277,7 +1303,7 @@ static int add_boot(sd_journal *j) {
                 return r == 0 ? -ENODATA : r;
         }
 
-        sd_id128_to_string(ref_boot_id, match + 9);
+        sd_id128_to_string(boot_id, match + 9);
 
         r = sd_journal_add_match(j, match, sizeof(match) - 1);
         if (r < 0)
@@ -1622,7 +1648,7 @@ static int setup_keys(void) {
         n /= arg_interval;
 
         safe_close(fd);
-        fd = mkostemp_safe(k, O_WRONLY|O_CLOEXEC);
+        fd = mkostemp_safe(k);
         if (fd < 0) {
                 r = log_error_errno(fd, "Failed to open %s: %m", k);
                 goto finish;
@@ -1674,9 +1700,9 @@ static int setup_keys(void) {
                         "at a safe location and should not be saved locally on disk.\n"
                         "\n\t%s",
                         ansi_highlight(), ansi_normal(),
+                        p,
                         ansi_highlight(), ansi_normal(),
-                        ansi_highlight_red(),
-                        p);
+                        ansi_highlight_red());
                 fflush(stderr);
         }
         for (i = 0; i < seed_size; i++) {
@@ -1774,129 +1800,6 @@ static int verify(sd_journal *j) {
                                 else
                                         log_info("=> No sealing yet, no entries in file.");
                         }
-                }
-        }
-
-        return r;
-}
-
-static int access_check_var_log_journal(sd_journal *j) {
-#ifdef HAVE_ACL
-        _cleanup_strv_free_ char **g = NULL;
-        const char* dir;
-#endif
-        int r;
-
-        assert(j);
-
-        if (arg_quiet)
-                return 0;
-
-        /* If we are root, we should have access, don't warn. */
-        if (getuid() == 0)
-                return 0;
-
-        /* If we are in the 'systemd-journal' group, we should have
-         * access too. */
-        r = in_group("systemd-journal");
-        if (r < 0)
-                return log_error_errno(r, "Failed to check if we are in the 'systemd-journal' group: %m");
-        if (r > 0)
-                return 0;
-
-#ifdef HAVE_ACL
-        if (laccess("/run/log/journal", F_OK) >= 0)
-                dir = "/run/log/journal";
-        else
-                dir = "/var/log/journal";
-
-        /* If we are in any of the groups listed in the journal ACLs,
-         * then all is good, too. Let's enumerate all groups from the
-         * default ACL of the directory, which generally should allow
-         * access to most journal files too. */
-        r = acl_search_groups(dir, &g);
-        if (r < 0)
-                return log_error_errno(r, "Failed to search journal ACL: %m");
-        if (r > 0)
-                return 0;
-
-        /* Print a pretty list, if there were ACLs set. */
-        if (!strv_isempty(g)) {
-                _cleanup_free_ char *s = NULL;
-
-                /* Thre are groups in the ACL, let's list them */
-                r = strv_extend(&g, "systemd-journal");
-                if (r < 0)
-                        return log_oom();
-
-                strv_sort(g);
-                strv_uniq(g);
-
-                s = strv_join(g, "', '");
-                if (!s)
-                        return log_oom();
-
-                log_notice("Hint: You are currently not seeing messages from other users and the system.\n"
-                           "      Users in groups '%s' can see all messages.\n"
-                           "      Pass -q to turn off this notice.", s);
-                return 1;
-        }
-#endif
-
-        /* If no ACLs were found, print a short version of the message. */
-        log_notice("Hint: You are currently not seeing messages from other users and the system.\n"
-                   "      Users in the 'systemd-journal' group can see all messages. Pass -q to\n"
-                   "      turn off this notice.");
-
-        return 1;
-}
-
-static int access_check(sd_journal *j) {
-        Iterator it;
-        void *code;
-        char *path;
-        int r = 0;
-
-        assert(j);
-
-        if (hashmap_isempty(j->errors)) {
-                if (ordered_hashmap_isempty(j->files))
-                        log_notice("No journal files were found.");
-
-                return 0;
-        }
-
-        if (hashmap_contains(j->errors, INT_TO_PTR(-EACCES))) {
-                (void) access_check_var_log_journal(j);
-
-                if (ordered_hashmap_isempty(j->files))
-                        r = log_error_errno(EACCES, "No journal files were opened due to insufficient permissions.");
-        }
-
-        HASHMAP_FOREACH_KEY(path, code, j->errors, it) {
-                int err;
-
-                err = abs(PTR_TO_INT(code));
-
-                switch (err) {
-                case EACCES:
-                        continue;
-
-                case ENODATA:
-                        log_warning_errno(err, "Journal file %s is truncated, ignoring file.", path);
-                        break;
-
-                case EPROTONOSUPPORT:
-                        log_warning_errno(err, "Journal file %s uses an unsupported feature, ignoring file.", path);
-                        break;
-
-                case EBADMSG:
-                        log_warning_errno(err, "Journal file %s corrupted, ignoring file.", path);
-                        break;
-
-                default:
-                        log_warning_errno(err, "An error was encountered while opening journal file or directory %s, ignoring file: %m", path);
-                        break;
                 }
         }
 
@@ -2151,6 +2054,8 @@ int main(int argc, char *argv[]) {
 
         if (arg_directory)
                 r = sd_journal_open_directory(&j, arg_directory, arg_journal_type);
+        else if (arg_root)
+                r = sd_journal_open_directory(&j, arg_root, arg_journal_type | SD_JOURNAL_OS_ROOT);
         else if (arg_file_stdin) {
                 int ifd = STDIN_FILENO;
                 r = sd_journal_open_files_fd(&j, &ifd, 1, 0);
@@ -2212,7 +2117,7 @@ int main(int argc, char *argv[]) {
                 goto finish;
         }
 
-        r = access_check(j);
+        r = journal_access_check_and_warn(j, arg_quiet);
         if (r < 0)
                 goto finish;
 
@@ -2245,7 +2150,7 @@ int main(int argc, char *argv[]) {
                 if (r < 0)
                         goto finish;
 
-                printf("Archived and active journals take up %s on disk.\n",
+                printf("Archived and active journals take up %s in the file system.\n",
                        format_bytes(sbytes, sizeof(sbytes), bytes));
                 goto finish;
         }
@@ -2297,7 +2202,7 @@ int main(int argc, char *argv[]) {
         if (arg_boot_offset != 0 &&
             sd_journal_has_runtime_files(j) > 0 &&
             sd_journal_has_persistent_files(j) == 0) {
-                log_info("Specifying boot ID has no effect, no persistent journal was found");
+                log_info("Specifying boot ID or boot offset has no effect, no persistent journal was found.");
                 r = 0;
                 goto finish;
         }
@@ -2600,6 +2505,7 @@ finish:
         strv_free(arg_user_units);
 
         free(arg_root);
+        free(arg_verify_key);
 
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

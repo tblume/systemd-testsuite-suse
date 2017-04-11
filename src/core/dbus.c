@@ -175,7 +175,7 @@ static int signal_activation_request(sd_bus_message *message, void *userdata, sd
                 goto failed;
 
         if (u->refuse_manual_start) {
-                r = sd_bus_error_setf(&error, BUS_ERROR_ONLY_BY_DEPENDENCY, "Operation refused, %s may be requested by dependency only.", u->id);
+                r = sd_bus_error_setf(&error, BUS_ERROR_ONLY_BY_DEPENDENCY, "Operation refused, %s may be requested by dependency only (it is configured to refuse manual start/stop).", u->id);
                 goto failed;
         }
 
@@ -298,7 +298,7 @@ static int bus_job_find(sd_bus *bus, const char *path, const char *interface, vo
 }
 
 static int find_unit(Manager *m, sd_bus *bus, const char *path, Unit **unit, sd_bus_error *error) {
-        Unit *u;
+        Unit *u = NULL;  /* just to appease gcc, initialization is not really necessary */
         int r;
 
         assert(m);
@@ -323,14 +323,14 @@ static int find_unit(Manager *m, sd_bus *bus, const char *path, Unit **unit, sd_
                         return r;
 
                 u = manager_get_unit_by_pid(m, pid);
+                if (!u)
+                        return 0;
         } else {
                 r = manager_load_unit_from_dbus_path(m, path, error, &u);
                 if (r < 0)
                         return 0;
+                assert(u);
         }
-
-        if (!u)
-                return 0;
 
         *unit = u;
         return 1;
@@ -477,7 +477,7 @@ static int bus_kill_context_find(sd_bus *bus, const char *path, const char *inte
 }
 
 static int bus_job_enumerate(sd_bus *bus, const char *path, void *userdata, char ***nodes, sd_bus_error *error) {
-        _cleanup_free_ char **l = NULL;
+        _cleanup_strv_free_ char **l = NULL;
         Manager *m = userdata;
         unsigned k = 0;
         Iterator i;
@@ -504,7 +504,7 @@ static int bus_job_enumerate(sd_bus *bus, const char *path, void *userdata, char
 }
 
 static int bus_unit_enumerate(sd_bus *bus, const char *path, void *userdata, char ***nodes, sd_bus_error *error) {
-        _cleanup_free_ char **l = NULL;
+        _cleanup_strv_free_ char **l = NULL;
         Manager *m = userdata;
         unsigned k = 0;
         Iterator i;
@@ -964,10 +964,6 @@ static int bus_init_private(Manager *m) {
         if (m->private_listen_fd >= 0)
                 return 0;
 
-        /* We don't need the private socket if we have kdbus */
-        if (m->kdbus_fd >= 0)
-                return 0;
-
         if (MANAGER_IS_SYSTEM(m)) {
 
                 /* We want the private bus only when running as init */
@@ -1045,6 +1041,7 @@ int bus_init(Manager *m, bool try_bus_connect) {
 
 static void destroy_bus(Manager *m, sd_bus **bus) {
         Iterator i;
+        Unit *u;
         Job *j;
 
         assert(m);
@@ -1053,13 +1050,24 @@ static void destroy_bus(Manager *m, sd_bus **bus) {
         if (!*bus)
                 return;
 
+        /* Make sure all bus slots watching names are released. */
+        HASHMAP_FOREACH(u, m->watch_bus, i) {
+                if (!u->match_bus_slot)
+                        continue;
+
+                if (sd_bus_slot_get_bus(u->match_bus_slot) != *bus)
+                        continue;
+
+                u->match_bus_slot = sd_bus_slot_unref(u->match_bus_slot);
+        }
+
         /* Get rid of tracked clients on this bus */
         if (m->subscribed && sd_bus_track_get_bus(m->subscribed) == *bus)
                 m->subscribed = sd_bus_track_unref(m->subscribed);
 
         HASHMAP_FOREACH(j, m->jobs, i)
-                if (j->clients && sd_bus_track_get_bus(j->clients) == *bus)
-                        j->clients = sd_bus_track_unref(j->clients);
+                if (j->bus_track && sd_bus_track_get_bus(j->bus_track) == *bus)
+                        j->bus_track = sd_bus_track_unref(j->bus_track);
 
         /* Get rid of queued message on this bus */
         if (m->queued_message && sd_bus_message_get_bus(m->queued_message) == *bus)
@@ -1168,62 +1176,49 @@ int bus_foreach_bus(
         return ret;
 }
 
-void bus_track_serialize(sd_bus_track *t, FILE *f) {
+void bus_track_serialize(sd_bus_track *t, FILE *f, const char *prefix) {
         const char *n;
 
         assert(f);
+        assert(prefix);
 
-        for (n = sd_bus_track_first(t); n; n = sd_bus_track_next(t))
-                fprintf(f, "subscribed=%s\n", n);
+        for (n = sd_bus_track_first(t); n; n = sd_bus_track_next(t)) {
+                int c, j;
+
+                c = sd_bus_track_count_name(t, n);
+
+                for (j = 0; j < c; j++) {
+                        fputs(prefix, f);
+                        fputc('=', f);
+                        fputs(n, f);
+                        fputc('\n', f);
+                }
+        }
 }
 
-int bus_track_deserialize_item(char ***l, const char *line) {
-        const char *e;
-        int r;
-
-        assert(l);
-        assert(line);
-
-        e = startswith(line, "subscribed=");
-        if (!e)
-                return 0;
-
-        r = strv_extend(l, e);
-        if (r < 0)
-                return r;
-
-        return 1;
-}
-
-int bus_track_coldplug(Manager *m, sd_bus_track **t, char ***l) {
+int bus_track_coldplug(Manager *m, sd_bus_track **t, bool recursive, char **l) {
         int r = 0;
 
         assert(m);
         assert(t);
-        assert(l);
 
-        if (!strv_isempty(*l) && m->api_bus) {
-                char **i;
+        if (strv_isempty(l))
+                return 0;
 
-                if (!*t) {
-                        r = sd_bus_track_new(m->api_bus, t, NULL, NULL);
-                        if (r < 0)
-                                return r;
-                }
+        if (!m->api_bus)
+                return 0;
 
-                r = 0;
-                STRV_FOREACH(i, *l) {
-                        int k;
-
-                        k = sd_bus_track_add_name(*t, *i);
-                        if (k < 0)
-                                r = k;
-                }
+        if (!*t) {
+                r = sd_bus_track_new(m->api_bus, t, NULL, NULL);
+                if (r < 0)
+                        return r;
         }
 
-        *l = strv_free(*l);
+        r = sd_bus_track_set_recursive(*t, recursive);
+        if (r < 0)
+                return r;
 
-        return r;
+        return bus_track_add_name_many(*t, l);
 }
 
 int bus_verify_manage_units_async(Manager *m, sd_bus_message *call, sd_bus_error *error) {

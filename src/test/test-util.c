@@ -26,6 +26,7 @@
 #include "def.h"
 #include "fileio.h"
 #include "fs-util.h"
+#include "parse-util.h"
 #include "raw-clone.h"
 #include "rm-rf.h"
 #include "string-util.h"
@@ -194,50 +195,6 @@ static void test_log2i(void) {
         assert_se(log2i(INT_MAX) == sizeof(int)*8-2);
 }
 
-static void test_execute_directory(void) {
-        char template_lo[] = "/tmp/test-readlink_and_make_absolute-lo.XXXXXXX";
-        char template_hi[] = "/tmp/test-readlink_and_make_absolute-hi.XXXXXXX";
-        const char * dirs[] = {template_hi, template_lo, NULL};
-        const char *name, *name2, *name3, *overridden, *override, *masked, *mask;
-
-        assert_se(mkdtemp(template_lo));
-        assert_se(mkdtemp(template_hi));
-
-        name = strjoina(template_lo, "/script");
-        name2 = strjoina(template_hi, "/script2");
-        name3 = strjoina(template_lo, "/useless");
-        overridden = strjoina(template_lo, "/overridden");
-        override = strjoina(template_hi, "/overridden");
-        masked = strjoina(template_lo, "/masked");
-        mask = strjoina(template_hi, "/masked");
-
-        assert_se(write_string_file(name, "#!/bin/sh\necho 'Executing '$0\ntouch $(dirname $0)/it_works", WRITE_STRING_FILE_CREATE) == 0);
-        assert_se(write_string_file(name2, "#!/bin/sh\necho 'Executing '$0\ntouch $(dirname $0)/it_works2", WRITE_STRING_FILE_CREATE) == 0);
-        assert_se(write_string_file(overridden, "#!/bin/sh\necho 'Executing '$0\ntouch $(dirname $0)/failed", WRITE_STRING_FILE_CREATE) == 0);
-        assert_se(write_string_file(override, "#!/bin/sh\necho 'Executing '$0", WRITE_STRING_FILE_CREATE) == 0);
-        assert_se(write_string_file(masked, "#!/bin/sh\necho 'Executing '$0\ntouch $(dirname $0)/failed", WRITE_STRING_FILE_CREATE) == 0);
-        assert_se(symlink("/dev/null", mask) == 0);
-        assert_se(chmod(name, 0755) == 0);
-        assert_se(chmod(name2, 0755) == 0);
-        assert_se(chmod(overridden, 0755) == 0);
-        assert_se(chmod(override, 0755) == 0);
-        assert_se(chmod(masked, 0755) == 0);
-        assert_se(touch(name3) >= 0);
-
-        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL);
-
-        assert_se(chdir(template_lo) == 0);
-        assert_se(access("it_works", F_OK) >= 0);
-        assert_se(access("failed", F_OK) < 0);
-
-        assert_se(chdir(template_hi) == 0);
-        assert_se(access("it_works2", F_OK) >= 0);
-        assert_se(access("failed", F_OK) < 0);
-
-        (void) rm_rf(template_lo, REMOVE_ROOT|REMOVE_PHYSICAL);
-        (void) rm_rf(template_hi, REMOVE_ROOT|REMOVE_PHYSICAL);
-}
-
 static void test_raw_clone(void) {
         pid_t parent, pid, pid2;
 
@@ -263,6 +220,89 @@ static void test_raw_clone(void) {
         }
 }
 
+static void test_physical_memory(void) {
+        uint64_t p;
+        char buf[FORMAT_BYTES_MAX];
+
+        p = physical_memory();
+        assert_se(p > 0);
+        assert_se(p < UINT64_MAX);
+        assert_se(p % page_size() == 0);
+
+        log_info("Memory: %s (%" PRIu64 ")", format_bytes(buf, sizeof(buf), p), p);
+}
+
+static void test_physical_memory_scale(void) {
+        uint64_t p;
+
+        p = physical_memory();
+
+        assert_se(physical_memory_scale(0, 100) == 0);
+        assert_se(physical_memory_scale(100, 100) == p);
+
+        log_info("Memory original: %" PRIu64, physical_memory());
+        log_info("Memory scaled by 50%%: %" PRIu64, physical_memory_scale(50, 100));
+        log_info("Memory divided by 2: %" PRIu64, physical_memory() / 2);
+        log_info("Page size: %zu", page_size());
+
+        /* There might be an uneven number of pages, hence permit these calculations to be half a page off... */
+        assert_se(page_size()/2 + physical_memory_scale(50, 100) - p/2 <= page_size());
+        assert_se(physical_memory_scale(200, 100) == p*2);
+
+        assert_se(physical_memory_scale(0, 1) == 0);
+        assert_se(physical_memory_scale(1, 1) == p);
+        assert_se(physical_memory_scale(2, 1) == p*2);
+
+        assert_se(physical_memory_scale(0, 2) == 0);
+
+        assert_se(page_size()/2 + physical_memory_scale(1, 2) - p/2 <= page_size());
+        assert_se(physical_memory_scale(2, 2) == p);
+        assert_se(physical_memory_scale(4, 2) == p*2);
+
+        assert_se(physical_memory_scale(0, UINT32_MAX) == 0);
+        assert_se(physical_memory_scale(UINT32_MAX, UINT32_MAX) == p);
+
+        /* overflow */
+        assert_se(physical_memory_scale(UINT64_MAX/4, UINT64_MAX) == UINT64_MAX);
+}
+
+static void test_system_tasks_max(void) {
+        uint64_t t;
+
+        t = system_tasks_max();
+        assert_se(t > 0);
+        assert_se(t < UINT64_MAX);
+
+        log_info("Max tasks: %" PRIu64, t);
+}
+
+static void test_system_tasks_max_scale(void) {
+        uint64_t t;
+
+        t = system_tasks_max();
+
+        assert_se(system_tasks_max_scale(0, 100) == 0);
+        assert_se(system_tasks_max_scale(100, 100) == t);
+
+        assert_se(system_tasks_max_scale(0, 1) == 0);
+        assert_se(system_tasks_max_scale(1, 1) == t);
+        assert_se(system_tasks_max_scale(2, 1) == 2*t);
+
+        assert_se(system_tasks_max_scale(0, 2) == 0);
+        assert_se(system_tasks_max_scale(1, 2) == t/2);
+        assert_se(system_tasks_max_scale(2, 2) == t);
+        assert_se(system_tasks_max_scale(3, 2) == (3*t)/2);
+        assert_se(system_tasks_max_scale(4, 2) == t*2);
+
+        assert_se(system_tasks_max_scale(0, UINT32_MAX) == 0);
+        assert_se(system_tasks_max_scale((UINT32_MAX-1)/2, UINT32_MAX-1) == t/2);
+        assert_se(system_tasks_max_scale(UINT32_MAX, UINT32_MAX) == t);
+
+        /* overflow */
+
+        assert_se(system_tasks_max_scale(UINT64_MAX/4, UINT64_MAX) == UINT64_MAX);
+}
+
 int main(int argc, char *argv[]) {
         log_parse_environment();
         log_open();
@@ -275,8 +315,11 @@ int main(int argc, char *argv[]) {
         test_protect_errno();
         test_in_set();
         test_log2i();
-        test_execute_directory();
         test_raw_clone();
+        test_physical_memory();
+        test_physical_memory_scale();
+        test_system_tasks_max();
+        test_system_tasks_max_scale();
 
         return 0;
 }

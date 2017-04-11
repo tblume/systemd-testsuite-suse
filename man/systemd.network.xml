@@ -58,31 +58,40 @@
     <citerefentry><refentrytitle>systemd-networkd</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
     </para>
 
-    <para>Network files must have the extension
-    <filename>.network</filename>; other extensions are ignored.
-    Networks are applied to links whenever the links appear.</para>
+    <para>The main network file must have the extension <filename>.network</filename>; other
+    extensions are ignored. Networks are applied to links whenever the links appear.</para>
 
-    <para>The <filename>.network</filename> files are read from the
-    files located in the system network directory
-    <filename>/usr/lib/systemd/network</filename>, the volatile
-    runtime network directory
-    <filename>/run/systemd/network</filename> and the local
-    administration network directory
-    <filename>/etc/systemd/network</filename>. All configuration files
-    are collectively sorted and processed in lexical order, regardless
-    of the directories in which they live. However, files with
-    identical filenames replace each other. Files in
-    <filename>/etc</filename> have the highest priority, files in
-    <filename>/run</filename> take precedence over files with the same
-    name in <filename>/usr/lib</filename>. This can be used to
-    override a system-supplied configuration file with a local file if
-    needed. As a special case, an empty file (file size 0) or symlink
-    with the same name pointing to <filename>/dev/null</filename>
-    disables the configuration file entirely (it is "masked").</para>
+    <para>The <filename>.network</filename> files are read from the files located in the system
+    network directory <filename>/usr/lib/systemd/network</filename>, the volatile runtime network
+    directory <filename>/run/systemd/network</filename> and the local administration network
+    directory <filename>/etc/systemd/network</filename>. All configuration files are collectively
+    sorted and processed in lexical order, regardless of the directories in which they live.
+    However, files with identical filenames replace each other. Files in <filename>/etc</filename>
+    have the highest priority, files in <filename>/run</filename> take precedence over files with
+    the same name in <filename>/usr/lib</filename>. This can be used to override a system-supplied
+    configuration file with a local file if needed. As a special case, an empty file (file size 0)
+    or symlink with the same name pointing to <filename>/dev/null</filename> disables the
+    configuration file entirely (it is "masked").</para>
 
-    <para>Note that an interface without any static IPv6 addresses configured, and neither DHCPv6 nor IPv6LL enabled,
-    shall be considered to have no IPv6 support. IPv6 will be automatically disabled for that interface by writing "1"
-    to <filename>/proc/sys/net/ipv6/conf/<replaceable>ifname</replaceable>/disable_ipv6</filename>.
+    <para>Along with the network file <filename>foo.network</filename>, a "drop-in" directory
+    <filename>foo.network.d/</filename> may exist. All files with the suffix
+    <literal>.conf</literal> from this directory will be parsed after the file itself is
+    parsed. This is useful to alter or add configuration settings, without having to modify the main
+    configuration file. Each drop-in file must have appropriate section headers.</para>
+
+    <para>In addition to <filename>/etc/systemd/network</filename>, drop-in <literal>.d</literal>
+    directories can be placed in <filename>/usr/lib/systemd/network</filename> or
+    <filename>/run/systemd/network</filename> directories. Drop-in files in
+    <filename>/etc</filename> take precedence over those in <filename>/run</filename> which in turn
+    take precedence over those in <filename>/usr/lib</filename>. Drop-in files under any of these
+    directories take precedence over the main netdev file wherever located. (Of course, since
+    <filename>/run</filename> is temporary and <filename>/usr/lib</filename> is for vendors, it is
+    unlikely drop-ins should be used in either of those places.)</para>
+
+    <para>Note that an interface without any static IPv6 addresses configured, and neither DHCPv6
+    nor IPv6LL enabled, shall be considered to have no IPv6 support. IPv6 will be automatically
+    disabled for that interface by writing "1" to
+    <filename>/proc/sys/net/ipv6/conf/<replaceable>ifname</replaceable>/disable_ipv6</filename>.
     </para>
   </refsect1>
 
@@ -114,7 +123,10 @@
           <listitem>
             <para>A whitespace-separated list of shell-style globs
             matching the persistent path, as exposed by the udev
-            property <literal>ID_PATH</literal>.</para>
+            property <literal>ID_PATH</literal>. If the list is
+            prefixed with a "!", the test is inverted; i.e. it is
+            true when <literal>ID_PATH</literal> does not match any
+            item in the list.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -125,7 +137,8 @@
             exposed by the udev property <literal>DRIVER</literal>
             of its parent device, or if that is not set the driver
             as exposed by <literal>ethtool -i</literal> of the
-            device itself.</para>
+            device itself. If the list is prefixed with a "!", the
+            test is inverted.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -133,7 +146,8 @@
           <listitem>
             <para>A whitespace-separated list of shell-style globs
             matching the device type, as exposed by the udev property
-            <literal>DEVTYPE</literal>.</para>
+            <literal>DEVTYPE</literal>. If the list is prefixed with
+            a "!", the test is inverted.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -141,7 +155,8 @@
           <listitem>
             <para>A whitespace-separated list of shell-style globs
             matching the device name, as exposed by the udev property
-            <literal>INTERFACE</literal>.</para>
+            <literal>INTERFACE</literal>. If the list is prefixed
+            with a "!", the test is inverted.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -212,6 +227,29 @@
           below 1280 (the minimum MTU for IPv6) it will automatically be increased to this value.</para>
         </listitem>
       </varlistentry>
+      <varlistentry>
+        <term><varname>ARP=</varname></term>
+        <listitem>
+          <para> A boolean. Enables or disables the ARP (low-level Address Resolution Protocol)
+          for this interface. Defaults to unset, which means that the kernel default will be used.</para>
+          <para> For example, disabling ARP is useful when creating multiple MACVLAN or VLAN virtual
+          interfaces atop a single lower-level physical interface, which will then only serve as a
+          link/"bridge" device aggregating traffic to the same physical link and not participate in
+          the network otherwise.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>Unmanaged=</varname></term>
+        <listitem>
+          <para>A boolean. When <literal>yes</literal>, no attempts are
+          made to bring up or configure matching links, equivalent to
+          when there are no matching network files. Defaults to
+          <literal>no</literal>.</para>
+          <para>This is useful for preventing later matching network
+          files from interfering with certain interfaces that are fully
+          controlled by other applications.</para>
+        </listitem>
+      </varlistentry>
     </variablelist>
   </refsect1>
 
@@ -240,7 +278,7 @@
             By enabling DHCPv6 support explicitly, the DHCPv6 client will
             be started regardless of the presence of routers on the link,
             or what flags the routers pass. See
-            <literal>IPv6AcceptRouterAdvertisements=</literal>.</para>
+            <literal>IPv6AcceptRA=</literal>.</para>
 
             <para>Furthermore, note that by default the domain name
             specified through DHCP is not used for name resolution.
@@ -447,24 +485,31 @@
         <varlistentry>
           <term><varname>Domains=</varname></term>
           <listitem>
-            <para>The domains used for DNS host name resolution on this link. Takes a list of DNS domain names which
-            are used as search suffixes for extending single-label host names (host names containing no dots) to become
-            fully qualified domain names (FQDNs). If a single-label host name is resolved on this interface, each of
-            the specified search domains are appended to it in turn, converting it into a fully qualified domain name,
-            until one of them may be successfully resolved.</para>
+            <para>A list of domains which should be resolved using the DNS servers on this link. Each item in the list
+            should be a domain name, optionally prefixed with a tilde (<literal>~</literal>). The domains with the
+            prefix are called "routing-only domains". The domains without the prefix are called "search domains" and
+            are first used as search suffixes for extending single-label host names (host names containing no dots) to
+            become fully qualified domain names (FQDNs). If a single-label host name is resolved on this interface,
+            each of the specified search domains are appended to it in turn, converting it into a fully qualified
+            domain name, until one of them may be successfully resolved.</para>
 
-            <para>The specified domains are also used for routing of DNS queries: look-ups for host names ending in the
-            domains specified here are preferably routed to the DNS servers configured for this interface. If a domain
-            name is prefixed with <literal>~</literal>, the domain name becomes a pure "routing" domain, is used for
-            DNS query routing purposes only and is not used in the described domain search logic. By specifying a
-            routing domain of <literal>~.</literal> (the tilde indicating definition of a routing domain, the dot
-            referring to the DNS root domain which is the implied suffix of all valid DNS names) it is possible to
-            route all DNS traffic preferably to the DNS server specified for this interface. The route domain logic is
-            particularly useful on multi-homed hosts with DNS servers serving particular private DNS zones on each
-            interface.</para>
+            <para>Both "search" and "routing-only" domains are used for routing of DNS queries: look-ups for host names
+            ending in those domains (hence also single label names, if any "search domains" are listed), are routed to
+            the DNS servers configured for this interface. The domain routing logic is particularly useful on
+            multi-homed hosts with DNS servers serving particular private DNS zones on each interface.</para>
+
+            <para>The "routing-only" domain <literal>~.</literal> (the tilde indicating definition of a routing domain,
+            the dot referring to the DNS root domain which is the implied suffix of all valid DNS names) has special
+            effect. It causes all DNS traffic which does not match another configured domain routing entry to be routed
+            to DNS servers specified for this interface. This setting is useful to prefer a certain set of DNS servers
+            if a link on which they are connected is available.</para>
 
             <para>This setting is read by
-            <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>.</para>
+            <citerefentry><refentrytitle>systemd-resolved.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
+            "Search domains" correspond to the <varname>domain</varname> and <varname>search</varname> entries in
+            <citerefentry><refentrytitle>resolv.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+            Domain name routing has no equivalent in the traditional glibc API, which has no concept of domain
+            name servers limited to a specific link.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -527,7 +572,7 @@
           <literal>no</literal>.</para></listitem>
         </varlistentry>
         <varlistentry>
-          <term><varname>IPv6AcceptRouterAdvertisements=</varname></term>
+          <term><varname>IPv6AcceptRA=</varname></term>
           <listitem><para>Enable or disable IPv6 Router Advertisement (RA) reception support for the interface.  Takes
           a boolean parameter. If true, RAs are accepted; if false, RAs are ignored, independently of the local
           forwarding state. When not set, the kernel default is used, and RAs are accepted only when local forwarding
@@ -535,7 +580,7 @@
           the relevant flags are set in the RA data, or if no routers are found on the link.</para>
 
           <para>Further settings for the IPv6 RA support may be configured in the
-          <literal>[IPv6AcceptRouterAdvertisements]</literal> section, see below.</para>
+          <literal>[IPv6AcceptRA]</literal> section, see below.</para>
 
           <para>Also see <ulink
           url="https://www.kernel.org/doc/Documentation/networking/ip-sysctl.txt">ip-sysctl.txt</ulink> in the kernel
@@ -558,8 +603,8 @@
         </para></listitem>
         </varlistentry>
         <varlistentry>
-          <term><varname>ProxyARP=</varname></term>
-          <listitem><para>A boolean. Configures proxy ARP. Proxy ARP is the technique in which one host,
+          <term><varname>IPv4ProxyARP=</varname></term>
+          <listitem><para>A boolean. Configures proxy ARP for IPv4. Proxy ARP is the technique in which one host,
           usually a router, answers ARP requests intended for another machine. By "faking" its identity,
           the router accepts responsibility for routing packets to the "real" destination. (see <ulink
           url="https://tools.ietf.org/html/rfc1027">RFC 1027</ulink>.
@@ -567,43 +612,78 @@
         </para></listitem>
         </varlistentry>
         <varlistentry>
+          <term><varname>IPv6ProxyNDPAddress=</varname></term>
+          <listitem><para>An IPv6 address, for which Neighbour Advertisement
+          messages will be proxied.
+          Proxy NDP (Neighbor Discovery Protocol) is a technique for IPv6 to
+          allow routing of addresses to a different destination when peers expect them
+          to be present on a certain physical link.
+          In this case a router answers Neighbour Advertisement messages intended for
+          another machine by offering its own MAC address as destination.
+          Unlike proxy ARP for IPv4, is not enabled globally, but will only send Neighbour
+          Advertisement messages for addresses in the IPv6 neighbor proxy table,
+          which can also be shown by <command>ip -6 neighbour show proxy</command>
+          This option may be specified more than once. systemd-networkd will control the
+          per-interface `proxy_ndp` switch for each configured interface, depending on whether
+          there are <option>IPv6ProxyNDPAddress=</option> entries configured and add these to
+          the kernels IPv6 neighbor proxy table.
+          Defaults to unset.
+        </para></listitem>
+        </varlistentry>
+        <varlistentry>
           <term><varname>Bridge=</varname></term>
           <listitem>
-            <para>The name of the bridge to add the link to.</para>
+            <para>The name of the bridge to add the link to. See
+            <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+            </para>
           </listitem>
         </varlistentry>
         <varlistentry>
           <term><varname>Bond=</varname></term>
           <listitem>
-            <para>The name of the bond to add the link to.</para>
+            <para>The name of the bond to add the link to. See
+            <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+            </para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>VRF=</varname></term>
+          <listitem>
+            <para>The name of the VRF to add the link to. See
+            <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+            </para>
           </listitem>
         </varlistentry>
         <varlistentry>
           <term><varname>VLAN=</varname></term>
           <listitem>
-            <para>The name of a VLAN to create on the link. This
-            option may be specified more than once.</para>
+            <para>The name of a VLAN to create on the link. See
+            <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+            This option may be specified more than once.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
           <term><varname>MACVLAN=</varname></term>
           <listitem>
-            <para>The name of a MACVLAN to create on the link. This
-            option may be specified more than once.</para>
+            <para>The name of a MACVLAN to create on the link. See
+            <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+            This option may be specified more than once.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
           <term><varname>VXLAN=</varname></term>
           <listitem>
-            <para>The name of a VXLAN to create on the link. This
-            option may be specified more than once.</para>
+            <para>The name of a VXLAN to create on the link. See
+            <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+            This option may be specified more than once.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
           <term><varname>Tunnel=</varname></term>
           <listitem>
-            <para>The name of a Tunnel to create on the link. This
-            option may be specified more than once.</para>
+            <para>The name of a Tunnel to create on the link. See
+            <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+            This option may be specified more than once.</para>
           </listitem>
         </varlistentry>
       </variablelist>
@@ -660,6 +740,57 @@
             unless explicitly requested. A setting of PreferredLifetime=0 is useful for
             addresses which are added to be used only by a specific application,
             which is then configured to use them explicitly.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>HomeAddress=</varname></term>
+          <listitem>
+            <para>Takes a boolean argument. Designates this address the "home address" as defined in
+            <ulink url="https://tools.ietf.org/html/rfc6275">RFC 6275</ulink>.
+            Supported only on IPv6. Defaults to false.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>DuplicateAddressDetection=</varname></term>
+          <listitem>
+            <para>Takes a boolean argument. Do not perform Duplicate Address Detection
+            <ulink url="https://tools.ietf.org/html/rfc4862">RFC 4862</ulink> when adding this address.
+            Supported only on IPv6. Defaults to false.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>ManageTemporaryAddress=</varname></term>
+          <listitem>
+            <para>Takes a boolean argument. If true the kernel manage temporary addresses created
+            from this one as template on behalf of Privacy Extensions
+            <ulink url="https://tools.ietf.org/html/rfc3041">RFC 3041</ulink>.  For this to become
+            active, the use_tempaddr sysctl setting has to be set to a value greater than zero.
+            The given address needs to have a prefix length of 64. This flag allows to use privacy
+            extensions in a manually configured network, just like if stateless auto-configuration
+            was active. Defaults to false. </para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>PrefixRoute=</varname></term>
+          <listitem>
+            <para>Takes a boolean argument. When adding or modifying an IPv6 address, the userspace
+            application needs a way to suppress adding a prefix route. This is for example relevant
+            together with IFA_F_MANAGERTEMPADDR, where userspace creates autoconf generated addresses,
+            but depending on on-link, no route for the prefix should be added. Defaults to false.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>AutoJoin=</varname></term>
+          <listitem>
+            <para>Takes a boolean argument. Joining multicast group on ethernet level via
+            <command>ip maddr</command> command would not work if we have an Ethernet switch that does
+            IGMP snooping since the switch would not replicate multicast packets on  ports that did not
+            have IGMP reports for the multicast addresses. Linux vxlan interfaces created via
+            <command>ip link add vxlan</command> or networkd's netdev kind vxlan have the group option
+            that enables then to do the required join. By extending ip address command with option
+            <literal>autojoin</literal> we can get similar functionality for openvswitch (OVS) vxlan
+            interfaces as well as other tunneling mechanisms that need to receive multicast traffic.
+            Defaults to <literal>no</literal>.</para>
           </listitem>
         </varlistentry>
       </variablelist>
@@ -835,7 +966,7 @@
           <term><varname>ClientIdentifier=</varname></term>
           <listitem>
             <para>The DHCPv4 client identifier to use. Either <literal>mac</literal> to use the MAC address of the link
-            or <literal>duid</literal> (the default, see below) to use a RFC4361-compliant Client ID.</para>
+            or <literal>duid</literal> (the default, see below) to use an RFC4361-compliant Client ID.</para>
           </listitem>
         </varlistentry>
 
@@ -891,13 +1022,29 @@
             DHCP server.</para>
           </listitem>
         </varlistentry>
+
+        <varlistentry>
+          <term><varname>RouteTable=<replaceable>num</replaceable></varname></term>
+          <listitem>
+            <para>The table identifier for DHCP routes (a number between 1 and 4294967295, or 0 to unset).
+            The table can be retrieved using <command>ip route show table <replaceable>num</replaceable></command>.
+            </para>
+          </listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><varname>ListenPort=</varname></term>
+          <listitem>
+            <para>Allow setting custom port for the DHCP client to listen on.</para>
+          </listitem>
+        </varlistentry>
       </variablelist>
     </refsect1>
 
   <refsect1>
-    <title>[IPv6AcceptRouterAdvertisements] Section Options</title>
-      <para>The <literal>[IPv6AcceptRouterAdvertisements]</literal> section configures the IPv6 Router Advertisement
-      (RA) client, if it is enabled with the <varname>IPv6AcceptRouterAdvertisements=</varname> setting described
+    <title>[IPv6AcceptRA] Section Options</title>
+      <para>The <literal>[IPv6AcceptRA]</literal> section configures the IPv6 Router Advertisement
+      (RA) client, if it is enabled with the <varname>IPv6AcceptRA=</varname> setting described
       above:</para>
 
       <variablelist class='network-directives'>
@@ -929,6 +1076,16 @@
 
             <para>When set to true, this setting corresponds to the <option>domain</option> option in <citerefentry
             project='man-pages'><refentrytitle>resolv.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
+          </listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term><varname>RouteTable=<replaceable>num</replaceable></varname></term>
+          <listitem>
+            <para>The table identifier for the routes received in the Router Advertisement
+            (a number between 1 and 4294967295, or 0 to unset).
+            The table can be retrieved using <command>ip route show table <replaceable>num</replaceable></command>.
+            </para>
           </listitem>
         </varlistentry>
       </variablelist>
@@ -1130,102 +1287,240 @@
         </varlistentry>
       </variablelist>
   </refsect1>
+  <refsect1>
+    <title>[BridgeVLAN] Section Options</title>
+      <para>The <literal>[BridgeVLAN]</literal> section manages the VLAN ID configuration of a bridge port and accepts
+      the following keys. Specify several <literal>[BridgeVLAN]</literal> sections to configure several VLAN entries.
+      The <varname>VLANFiltering=</varname> option has to be enabled, see <literal>[Bridge]</literal> section in
+      <citerefentry><refentrytitle>systemd.netdev</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
+
+      <variablelist class='network-directives'>
+        <varlistentry>
+          <term><varname>VLAN=</varname></term>
+          <listitem>
+            <para>The VLAN ID allowed on the port. This can be either a single ID or a range M-N. VLAN IDs are valid
+            from 1 to 4094.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>EgressUntagged=</varname></term>
+          <listitem>
+            <para>The VLAN ID specified here will be used to untag frames on egress. Configuring
+            <varname>EgressUntagged=</varname> implicates the use of <varname>VLAN=</varname> above and will enable the
+            VLAN ID for ingress as well. This can be either a single ID or a range M-N.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>PVID=</varname></term>
+          <listitem>
+            <para>The Port VLAN ID specified here is assigned to all untagged frames at ingress.
+            <varname>PVID=</varname> can be used only once. Configuring <varname>PVID=</varname> implicates the use of
+            <varname>VLAN=</varname> above and will enable the VLAN ID for ingress as well.</para>
+          </listitem>
+        </varlistentry>
+      </variablelist>
+  </refsect1>
 
   <refsect1>
-    <title>Example</title>
+    <title>Examples</title>
     <example>
-      <title>/etc/systemd/network/50-static.network</title>
+      <title>Static network configuration</title>
 
-      <programlisting>[Match]
+      <programlisting># /etc/systemd/network/50-static.network
+[Match]
 Name=enp2s0
 
 [Network]
 Address=192.168.0.15/24
 Gateway=192.168.0.1</programlisting>
+
+      <para>This brings interface <literal>enp2s0</literal> up with a static address. The
+      specified gateway will be used for a default route.</para>
     </example>
 
     <example>
-      <title>/etc/systemd/network/80-dhcp.network</title>
+      <title>DHCP on ethernet links</title>
 
-      <programlisting>[Match]
+      <programlisting># /etc/systemd/network/80-dhcp.network
+[Match]
 Name=en*
 
 [Network]
 DHCP=yes</programlisting>
+
+      <para>This will enable DHCPv4 and DHCPv6 on all interfaces with names starting with
+      <literal>en</literal> (i.e. ethernet interfaces).</para>
     </example>
 
     <example>
-      <title>/etc/systemd/network/25-bridge-static.network</title>
+      <title>A bridge with two enslaved links</title>
 
-      <programlisting>[Match]
+      <programlisting># /etc/systemd/network/25-bridge-static.network
+[Match]
 Name=bridge0
 
 [Network]
 Address=192.168.0.15/24
 Gateway=192.168.0.1
 DNS=192.168.0.1</programlisting>
-    </example>
 
-    <example>
-      <title>/etc/systemd/network/25-bridge-slave-interface.network</title>
-
-      <programlisting>[Match]
+      <programlisting># /etc/systemd/network/25-bridge-slave-interface-1.network
+[Match]
 Name=enp2s0
 
 [Network]
 Bridge=bridge0</programlisting>
-    </example>
-    <example>
-      <title>/etc/systemd/network/25-ipip.network</title>
 
-      <programlisting>[Match]
-Name=em1
+      <programlisting># /etc/systemd/network/25-bridge-slave-interface-2.network
+[Match]
+Name=wlp3s0
 
 [Network]
-Tunnel=ipip-tun</programlisting>
+Bridge=bridge0</programlisting>
+
+      <para>This creates a bridge and attaches devices <literal>enp2s0</literal> and
+      <literal>wlp3s0</literal> to it. The bridge will have the specified static address
+      and network assigned, and a default route via the specified gateway will be
+      added. The specified DNS server will be added to the global list of DNS resolvers.
+      </para>
     </example>
 
     <example>
-      <title>/etc/systemd/network/25-sit.network</title>
+      <title></title>
 
-      <programlisting>[Match]
-Name=em1
+      <programlisting>
+# /etc/systemd/network/20-bridge-slave-interface-vlan.network
+[Match]
+Name=enp2s0
 
 [Network]
-Tunnel=sit-tun</programlisting>
+Bridge=bridge0
+
+[BridgeVLAN]
+VLAN=1-32
+PVID=42
+EgressUntagged=42
+
+[BridgeVLAN]
+VLAN=100-200
+
+[BridgeVLAN]
+EgressUntagged=300-400</programlisting>
+
+    <para>This overrides the configuration specified in the previous example for the
+    interface <literal>enp2s0</literal>, and enables VLAN on that bridge port. VLAN IDs
+    1-32, 42, 100-400 will be allowed. Packets tagged with VLAN IDs 42, 300-400 will be
+    untagged when they leave on this interface. Untagged packets which arrive on this
+    interface will be assigned VLAN ID 42.</para>
     </example>
 
     <example>
-      <title>/etc/systemd/network/25-gre.network</title>
+      <title>Various tunnels</title>
 
-      <programlisting>[Match]
-Name=em1
+      <programlisting>/etc/systemd/network/25-tunnels.network
+[Match]
+Name=ens1
 
 [Network]
-Tunnel=gre-tun</programlisting>
+Tunnel=ipip-tun
+Tunnel=sit-tun
+Tunnel=gre-tun
+Tunnel=vti-tun
+      </programlisting>
+
+      <programlisting>/etc/systemd/network/25-tunnel-ipip.netdev
+[NetDev]
+Name=ipip-tun
+Kind=ipip
+      </programlisting>
+
+      <programlisting>/etc/systemd/network/25-tunnel-sit.netdev
+[NetDev]
+Name=sit-tun
+Kind=sit
+      </programlisting>
+
+      <programlisting>/etc/systemd/network/25-tunnel-gre.netdev
+[NetDev]
+Name=gre-tun
+Kind=gre
+      </programlisting>
+
+      <programlisting>/etc/systemd/network/25-tunnel-vti.netdev
+[NetDev]
+Name=vti-tun
+Kind=vti
+      </programlisting>
+
+      <para>This will bring interface <literal>ens1</literal> up and create an IPIP tunnel,
+      a SIT tunnel, a GRE tunnel, and a VTI tunnel using it.</para>
     </example>
 
     <example>
-      <title>/etc/systemd/network/25-vti.network</title>
+      <title>A bond device</title>
 
-      <programlisting>[Match]
-Name=em1
-
-[Network]
-Tunnel=vti-tun</programlisting>
-    </example>
-
-    <example>
-      <title>/etc/systemd/network/25-bond.network</title>
-
-      <programlisting>[Match]
+      <programlisting># /etc/systemd/network/30-bond1.network
+[Match]
 Name=bond1
 
 [Network]
-DHCP=yes
+DHCP=ipv6
+</programlisting>
+
+      <programlisting># /etc/systemd/network/30-bond1.netdev
+[NetDev]
+Name=bond1
+Kind=bond
+</programlisting>
+
+      <programlisting># /etc/systemd/network/30-bond1-dev1.network
+[Match]
+MACAddress=52:54:00:e9:64:41
+
+[Network]
+Bond=bond1
+</programlisting>
+
+      <programlisting># /etc/systemd/network/30-bond1-dev2.network
+[Match]
+MACAddress=52:54:00:e9:64:42
+
+[Network]
+Bond=bond1
+</programlisting>
+
+    <para>This will create a bond device <literal>bond1</literal> and enslave the two
+    devices with MAC addresses 52:54:00:e9:64:41 and 52:54:00:e9:64:42 to it. IPv6 DHCP
+    will be used to acquire an address.</para>
+    </example>
+
+    <example>
+      <title>Virtual Routing and Forwarding (VRF)</title>
+      <para>Add the <literal>bond1</literal> interface to the VRF master interface
+      <literal>vrf1</literal>. This will redirect routes generated on this interface to be
+      within the routing table defined during VRF creation. Traffic won't be redirected
+      towards the VRFs routing table unless specific ip-rules are added.</para>
+      <programlisting># /etc/systemd/network/25-vrf.network
+[Match]
+Name=bond1
+
+[Network]
+VRF=vrf1
 </programlisting>
     </example>
 
+    <example>
+      <title>MacVTap</title>
+      <para>This brings up a network interface <literal>macvtap-test</literal>
+      and attaches it to <literal>enp0s25</literal>.</para>
+      <programlisting># /lib/systemd/network/25-macvtap.network
+[Match]
+Name=enp0s25
+
+[Network]
+MACVTAP=macvtap-test
+</programlisting>
+    </example>
   </refsect1>
 
   <refsect1>

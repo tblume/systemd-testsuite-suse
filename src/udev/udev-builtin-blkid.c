@@ -122,7 +122,7 @@ static int find_gpt_root(struct udev_device *dev, blkid_probe pr, bool test) {
         errno = 0;
         pl = blkid_probe_get_partitions(pr);
         if (!pl)
-                return errno > 0 ? -errno : -ENOMEM;
+                return -errno ?: -ENOMEM;
 
         nvals = blkid_partlist_numof_partitions(pl);
         for (i = 0; i < nvals; i++) {
@@ -147,11 +147,6 @@ static int find_gpt_root(struct udev_device *dev, blkid_probe pr, bool test) {
 
                 if (sd_id128_equal(type, GPT_ESP)) {
                         sd_id128_t id, esp;
-                        unsigned long long flags;
-
-                        flags = blkid_partition_get_flags(pp);
-                        if (flags & GPT_FLAG_NO_AUTO)
-                                continue;
 
                         /* We found an ESP, let's see if it matches
                          * the ESP we booted from. */
@@ -167,6 +162,11 @@ static int find_gpt_root(struct udev_device *dev, blkid_probe pr, bool test) {
                                 found_esp = true;
 
                 } else if (sd_id128_equal(type, GPT_ROOT_NATIVE)) {
+                        unsigned long long flags;
+
+                        flags = blkid_partition_get_flags(pp);
+                        if (flags & GPT_FLAG_NO_AUTO)
+                                continue;
 
                         /* We found a suitable root partition, let's
                          * remember the first one. */
@@ -193,7 +193,7 @@ static int probe_superblocks(blkid_probe pr) {
         int rc;
 
         if (fstat(blkid_probe_get_fd(pr), &st))
-                return -1;
+                return -errno;
 
         blkid_probe_enable_partitions(pr, 1);
 

@@ -30,10 +30,12 @@ typedef struct ExecParameters ExecParameters;
 #include <stdio.h>
 #include <sys/capability.h>
 
+#include "cgroup-util.h"
 #include "fdset.h"
 #include "list.h"
 #include "missing.h"
 #include "namespace.h"
+#include "nsflags.h"
 
 typedef enum ExecUtmpMode {
         EXEC_UTMP_INIT,
@@ -49,6 +51,7 @@ typedef enum ExecInput {
         EXEC_INPUT_TTY_FORCE,
         EXEC_INPUT_TTY_FAIL,
         EXEC_INPUT_SOCKET,
+        EXEC_INPUT_NAMED_FD,
         _EXEC_INPUT_MAX,
         _EXEC_INPUT_INVALID = -1
 } ExecInput;
@@ -64,6 +67,7 @@ typedef enum ExecOutput {
         EXEC_OUTPUT_JOURNAL,
         EXEC_OUTPUT_JOURNAL_AND_CONSOLE,
         EXEC_OUTPUT_SOCKET,
+        EXEC_OUTPUT_NAMED_FD,
         _EXEC_OUTPUT_MAX,
         _EXEC_OUTPUT_INVALID = -1
 } ExecOutput;
@@ -81,7 +85,8 @@ struct ExecCommand {
         char **argv;
         ExecStatus exec_status;
         LIST_FIELDS(ExecCommand, command); /* useful for chaining commands */
-        bool ignore;
+        bool ignore:1;
+        bool privileged:1;
 };
 
 struct ExecRuntime {
@@ -90,6 +95,8 @@ struct ExecRuntime {
         char *tmp_dir;
         char *var_tmp_dir;
 
+        /* An AF_UNIX socket pair, that contains a datagram containing a file descriptor referring to the network
+         * namespace. */
         int netns_storage_socket[2];
 };
 
@@ -99,7 +106,7 @@ struct ExecContext {
         char **pass_environment;
 
         struct rlimit *rlimit[_RLIMIT_MAX];
-        char *working_directory, *root_directory;
+        char *working_directory, *root_directory, *root_image;
         bool working_directory_missing_ok;
         bool working_directory_home;
 
@@ -116,6 +123,7 @@ struct ExecContext {
         ExecInput std_input;
         ExecOutput std_output;
         ExecOutput std_error;
+        char *stdio_fdname[3];
 
         nsec_t timer_slack_nsec;
 
@@ -129,7 +137,7 @@ struct ExecContext {
 
         bool ignore_sigpipe;
 
-        /* Since resolving these names might might involve socket
+        /* Since resolving these names might involve socket
          * connections and we don't want to deadlock ourselves these
          * names are resolved on execution only and in the child
          * process. */
@@ -151,8 +159,10 @@ struct ExecContext {
         bool smack_process_label_ignore;
         char *smack_process_label;
 
-        char **read_write_dirs, **read_only_dirs, **inaccessible_dirs;
+        char **read_write_paths, **read_only_paths, **inaccessible_paths;
         unsigned long mount_flags;
+        BindMount *bind_mounts;
+        unsigned n_bind_mounts;
 
         uint64_t capability_bounding_set;
         uint64_t capability_ambient_set;
@@ -167,10 +177,18 @@ struct ExecContext {
         bool private_tmp;
         bool private_network;
         bool private_devices;
+        bool private_users;
         ProtectSystem protect_system;
         ProtectHome protect_home;
+        bool protect_kernel_tunables;
+        bool protect_kernel_modules;
+        bool protect_control_groups;
+        bool mount_apivfs;
 
         bool no_new_privileges;
+
+        bool dynamic_user;
+        bool remove_ipc;
 
         /* This is not exposed to the user but available
          * internally. We need it to make sure that whenever we spawn
@@ -180,6 +198,8 @@ struct ExecContext {
         bool same_pgrp;
 
         unsigned long personality;
+
+        unsigned long restrict_namespaces; /* The CLONE_NEWxyz flags permitted to the unit's processes */
 
         Set *syscall_filter;
         Set *syscall_archs;
@@ -192,16 +212,33 @@ struct ExecContext {
         char **runtime_directory;
         mode_t runtime_directory_mode;
 
+        bool memory_deny_write_execute;
+        bool restrict_realtime;
+
         bool oom_score_adjust_set:1;
         bool nice_set:1;
         bool ioprio_set:1;
         bool cpu_sched_set:1;
-        bool no_new_privileges_set:1;
-        bool memory_deny_write_execute;
 };
 
-#include "cgroup-util.h"
-#include "cgroup.h"
+static inline bool exec_context_restrict_namespaces_set(const ExecContext *c) {
+        assert(c);
+
+        return (c->restrict_namespaces & NAMESPACE_FLAGS_ALL) != NAMESPACE_FLAGS_ALL;
+}
+
+typedef enum ExecFlags {
+        EXEC_APPLY_PERMISSIONS = 1U << 0,
+        EXEC_APPLY_CHROOT      = 1U << 1,
+        EXEC_APPLY_TTY_STDIN   = 1U << 2,
+        EXEC_NEW_KEYRING       = 1U << 3,
+
+        /* The following are not used by execute.c, but by consumers internally */
+        EXEC_PASS_FDS          = 1U << 4,
+        EXEC_IS_CONTROL        = 1U << 5,
+        EXEC_SETENV_RESULT     = 1U << 6,
+        EXEC_SET_WATCHDOG      = 1U << 7,
+} ExecFlags;
 
 struct ExecParameters {
         char **argv;
@@ -211,11 +248,7 @@ struct ExecParameters {
         char **fd_names;
         unsigned n_fds;
 
-        bool apply_permissions:1;
-        bool apply_chroot:1;
-        bool apply_tty_stdin:1;
-
-        bool confirm_spawn:1;
+        ExecFlags flags;
         bool selinux_context_net:1;
 
         bool cgroup_delegate:1;
@@ -223,6 +256,8 @@ struct ExecParameters {
         const char *cgroup_path;
 
         const char *runtime_prefix;
+
+        const char *confirm_spawn;
 
         usec_t watchdog_usec;
 
@@ -233,11 +268,15 @@ struct ExecParameters {
         int stderr_fd;
 };
 
+#include "unit.h"
+#include "dynamic-user.h"
+
 int exec_spawn(Unit *unit,
                ExecCommand *command,
                const ExecContext *context,
                const ExecParameters *exec_params,
                ExecRuntime *runtime,
+               DynamicCreds *dynamic_creds,
                pid_t *ret);
 
 void exec_command_done(ExecCommand *c);
@@ -261,6 +300,8 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix);
 int exec_context_destroy_runtime_directory(ExecContext *c, const char *runtime_root);
 
 int exec_context_load_environment(Unit *unit, const ExecContext *c, char ***l);
+int exec_context_named_iofds(Unit *unit, const ExecContext *c, const ExecParameters *p, int named_iofds[3]);
+const char* exec_context_fdname(const ExecContext *c, int fd_index);
 
 bool exec_context_may_touch_console(ExecContext *c);
 bool exec_context_maintains_privileges(ExecContext *c);

@@ -4,7 +4,7 @@ DETAILS:
         http://0pointer.de/blog/projects/systemd.html
 
 WEB SITE:
-        http://www.freedesktop.org/wiki/Software/systemd
+        https://www.freedesktop.org/wiki/Software/systemd
 
 GIT:
         git@github.com:systemd/systemd.git
@@ -14,7 +14,7 @@ GITWEB:
         https://github.com/systemd/systemd
 
 MAILING LIST:
-        http://lists.freedesktop.org/mailman/listinfo/systemd-devel
+        https://lists.freedesktop.org/mailman/listinfo/systemd-devel
 
 IRC:
         #systemd on irc.freenode.org
@@ -35,7 +35,7 @@ LICENSE:
         - except src/udev/* which is (currently still) GPLv2, GPLv2+
 
 REQUIREMENTS:
-        Linux kernel >= 3.12
+        Linux kernel >= 3.13
         Linux kernel >= 4.2 for unified cgroup hierarchy support
 
         Kernel Config Options:
@@ -49,6 +49,11 @@ REQUIREMENTS:
           CONFIG_SYSFS
           CONFIG_PROC_FS
           CONFIG_FHANDLE (libudev, mount and bind mount handling)
+
+        Kernel crypto/hash API
+          CONFIG_CRYPTO_USER_API_HASH
+          CONFIG_CRYPTO_HMAC
+          CONFIG_CRYPTO_SHA256
 
         udev will fail to work with the legacy sysfs layout:
           CONFIG_SYSFS_DEPRECATED=n
@@ -67,11 +72,14 @@ REQUIREMENTS:
         create additional symlinks in /dev/disk/ and /dev/tape:
           CONFIG_BLK_DEV_BSG
 
-        Required for PrivateNetwork and PrivateDevices in service units:
+        Required for PrivateNetwork= and PrivateDevices= in service units:
           CONFIG_NET_NS
           CONFIG_DEVPTS_MULTIPLE_INSTANCES
         Note that systemd-localed.service and other systemd units use
         PrivateNetwork and PrivateDevices so this is effectively required.
+
+        Required for PrivateUsers= in service units:
+          CONFIG_USER_NS
 
         Optional but strongly recommended:
           CONFIG_IPV6
@@ -79,6 +87,7 @@ REQUIREMENTS:
           CONFIG_TMPFS_XATTR
           CONFIG_{TMPFS,EXT4,XFS,BTRFS_FS,...}_POSIX_ACL
           CONFIG_SECCOMP
+          CONFIG_SECCOMP_FILTER (required for seccomp support)
           CONFIG_CHECKPOINT_RESTORE (for the kcmp() syscall)
 
         Required for CPUShares= in resource control unit settings
@@ -119,7 +128,7 @@ REQUIREMENTS:
         libcap
         libmount >= 2.27.1 (from util-linux)
                 (util-linux *must* be built with --enable-libmount-force-mountinfo)
-        libseccomp >= 1.0.0 (optional)
+        libseccomp >= 2.3.1 (optional)
         libblkid >= 2.24 (from util-linux) (optional)
         libkmod >= 15 (optional)
         PAM >= 1.1.2 (optional)
@@ -142,6 +151,8 @@ REQUIREMENTS:
 
         util-linux >= v2.27.1 required
         dbus >= 1.4.0 (strictly speaking optional, but recommended)
+                NOTE: If using dbus < 1.9.18, you should override the default
+                policy directory (--with-dbuspolicydir=/etc/dbus-1/system.d).
         dracut (optional)
         PolicyKit (optional)
 
@@ -167,6 +178,14 @@ REQUIREMENTS:
         dynamically changing hostnames, the hostname stays resolvable
         under all circumstances. In fact, systemd-hostnamed will warn
         if nss-myhostname is not installed.
+
+        Additional packages are necessary to run some tests:
+        - busybox            (used by test/TEST-13-NSPAWN-SMOKE)
+        - nc                 (used by test/TEST-12-ISSUE-3171)
+        - python3-pyparsing
+        - python3-evdev      (used by hwdb parsing tests)
+        - strace             (used by test/test-functions)
+        - capsh              (optional, used by test-execute)
 
 USERS AND GROUPS:
         Default udev rules use the following standard system group
@@ -201,7 +220,7 @@ USERS AND GROUPS:
         "systemd-coredump" system user and group to exist.
 
 NSS:
-        systemd ships with three NSS modules:
+        systemd ships with four glibc NSS modules:
 
         nss-myhostname resolves the local hostname to locally
         configured IP addresses, as well as "localhost" to
@@ -210,15 +229,22 @@ NSS:
         nss-resolve enables DNS resolution via the systemd-resolved
         DNS/LLMNR caching stub resolver "systemd-resolved".
 
-        nss-mymachines enables resolution of all local containers
-        registered with machined to their respective IP addresses.
+        nss-mymachines enables resolution of all local containers registered
+        with machined to their respective IP addresses. It also maps UID/GIDs
+        ranges used by containers to useful names.
 
-        To make use of these NSS modules, please add them to the
-        "hosts: " line in /etc/nsswitch.conf. The "resolve" module
-        should replace the glibc "dns" module in this file.
+        nss-systemd enables resolution of all dynamically allocated service
+        users. (See the DynamicUser= setting in unit files.)
 
-        The three modules should be used in the following order:
+        To make use of these NSS modules, please add them to the "hosts:",
+        "passwd:" and "group:" lines in /etc/nsswitch.conf. The "resolve"
+        module should replace the glibc "dns" module in this file (and don't
+        worry, it chain-loads the "dns" module if it can't talk to resolved).
 
+        The four modules should be used in the following order:
+
+                passwd: compat mymachines systemd
+                group: compat mymachines systemd
                 hosts: files mymachines resolve myhostname
 
 SYSV INIT.D SCRIPTS:
@@ -248,17 +274,12 @@ WARNINGS:
         requires that /var/run is a symlink to /run.
 
         For more information on this issue consult
-        http://freedesktop.org/wiki/Software/systemd/separate-usr-is-broken
+        https://www.freedesktop.org/wiki/Software/systemd/separate-usr-is-broken
 
         To run systemd under valgrind, compile with VALGRIND defined
         (e.g. ./configure CPPFLAGS='... -DVALGRIND=1'). Otherwise,
         false positives will be triggered by code which violates
         some rules but is actually safe.
-
-        Currently, systemd-timesyncd defaults to use the Google NTP
-        servers if not specified otherwise at configure time. You
-        really should not ship an OS or device with this default
-        setting. See DISTRO_PORTING for details.
 
 ENGINEERING AND CONSULTING SERVICES:
         Kinvolk (https://kinvolk.io) offers professional engineering

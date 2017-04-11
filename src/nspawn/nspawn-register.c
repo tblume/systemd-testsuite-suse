@@ -68,7 +68,6 @@ int register_machine(
                                 local_ifindex > 0 ? 1 : 0, local_ifindex);
         } else {
                 _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
-                char **i;
                 unsigned j;
 
                 r = sd_bus_message_new_method_call(
@@ -104,7 +103,7 @@ int register_machine(
                                 return bus_log_create_error(r);
                 }
 
-                r = sd_bus_message_append(m, "(sv)", "DevicePolicy", "s", "strict");
+                r = sd_bus_message_append(m, "(sv)", "DevicePolicy", "s", "closed");
                 if (r < 0)
                         return bus_log_create_error(r);
 
@@ -112,26 +111,19 @@ int register_machine(
                  * systemd-nspawn@.service, to keep the device
                  * policies in sync regardless if we are run with or
                  * without the --keep-unit switch. */
-                r = sd_bus_message_append(m, "(sv)", "DeviceAllow", "a(ss)", 9,
+                r = sd_bus_message_append(m, "(sv)", "DeviceAllow", "a(ss)", 2,
                                           /* Allow the container to
                                            * access and create the API
                                            * device nodes, so that
                                            * PrivateDevices= in the
                                            * container can work
                                            * fine */
-                                          "/dev/null", "rwm",
-                                          "/dev/zero", "rwm",
-                                          "/dev/full", "rwm",
-                                          "/dev/random", "rwm",
-                                          "/dev/urandom", "rwm",
-                                          "/dev/tty", "rwm",
                                           "/dev/net/tun", "rwm",
                                           /* Allow the container
                                            * access to ptys. However,
                                            * do not permit the
                                            * container to ever create
                                            * these device nodes. */
-                                          "/dev/pts/ptmx", "rw",
                                           "char-pts", "rw");
                 if (r < 0)
                         return bus_log_create_error(r);
@@ -143,6 +135,11 @@ int register_machine(
                                 continue;
 
                         r = is_device_node(cm->source);
+                        if (r == -ENOENT) {
+                                /* The bind source might only appear as the image is put together, hence don't complain */
+                                log_debug_errno(r, "Bind mount source %s not found, ignoring: %m", cm->source);
+                                continue;
+                        }
                         if (r < 0)
                                 return log_error_errno(r, "Failed to stat %s: %m", cm->source);
 
@@ -164,11 +161,9 @@ int register_machine(
                                 return bus_log_create_error(r);
                 }
 
-                STRV_FOREACH(i, properties) {
-                        r = bus_append_unit_property_assignment(m, *i);
-                        if (r < 0)
-                                return r;
-                }
+                r = bus_append_unit_property_assignment_many(m, properties);
+                if (r < 0)
+                        return r;
 
                 r = sd_bus_message_close_container(m);
                 if (r < 0)

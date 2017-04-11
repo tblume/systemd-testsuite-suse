@@ -39,6 +39,7 @@
 #include <unistd.h>
 
 #include "alloc-util.h"
+#include "env-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
@@ -143,12 +144,14 @@ int read_one_char(FILE *f, char *ret, usec_t t, bool *need_nl) {
         return 0;
 }
 
-int ask_char(char *ret, const char *replies, const char *text, ...) {
+#define DEFAULT_ASK_REFRESH_USEC (2*USEC_PER_SEC)
+
+int ask_char(char *ret, const char *replies, const char *fmt, ...) {
         int r;
 
         assert(ret);
         assert(replies);
-        assert(text);
+        assert(fmt);
 
         for (;;) {
                 va_list ap;
@@ -158,8 +161,10 @@ int ask_char(char *ret, const char *replies, const char *text, ...) {
                 if (colors_enabled())
                         fputs(ANSI_HIGHLIGHT, stdout);
 
-                va_start(ap, text);
-                vprintf(text, ap);
+                putchar('\r');
+
+                va_start(ap, fmt);
+                vprintf(fmt, ap);
                 va_end(ap);
 
                 if (colors_enabled())
@@ -167,8 +172,11 @@ int ask_char(char *ret, const char *replies, const char *text, ...) {
 
                 fflush(stdout);
 
-                r = read_one_char(stdin, &c, USEC_INFINITY, &need_nl);
+                r = read_one_char(stdin, &c, DEFAULT_ASK_REFRESH_USEC, &need_nl);
                 if (r < 0) {
+
+                        if (r == -ETIMEDOUT)
+                                continue;
 
                         if (r == -EBADMSG) {
                                 puts("Bad input, please try again.");
@@ -345,12 +353,7 @@ int open_terminal(const char *name, int mode) {
         }
 
         r = isatty(fd);
-        if (r < 0) {
-                safe_close(fd);
-                return -errno;
-        }
-
-        if (!r) {
+        if (r == 0) {
                 safe_close(fd);
                 return -ENOTTY;
         }
@@ -459,7 +462,7 @@ int acquire_terminal(
                                         goto fail;
                                 }
 
-                                r = fd_wait_for_event(fd, POLLIN, ts + timeout - n);
+                                r = fd_wait_for_event(notify, POLLIN, ts + timeout - n);
                                 if (r < 0)
                                         goto fail;
 
@@ -785,7 +788,7 @@ bool tty_is_vc_resolve(const char *tty) {
 }
 
 const char *default_term_for_tty(const char *tty) {
-        return tty && tty_is_vc_resolve(tty) ? "TERM=linux" : "TERM=vt220";
+        return tty && tty_is_vc_resolve(tty) ? "linux" : "vt220";
 }
 
 int fd_columns(int fd) {
@@ -888,9 +891,7 @@ int make_stdio(int fd) {
 
         /* Explicitly unset O_CLOEXEC, since if fd was < 3, then
          * dup2() was a NOP and the bit hence possibly set. */
-        fd_cloexec(STDIN_FILENO, false);
-        fd_cloexec(STDOUT_FILENO, false);
-        fd_cloexec(STDERR_FILENO, false);
+        stdio_unset_cloexec();
 
         return 0;
 }
@@ -1193,11 +1194,8 @@ int open_terminal_in_namespace(pid_t pid, const char *name, int mode) {
         return receive_one_fd(pair[0], 0);
 }
 
-bool terminal_is_dumb(void) {
+static bool getenv_terminal_is_dumb(void) {
         const char *e;
-
-        if (!on_tty())
-                return true;
 
         e = getenv("TERM");
         if (!e)
@@ -1206,15 +1204,25 @@ bool terminal_is_dumb(void) {
         return streq(e, "dumb");
 }
 
+bool terminal_is_dumb(void) {
+        if (!on_tty())
+                return true;
+
+        return getenv_terminal_is_dumb();
+}
+
 bool colors_enabled(void) {
         static int enabled = -1;
 
         if (_unlikely_(enabled < 0)) {
-                const char *colors;
+                int val;
 
-                colors = getenv("SYSTEMD_COLORS");
-                if (colors)
-                        enabled = parse_boolean(colors) != 0;
+                val = getenv_bool("SYSTEMD_COLORS");
+                if (val >= 0)
+                        enabled = val;
+                else if (getpid() == 1)
+                        /* PID1 outputs to the console without holding it open all the time */
+                        enabled = !getenv_terminal_is_dumb();
                 else
                         enabled = !terminal_is_dumb();
         }

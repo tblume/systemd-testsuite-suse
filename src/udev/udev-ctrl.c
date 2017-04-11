@@ -20,7 +20,7 @@
 
 #include "alloc-util.h"
 #include "fd-util.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "socket-util.h"
 #include "udev.h"
 
@@ -211,8 +211,7 @@ struct udev_ctrl_connection *udev_ctrl_get_connection(struct udev_ctrl *uctrl) {
 err:
         if (conn->sock >= 0)
                 close(conn->sock);
-        free(conn);
-        return NULL;
+        return mfree(conn);
 }
 
 struct udev_ctrl_connection *udev_ctrl_connection_ref(struct udev_ctrl_connection *conn) {

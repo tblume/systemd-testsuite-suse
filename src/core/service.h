@@ -65,6 +65,7 @@ typedef enum NotifyAccess {
         NOTIFY_NONE,
         NOTIFY_ALL,
         NOTIFY_MAIN,
+        NOTIFY_EXEC,
         _NOTIFY_ACCESS_MAX,
         _NOTIFY_ACCESS_INVALID = -1
 } NotifyAccess;
@@ -78,9 +79,12 @@ typedef enum NotifyState {
         _NOTIFY_STATE_INVALID = -1
 } NotifyState;
 
+/* The values of this enum are referenced in man/systemd.exec.xml and src/shared/bus-unit-util.c.
+ * Update those sources for each change to this enum. */
 typedef enum ServiceResult {
         SERVICE_SUCCESS,
         SERVICE_FAILURE_RESOURCES, /* a bit of a misnomer, just our catch-all error for errnos we didn't expect */
+        SERVICE_FAILURE_PROTOCOL,
         SERVICE_FAILURE_TIMEOUT,
         SERVICE_FAILURE_EXIT_CODE,
         SERVICE_FAILURE_SIGNAL,
@@ -120,6 +124,8 @@ struct Service {
 
         dual_timestamp watchdog_timestamp;
         usec_t watchdog_usec;
+        usec_t watchdog_override_usec;
+        bool watchdog_override_enable;
         sd_event_source *watchdog_event_source;
 
         ExecCommand* exec_command[_SERVICE_EXEC_COMMAND_MAX];
@@ -146,9 +152,11 @@ struct Service {
 
         /* Runtime data of the execution context */
         ExecRuntime *exec_runtime;
+        DynamicCreds dynamic_creds;
 
         pid_t main_pid, control_pid;
         int socket_fd;
+        SocketPeer *peer;
         bool socket_fd_selinux_context_net;
 
         bool permissions_start_only;
@@ -174,7 +182,7 @@ struct Service {
         char *status_text;
         int status_errno;
 
-        FailureAction failure_action;
+        EmergencyAction emergency_action;
 
         UnitRef accept_socket;
 

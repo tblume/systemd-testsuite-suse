@@ -1,8 +1,6 @@
 /user@.service.m4
 /console-getty.service
 /console-getty.service.m4
-/console-shell.service
-/console-shell.service.m4
 /container-getty@.service
 /container-getty@.service.m4
 /debug-shell.service
@@ -18,6 +16,7 @@
 /rc-local.service
 /rescue.service
 /serial-getty@.service
+/system-update-cleanup.service
 /systemd-ask-password-console.service
 /systemd-ask-password-wall.service
 /systemd-backlight@.service
@@ -76,5 +75,6 @@
 /systemd-update-utmp.service
 /systemd-user-sessions.service
 /systemd-vconsole-setup.service
+/systemd-volatile-root.service
 /tmp.mount
 /user@.service

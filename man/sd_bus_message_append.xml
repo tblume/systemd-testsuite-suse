@@ -58,7 +58,7 @@
         <funcdef>int sd_bus_message_append</funcdef>
         <paramdef>sd_bus_message *<parameter>m</parameter></paramdef>
         <paramdef>const char *<parameter>types</parameter></paramdef>
-        <paramdef>...</paramdef>
+        <paramdef>…</paramdef>
       </funcprototype>
     </funcsynopsis>
   </refsynopsisdiv>
@@ -169,6 +169,11 @@
       </tgroup>
     </table>
 
+    <para>For types "s" and "g" (unicode string or signature), the pointer may be
+    <constant>NULL</constant>, which is equivalent to an empty string. See
+    <citerefentry><refentrytitle>sd_bus_message_append_basic</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+    for the precise interpretation of those and other types.</para>
+
   </refsect1>
 
   <refsect1>
@@ -193,7 +198,7 @@ dictionary ::= "a" "{" basic_type complete_type "}"
     </para>
 
     <programlisting>sd_bus_message *m;
-...
+…
 sd_bus_message_append(m, "s", "a string");</programlisting>
 
     <para>Append all types of integers:</para>

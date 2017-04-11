@@ -31,7 +31,7 @@
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "hostname-util.h"
 #include "io-util.h"
@@ -124,7 +124,7 @@ _public_ int sd_pid_get_cgroup(pid_t pid, char **cgroup) {
 
         /* The internal APIs return the empty string for the root
          * cgroup, let's return the "/" in the public APIs instead, as
-         * that's easier and less ambigious for people to grok. */
+         * that's easier and less ambiguous for people to grok. */
         if (isempty(c)) {
                 free(c);
                 c = strdup("/");
@@ -793,6 +793,7 @@ _public_ int sd_get_sessions(char ***sessions) {
 
 _public_ int sd_get_uids(uid_t **users) {
         _cleanup_closedir_ DIR *d;
+        struct dirent *de;
         int r = 0;
         unsigned n = 0;
         _cleanup_free_ uid_t *l = NULL;
@@ -801,18 +802,9 @@ _public_ int sd_get_uids(uid_t **users) {
         if (!d)
                 return -errno;
 
-        for (;;) {
-                struct dirent *de;
+        FOREACH_DIRENT_ALL(de, d, return -errno) {
                 int k;
                 uid_t uid;
-
-                errno = 0;
-                de = readdir(d);
-                if (!de && errno > 0)
-                        return -errno;
-
-                if (!de)
-                        break;
 
                 dirent_ensure_type(d, de);
 

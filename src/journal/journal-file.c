@@ -42,6 +42,7 @@
 #include "sd-event.h"
 #include "set.h"
 #include "string-util.h"
+#include "strv.h"
 #include "xattr-util.h"
 
 #define DEFAULT_DATA_HASH_TABLE_SIZE (2047ULL*sizeof(HashItem))
@@ -285,7 +286,7 @@ static int journal_file_set_online(JournalFile *f) {
                                 continue;
                         /* Canceled restart from offlining, must wait for offlining to complete however. */
 
-                        /* fall through to wait */
+                        /* fall through */
                 default: {
                         int r;
 
@@ -333,8 +334,13 @@ JournalFile* journal_file_close(JournalFile *f) {
 
 #ifdef HAVE_GCRYPT
         /* Write the final tag */
-        if (f->seal && f->writable)
-                journal_file_append_tag(f);
+        if (f->seal && f->writable) {
+                int r;
+
+                r = journal_file_append_tag(f);
+                if (r < 0)
+                        log_error_errno(r, "Failed to append tag when closing journal: %m");
+        }
 #endif
 
         if (f->post_change_timer) {
@@ -389,8 +395,7 @@ JournalFile* journal_file_close(JournalFile *f) {
                 gcry_md_close(f->hmac);
 #endif
 
-        free(f);
-        return NULL;
+        return mfree(f);
 }
 
 void journal_file_close_set(Set *s) {
@@ -503,8 +508,45 @@ static int journal_file_refresh_header(JournalFile *f) {
         return r;
 }
 
-static int journal_file_verify_header(JournalFile *f) {
+static bool warn_wrong_flags(const JournalFile *f, bool compatible) {
+        const uint32_t any = compatible ? HEADER_COMPATIBLE_ANY : HEADER_INCOMPATIBLE_ANY,
+                supported = compatible ? HEADER_COMPATIBLE_SUPPORTED : HEADER_INCOMPATIBLE_SUPPORTED;
+        const char *type = compatible ? "compatible" : "incompatible";
         uint32_t flags;
+
+        flags = le32toh(compatible ? f->header->compatible_flags : f->header->incompatible_flags);
+
+        if (flags & ~supported) {
+                if (flags & ~any)
+                        log_debug("Journal file %s has unknown %s flags 0x%"PRIx32,
+                                  f->path, type, flags & ~any);
+                flags = (flags & any) & ~supported;
+                if (flags) {
+                        const char* strv[3];
+                        unsigned n = 0;
+                        _cleanup_free_ char *t = NULL;
+
+                        if (compatible && (flags & HEADER_COMPATIBLE_SEALED))
+                                strv[n++] = "sealed";
+                        if (!compatible && (flags & HEADER_INCOMPATIBLE_COMPRESSED_XZ))
+                                strv[n++] = "xz-compressed";
+                        if (!compatible && (flags & HEADER_INCOMPATIBLE_COMPRESSED_LZ4))
+                                strv[n++] = "lz4-compressed";
+                        strv[n] = NULL;
+                        assert(n < ELEMENTSOF(strv));
+
+                        t = strv_join((char**) strv, ", ");
+                        log_debug("Journal file %s uses %s %s %s disabled at compilation time.",
+                                  f->path, type, n > 1 ? "flags" : "flag", strnull(t));
+                }
+                return true;
+        }
+
+        return false;
+}
+
+static int journal_file_verify_header(JournalFile *f) {
+        uint64_t arena_size, header_size;
 
         assert(f);
         assert(f->header);
@@ -512,48 +554,33 @@ static int journal_file_verify_header(JournalFile *f) {
         if (memcmp(f->header->signature, HEADER_SIGNATURE, 8))
                 return -EBADMSG;
 
-        /* In both read and write mode we refuse to open files with
-         * incompatible flags we don't know */
-        flags = le32toh(f->header->incompatible_flags);
-        if (flags & ~HEADER_INCOMPATIBLE_SUPPORTED) {
-                if (flags & ~HEADER_INCOMPATIBLE_ANY)
-                        log_debug("Journal file %s has unknown incompatible flags %"PRIx32,
-                                  f->path, flags & ~HEADER_INCOMPATIBLE_ANY);
-                flags = (flags & HEADER_INCOMPATIBLE_ANY) & ~HEADER_INCOMPATIBLE_SUPPORTED;
-                if (flags)
-                        log_debug("Journal file %s uses incompatible flags %"PRIx32
-                                  " disabled at compilation time.", f->path, flags);
+        /* In both read and write mode we refuse to open files with incompatible
+         * flags we don't know. */
+        if (warn_wrong_flags(f, false))
                 return -EPROTONOSUPPORT;
-        }
 
-        /* When open for writing we refuse to open files with
-         * compatible flags, too */
-        flags = le32toh(f->header->compatible_flags);
-        if (f->writable && (flags & ~HEADER_COMPATIBLE_SUPPORTED)) {
-                if (flags & ~HEADER_COMPATIBLE_ANY)
-                        log_debug("Journal file %s has unknown compatible flags %"PRIx32,
-                                  f->path, flags & ~HEADER_COMPATIBLE_ANY);
-                flags = (flags & HEADER_COMPATIBLE_ANY) & ~HEADER_COMPATIBLE_SUPPORTED;
-                if (flags)
-                        log_debug("Journal file %s uses compatible flags %"PRIx32
-                                  " disabled at compilation time.", f->path, flags);
+        /* When open for writing we refuse to open files with compatible flags, too. */
+        if (f->writable && warn_wrong_flags(f, true))
                 return -EPROTONOSUPPORT;
-        }
 
         if (f->header->state >= _STATE_MAX)
                 return -EBADMSG;
 
+        header_size = le64toh(f->header->header_size);
+
         /* The first addition was n_data, so check that we are at least this large */
-        if (le64toh(f->header->header_size) < HEADER_SIZE_MIN)
+        if (header_size < HEADER_SIZE_MIN)
                 return -EBADMSG;
 
         if (JOURNAL_HEADER_SEALED(f->header) && !JOURNAL_HEADER_CONTAINS(f->header, n_entry_arrays))
                 return -EBADMSG;
 
-        if ((le64toh(f->header->header_size) + le64toh(f->header->arena_size)) > (uint64_t) f->last_stat.st_size)
+        arena_size = le64toh(f->header->arena_size);
+
+        if (UINT64_MAX - header_size < arena_size || header_size + arena_size > (uint64_t) f->last_stat.st_size)
                 return -ENODATA;
 
-        if (le64toh(f->header->tail_object_offset) > (le64toh(f->header->header_size) + le64toh(f->header->arena_size)))
+        if (le64toh(f->header->tail_object_offset) > header_size + arena_size)
                 return -ENODATA;
 
         if (!VALID64(le64toh(f->header->data_hash_table_offset)) ||
@@ -563,8 +590,8 @@ static int journal_file_verify_header(JournalFile *f) {
                 return -ENODATA;
 
         if (f->writable) {
-                uint8_t state;
                 sd_id128_t machine_id;
+                uint8_t state;
                 int r;
 
                 r = sd_id128_get_machine(&machine_id);
@@ -576,14 +603,22 @@ static int journal_file_verify_header(JournalFile *f) {
 
                 state = f->header->state;
 
-                if (state == STATE_ONLINE) {
+                if (state == STATE_ARCHIVED)
+                        return -ESHUTDOWN; /* Already archived */
+                else if (state == STATE_ONLINE) {
                         log_debug("Journal file %s is already online. Assuming unclean closing.", f->path);
                         return -EBUSY;
-                } else if (state == STATE_ARCHIVED)
-                        return -ESHUTDOWN;
-                else if (state != STATE_OFFLINE) {
+                } else if (state != STATE_OFFLINE) {
                         log_debug("Journal file %s has unknown state %i.", f->path, state);
                         return -EBUSY;
+                }
+
+                /* Don't permit appending to files from the future. Because otherwise the realtime timestamps wouldn't
+                 * be strictly ordered in the entries in the file anymore, and we can't have that since it breaks
+                 * bisection. */
+                if (le64toh(f->header->tail_entry_realtime) > now(CLOCK_REALTIME)) {
+                        log_debug("Journal file %s is from the future, refusing to append new data to it that'd be older.", f->path);
+                        return -ETXTBSY;
                 }
         }
 
@@ -742,12 +777,16 @@ int journal_file_move_to_object(JournalFile *f, ObjectType type, uint64_t offset
         assert(ret);
 
         /* Objects may only be located at multiple of 64 bit */
-        if (!VALID64(offset))
+        if (!VALID64(offset)) {
+                log_debug("Attempt to move to object at non-64bit boundary: %" PRIu64, offset);
                 return -EBADMSG;
+        }
 
         /* Object may not be located in the file header */
-        if (offset < le64toh(f->header->header_size))
+        if (offset < le64toh(f->header->header_size)) {
+                log_debug("Attempt to move to object located in file header: %" PRIu64, offset);
                 return -EBADMSG;
+        }
 
         r = journal_file_move_to(f, type, false, offset, sizeof(ObjectHeader), &t);
         if (r < 0)
@@ -756,17 +795,29 @@ int journal_file_move_to_object(JournalFile *f, ObjectType type, uint64_t offset
         o = (Object*) t;
         s = le64toh(o->object.size);
 
-        if (s < sizeof(ObjectHeader))
+        if (s == 0) {
+                log_debug("Attempt to move to uninitialized object: %" PRIu64, offset);
                 return -EBADMSG;
+        }
+        if (s < sizeof(ObjectHeader)) {
+                log_debug("Attempt to move to overly short object: %" PRIu64, offset);
+                return -EBADMSG;
+        }
 
-        if (o->object.type <= OBJECT_UNUSED)
+        if (o->object.type <= OBJECT_UNUSED) {
+                log_debug("Attempt to move to object with invalid type: %" PRIu64, offset);
                 return -EBADMSG;
+        }
 
-        if (s < minimum_header_size(o))
+        if (s < minimum_header_size(o)) {
+                log_debug("Attempt to move to truncated object: %" PRIu64, offset);
                 return -EBADMSG;
+        }
 
-        if (type > OBJECT_UNUSED && o->object.type != type)
+        if (type > OBJECT_UNUSED && o->object.type != type) {
+                log_debug("Attempt to move to object of unexpected type: %" PRIu64, offset);
                 return -EBADMSG;
+        }
 
         if (s > sizeof(ObjectHeader)) {
                 r = journal_file_move_to(f, type, false, offset, s, &t);
@@ -1369,6 +1420,12 @@ static int journal_file_append_data(
         if (r < 0)
                 return r;
 
+#ifdef HAVE_GCRYPT
+        r = journal_file_hmac_put_object(f, OBJECT_DATA, o, p);
+        if (r < 0)
+                return r;
+#endif
+
         /* The linking might have altered the window, so let's
          * refresh our pointer */
         r = journal_file_move_to_object(f, OBJECT_DATA, p, &o);
@@ -1392,12 +1449,6 @@ static int journal_file_append_data(
                 o->data.next_field_offset = fo->field.head_data_offset;
                 fo->field.head_data_offset = le64toh(p);
         }
-
-#ifdef HAVE_GCRYPT
-        r = journal_file_hmac_put_object(f, OBJECT_DATA, o, p);
-        if (r < 0)
-                return r;
-#endif
 
         if (ret)
                 *ret = o;
@@ -2467,6 +2518,37 @@ int journal_file_compare_locations(JournalFile *af, JournalFile *bf) {
         return 0;
 }
 
+static int bump_array_index(uint64_t *i, direction_t direction, uint64_t n) {
+
+        /* Increase or decrease the specified index, in the right direction. */
+
+        if (direction == DIRECTION_DOWN) {
+                if (*i >= n - 1)
+                        return 0;
+
+                (*i) ++;
+        } else {
+                if (*i <= 0)
+                        return 0;
+
+                (*i) --;
+        }
+
+        return 1;
+}
+
+static bool check_properly_ordered(uint64_t new_offset, uint64_t old_offset, direction_t direction) {
+
+        /* Consider it an error if any of the two offsets is uninitialized */
+        if (old_offset == 0 || new_offset == 0)
+                return false;
+
+        /* If we go down, the new offset must be larger than the old one. */
+        return direction == DIRECTION_DOWN ?
+                new_offset > old_offset  :
+                new_offset < old_offset;
+}
+
 int journal_file_next_entry(
                 JournalFile *f,
                 uint64_t p,
@@ -2497,36 +2579,34 @@ int journal_file_next_entry(
                 if (r <= 0)
                         return r;
 
-                if (direction == DIRECTION_DOWN) {
-                        if (i >= n - 1)
-                                return 0;
-
-                        i++;
-                } else {
-                        if (i <= 0)
-                                return 0;
-
-                        i--;
-                }
+                r = bump_array_index(&i, direction, n);
+                if (r <= 0)
+                        return r;
         }
 
         /* And jump to it */
-        r = generic_array_get(f,
-                              le64toh(f->header->entry_array_offset),
-                              i,
-                              ret, &ofs);
-        if (r == -EBADMSG && direction == DIRECTION_DOWN) {
-                /* Special case: when we iterate throught the journal file linearly, and hit an entry we can't read,
-                 * consider this the end of the journal file. */
-                log_debug_errno(r, "Encountered entry we can't read while iterating through journal file. Considering this the end of the file.");
-                return 0;
-        }
-        if (r <= 0)
-                return r;
+        for (;;) {
+                r = generic_array_get(f,
+                                      le64toh(f->header->entry_array_offset),
+                                      i,
+                                      ret, &ofs);
+                if (r > 0)
+                        break;
+                if (r != -EBADMSG)
+                        return r;
 
-        if (p > 0 &&
-            (direction == DIRECTION_DOWN ? ofs <= p : ofs >= p)) {
-                log_debug("%s: entry array corrupted at entry %" PRIu64, f->path, i);
+                /* OK, so this entry is borked. Most likely some entry didn't get synced to disk properly, let's see if
+                 * the next one might work for us instead. */
+                log_debug_errno(r, "Entry item %" PRIu64 " is bad, skipping over it.", i);
+
+                r = bump_array_index(&i, direction, n);
+                if (r <= 0)
+                        return r;
+        }
+
+        /* Ensure our array is properly ordered. */
+        if (p > 0 && !check_properly_ordered(ofs, p, direction)) {
+                log_debug("%s: entry array not properly ordered at entry %" PRIu64, f->path, i);
                 return -EBADMSG;
         }
 
@@ -2543,9 +2623,9 @@ int journal_file_next_entry_for_data(
                 direction_t direction,
                 Object **ret, uint64_t *offset) {
 
-        uint64_t n, i;
-        int r;
+        uint64_t i, n, ofs;
         Object *d;
+        int r;
 
         assert(f);
         assert(p > 0 || !o);
@@ -2577,25 +2657,39 @@ int journal_file_next_entry_for_data(
                 if (r <= 0)
                         return r;
 
-                if (direction == DIRECTION_DOWN) {
-                        if (i >= n - 1)
-                                return 0;
-
-                        i++;
-                } else {
-                        if (i <= 0)
-                                return 0;
-
-                        i--;
-                }
-
+                r = bump_array_index(&i, direction, n);
+                if (r <= 0)
+                        return r;
         }
 
-        return generic_array_get_plus_one(f,
-                                          le64toh(d->data.entry_offset),
-                                          le64toh(d->data.entry_array_offset),
-                                          i,
-                                          ret, offset);
+        for (;;) {
+                r = generic_array_get_plus_one(f,
+                                               le64toh(d->data.entry_offset),
+                                               le64toh(d->data.entry_array_offset),
+                                               i,
+                                               ret, &ofs);
+                if (r > 0)
+                        break;
+                if (r != -EBADMSG)
+                        return r;
+
+                log_debug_errno(r, "Data entry item %" PRIu64 " is bad, skipping over it.", i);
+
+                r = bump_array_index(&i, direction, n);
+                if (r <= 0)
+                        return r;
+        }
+
+        /* Ensure our array is properly ordered. */
+        if (p > 0 && check_properly_ordered(ofs, p, direction)) {
+                log_debug("%s data entry array not properly ordered at entry %" PRIu64, f->path, i);
+                return -EBADMSG;
+        }
+
+        if (offset)
+                *offset = ofs;
+
+        return 1;
 }
 
 int journal_file_move_to_entry_by_offset_for_data(
@@ -3016,13 +3110,18 @@ int journal_file_open(
                 }
         }
 
-        if (fname)
+        if (fname) {
                 f->path = strdup(fname);
-        else /* If we don't know the path, fill in something explanatory and vaguely useful */
-                asprintf(&f->path, "/proc/self/%i", fd);
-        if (!f->path) {
-                r = -ENOMEM;
-                goto fail;
+                if (!f->path) {
+                        r = -ENOMEM;
+                        goto fail;
+                }
+        } else {
+                /* If we don't know the path, fill in something explanatory and vaguely useful */
+                if (asprintf(&f->path, "/proc/self/%i", fd) < 0) {
+                        r = -ENOMEM;
+                        goto fail;
+                }
         }
 
         f->chain_cache = ordered_hashmap_new(&uint64_hash_ops);
@@ -3190,7 +3289,7 @@ int journal_file_rotate(JournalFile **f, bool compress, bool seal, Set *deferred
                 return -EINVAL;
 
         /* Is this a journal file that was passed to us as fd? If so, we synthesized a path name for it, and we refuse
-         * rotation, since we don't know the actual path, and couldn't rename the file hence.*/
+         * rotation, since we don't know the actual path, and couldn't rename the file hence. */
         if (path_startswith(old_file->path, "/proc/self/fd"))
                 return -EINVAL;
 
@@ -3259,14 +3358,15 @@ int journal_file_open_reliably(
 
         r = journal_file_open(-1, fname, flags, mode, compress, seal, metrics, mmap_cache, deferred_closes, template, ret);
         if (!IN_SET(r,
-                    -EBADMSG,           /* corrupted */
-                    -ENODATA,           /* truncated */
-                    -EHOSTDOWN,         /* other machine */
-                    -EPROTONOSUPPORT,   /* incompatible feature */
-                    -EBUSY,             /* unclean shutdown */
-                    -ESHUTDOWN,         /* already archived */
+                    -EBADMSG,           /* Corrupted */
+                    -ENODATA,           /* Truncated */
+                    -EHOSTDOWN,         /* Other machine */
+                    -EPROTONOSUPPORT,   /* Incompatible feature */
+                    -EBUSY,             /* Unclean shutdown */
+                    -ESHUTDOWN,         /* Already archived */
                     -EIO,               /* IO error, including SIGBUS on mmap */
-                    -EIDRM              /* File has been deleted */))
+                    -EIDRM,             /* File has been deleted */
+                    -ETXTBSY))          /* File is from the future */
                 return r;
 
         if ((flags & O_ACCMODE) == O_RDONLY)

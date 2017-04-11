@@ -167,7 +167,7 @@ static bool validate_device(struct udev *udev, struct udev_device *device) {
                         continue;
 
                 v = udev_device_get_sysattr_value(other, "type");
-                if (!streq_ptr(v, "platform") && !streq_ptr(v, "firmware"))
+                if (!STRPTR_IN_SET(v, "platform", "firmware"))
                         continue;
 
                 /* OK, so there's another backlight device, and it's a
@@ -357,9 +357,9 @@ int main(int argc, char *argv[]) {
                         return EXIT_FAILURE;
                 }
 
-                saved = strjoin("/var/lib/systemd/backlight/", escaped_path_id, ":", escaped_ss, ":", escaped_sysname, NULL);
+                saved = strjoin("/var/lib/systemd/backlight/", escaped_path_id, ":", escaped_ss, ":", escaped_sysname);
         } else
-                saved = strjoin("/var/lib/systemd/backlight/", escaped_ss, ":", escaped_sysname, NULL);
+                saved = strjoin("/var/lib/systemd/backlight/", escaped_ss, ":", escaped_sysname);
 
         if (!saved) {
                 log_oom();

@@ -135,9 +135,7 @@ sd_ipv4acd *sd_ipv4acd_unref(sd_ipv4acd *acd) {
         ipv4acd_reset(acd);
         sd_ipv4acd_detach_event(acd);
 
-        free(acd);
-
-        return NULL;
+        return mfree(acd);
 }
 
 int sd_ipv4acd_new(sd_ipv4acd **ret) {
@@ -244,8 +242,6 @@ static int ipv4acd_on_timeout(sd_event_source *s, uint64_t usec, void *userdata)
                         r = ipv4acd_set_next_wakeup(acd, RATE_LIMIT_INTERVAL_USEC, PROBE_WAIT_USEC);
                         if (r < 0)
                                 goto fail;
-
-                        acd->n_conflict = 0;
                 } else {
                         r = ipv4acd_set_next_wakeup(acd, 0, PROBE_WAIT_USEC);
                         if (r < 0)

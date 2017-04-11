@@ -54,6 +54,25 @@ static void test_specifier_printf(void) {
         puts(w);
 }
 
+static void test_str_in_set(void) {
+        assert_se(STR_IN_SET("x", "x", "y", "z"));
+        assert_se(!STR_IN_SET("X", "x", "y", "z"));
+        assert_se(!STR_IN_SET("", "x", "y", "z"));
+        assert_se(STR_IN_SET("x", "w", "x"));
+}
+
+static void test_strptr_in_set(void) {
+        assert_se(STRPTR_IN_SET("x", "x", "y", "z"));
+        assert_se(!STRPTR_IN_SET("X", "x", "y", "z"));
+        assert_se(!STRPTR_IN_SET("", "x", "y", "z"));
+        assert_se(STRPTR_IN_SET("x", "w", "x"));
+
+        assert_se(!STRPTR_IN_SET(NULL, "x", "y", "z"));
+        assert_se(!STRPTR_IN_SET(NULL, ""));
+        /* strv cannot contain a null, hence the result below */
+        assert_se(!STRPTR_IN_SET(NULL, NULL));
+}
+
 static const char* const input_table_multiple[] = {
         "one",
         "two",
@@ -434,9 +453,14 @@ static void test_strv_foreach_backwards(void) {
 
         assert_se(a);
 
-        STRV_FOREACH_BACKWARDS(check, a) {
+        STRV_FOREACH_BACKWARDS(check, a)
                 assert_se(streq_ptr(*check, input_table_multiple[i--]));
-        }
+
+        STRV_FOREACH_BACKWARDS(check, (char**) NULL)
+                assert_not_reached("Let's see that we check empty strv right, too.");
+
+        STRV_FOREACH_BACKWARDS(check, (char**) { NULL })
+                assert_not_reached("Let's see that we check empty strv right, too.");
 }
 
 static void test_strv_foreach_pair(void) {
@@ -647,7 +671,9 @@ static void test_strv_extend_n(void) {
 static void test_strv_make_nulstr_one(char **l) {
         _cleanup_free_ char *b = NULL, *c = NULL;
         _cleanup_strv_free_ char **q = NULL;
+        const char *s = NULL;
         size_t n, m;
+        unsigned i = 0;
 
         assert_se(strv_make_nulstr(l, &b, &n) >= 0);
         assert_se(q = strv_parse_nulstr(b, n));
@@ -656,6 +682,10 @@ static void test_strv_make_nulstr_one(char **l) {
         assert_se(strv_make_nulstr(q, &c, &m) >= 0);
         assert_se(m == n);
         assert_se(memcmp(b, c, m) == 0);
+
+        NULSTR_FOREACH(s, b)
+                assert_se(streq(s, l[i++]));
+        assert_se(i == strv_length(l));
 }
 
 static void test_strv_make_nulstr(void) {
@@ -685,8 +715,20 @@ static void test_foreach_string(void) {
                 assert_se(streq(x, "zzz"));
 }
 
+static void test_strv_fnmatch(void) {
+        _cleanup_strv_free_ char **v = NULL;
+
+        assert_se(!strv_fnmatch(STRV_MAKE_EMPTY, "a", 0));
+
+        v = strv_new("*\\*", NULL);
+        assert_se(!strv_fnmatch(v, "\\", 0));
+        assert_se(strv_fnmatch(v, "\\", FNM_NOESCAPE));
+}
+
 int main(int argc, char *argv[]) {
         test_specifier_printf();
+        test_str_in_set();
+        test_strptr_in_set();
         test_strv_foreach();
         test_strv_foreach_backwards();
         test_strv_foreach_pair();
@@ -750,6 +792,7 @@ int main(int argc, char *argv[]) {
         test_strv_make_nulstr();
 
         test_foreach_string();
+        test_strv_fnmatch();
 
         return 0;
 }

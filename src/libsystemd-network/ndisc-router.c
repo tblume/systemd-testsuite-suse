@@ -49,8 +49,7 @@ _public_ sd_ndisc_router* sd_ndisc_router_unref(sd_ndisc_router *rt) {
         if (rt->n_ref > 0)
                 return NULL;
 
-        free(rt);
-        return NULL;
+        return mfree(rt);
 }
 
 sd_ndisc_router *ndisc_router_new(size_t raw_size) {
@@ -92,7 +91,7 @@ _public_ int sd_ndisc_router_get_address(sd_ndisc_router *rt, struct in6_addr *r
         assert_return(rt, -EINVAL);
         assert_return(ret_addr, -EINVAL);
 
-        if (in6_addr_is_null(&rt->address))
+        if (IN6_IS_ADDR_UNSPECIFIED(&rt->address))
                 return -ENODATA;
 
         *ret_addr = rt->address;
@@ -460,6 +459,7 @@ _public_ int sd_ndisc_router_prefix_get_preferred_lifetime(sd_ndisc_router *rt, 
 
 _public_ int sd_ndisc_router_prefix_get_flags(sd_ndisc_router *rt, uint8_t *ret) {
         struct nd_opt_prefix_info *pi;
+        uint8_t flags;
         int r;
 
         assert_return(rt, -EINVAL);
@@ -469,7 +469,14 @@ _public_ int sd_ndisc_router_prefix_get_flags(sd_ndisc_router *rt, uint8_t *ret)
         if (r < 0)
                 return r;
 
-        *ret = pi->nd_opt_pi_flags_reserved;
+        flags = pi->nd_opt_pi_flags_reserved;
+
+        if ((flags & ND_OPT_PI_FLAG_AUTO) && (pi->nd_opt_pi_prefix_len != 64)) {
+                log_ndisc("Invalid prefix length, ignoring prefix for stateless autoconfiguration.");
+                flags &= ~ND_OPT_PI_FLAG_AUTO;
+        }
+
+        *ret = flags;
         return 0;
 }
 

@@ -26,12 +26,13 @@
 #include "bus-common-errors.h"
 #include "bus-error.h"
 #include "bus-util.h"
+#include "cgroup-util.h"
 #include "clean-ipc.h"
 #include "conf-parser.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "hashmap.h"
 #include "label.h"
@@ -311,8 +312,7 @@ int user_load(User *u) {
                 if (r == -ENOENT)
                         return 0;
 
-                log_error_errno(r, "Failed to read %s: %m", u->state_file);
-                return r;
+                return log_error_errno(r, "Failed to read %s: %m", u->state_file);
         }
 
         if (display)
@@ -338,7 +338,7 @@ static int user_mkdir_runtime_path(User *u) {
         if (r < 0)
                 return log_error_errno(r, "Failed to create /run/user: %m");
 
-        if (path_is_mount_point(u->runtime_path, 0) <= 0) {
+        if (path_is_mount_point(u->runtime_path, NULL, 0) <= 0) {
                 _cleanup_free_ char *t = NULL;
 
                 (void) mkdir_label(u->runtime_path, 0700);
@@ -354,14 +354,12 @@ static int user_mkdir_runtime_path(User *u) {
 
                 r = mount("tmpfs", u->runtime_path, "tmpfs", MS_NODEV|MS_NOSUID, t);
                 if (r < 0) {
-                        if (errno != EPERM) {
+                        if (errno != EPERM && errno != EACCES) {
                                 r = log_error_errno(errno, "Failed to mount per-user tmpfs directory %s: %m", u->runtime_path);
                                 goto fail;
                         }
 
-                        /* Lacking permissions, maybe
-                         * CAP_SYS_ADMIN-less container? In this case,
-                         * just use a normal directory. */
+                        log_debug_errno(errno, "Failed to mount per-user tmpfs directory %s, assuming containerized execution, ignoring: %m", u->runtime_path);
 
                         r = chmod_and_chown(u->runtime_path, 0700, u->uid, u->gid);
                         if (r < 0) {
@@ -613,9 +611,14 @@ int user_finalize(User *u) {
         if (k < 0)
                 r = k;
 
-        /* Clean SysV + POSIX IPC objects */
-        if (u->manager->remove_ipc) {
-                k = clean_ipc(u->uid);
+        /* Clean SysV + POSIX IPC objects, but only if this is not a system user. Background: in many setups cronjobs
+         * are run in full PAM and thus logind sessions, even if the code run doesn't belong to actual users but to
+         * system components. Since enable RemoveIPC= globally for all users, we need to be a bit careful with such
+         * cases, as we shouldn't accidentally remove a system service's IPC objects while it is running, just because
+         * a cronjob running as the same user just finished. Hence: exclude system users generally from IPC clean-up,
+         * and do it only for normal users. */
+        if (u->manager->remove_ipc && u->uid > SYSTEM_UID_MAX) {
+                k = clean_ipc_by_uid(u->uid);
                 if (k < 0)
                         r = k;
         }
@@ -843,7 +846,6 @@ int config_parse_tmpfs_size(
                 void *userdata) {
 
         size_t *sz = data;
-        const char *e;
         int r;
 
         assert(filename);
@@ -851,29 +853,17 @@ int config_parse_tmpfs_size(
         assert(rvalue);
         assert(data);
 
-        e = endswith(rvalue, "%");
-        if (e) {
-                unsigned long ul;
-                char *f;
-
-                errno = 0;
-                ul = strtoul(rvalue, &f, 10);
-                if (errno > 0 || f != e) {
-                        log_syntax(unit, LOG_ERR, filename, line, errno, "Failed to parse percentage value, ignoring: %s", rvalue);
-                        return 0;
-                }
-
-                if (ul <= 0 || ul >= 100) {
-                        log_syntax(unit, LOG_ERR, filename, line, 0, "Percentage value out of range, ignoring: %s", rvalue);
-                        return 0;
-                }
-
-                *sz = PAGE_ALIGN((size_t) ((physical_memory() * (uint64_t) ul) / (uint64_t) 100));
-        } else {
+        /* First, try to parse as percentage */
+        r = parse_percent(rvalue);
+        if (r > 0 && r < 100)
+                *sz = physical_memory_scale(r, 100U);
+        else {
                 uint64_t k;
 
+                /* If the passed argument was not a percentage, or out of range, parse as byte size */
+
                 r = parse_size(rvalue, 1024, &k);
-                if (r < 0 || (uint64_t) (size_t) k != k) {
+                if (r < 0 || k <= 0 || (uint64_t) (size_t) k != k) {
                         log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse size value, ignoring: %s", rvalue);
                         return 0;
                 }
@@ -881,5 +871,60 @@ int config_parse_tmpfs_size(
                 *sz = PAGE_ALIGN((size_t) k);
         }
 
+        return 0;
+}
+
+int config_parse_user_tasks_max(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint64_t *m = data;
+        uint64_t k;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                *m = system_tasks_max_scale(DEFAULT_USER_TASKS_MAX_PERCENTAGE, 100U);
+                return 0;
+        }
+
+        if (streq(rvalue, "infinity")) {
+                *m = CGROUP_LIMIT_MAX;
+                return 0;
+        }
+
+        /* Try to parse as percentage */
+        r = parse_percent(rvalue);
+        if (r >= 0)
+                k = system_tasks_max_scale(r, 100U);
+        else {
+
+                /* If the passed argument was not a percentage, or out of range, parse as byte size */
+
+                r = safe_atou64(rvalue, &k);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse tasks maximum, ignoring: %s", rvalue);
+                        return 0;
+                }
+        }
+
+        if (k <= 0 || k >= UINT64_MAX) {
+                log_syntax(unit, LOG_ERR, filename, line, 0, "Tasks maximum out of range, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        *m = k;
         return 0;
 }

@@ -17,6 +17,14 @@
 
 set -e
 
+verb="$1"
+
+case "$verb" in
+"") ;;
+[cgals]) shift ;;
+*) echo "Unexpected argument: $verb" >&2; exit 1 ;;
+esac
+
 oldpwd=$(pwd)
 topdir=$(dirname $0)
 cd $topdir
@@ -52,22 +60,28 @@ args="$args \
 "
 fi
 
+args="$args $@"
 cd $oldpwd
 
-if [ "x$1" = "xc" ]; then
-        $topdir/configure CFLAGS='-g -O0 -ftrapv' --enable-kdbus $args
-        make clean
-elif [ "x$1" = "xg" ]; then
-        $topdir/configure CFLAGS='-g -Og -ftrapv' --enable-kdbus $args
-        make clean
-elif [ "x$1" = "xa" ]; then
-        $topdir/configure CFLAGS='-g -O0 -Wsuggest-attribute=pure -Wsuggest-attribute=const -ftrapv' --enable-kdbus $args
-        make clean
-elif [ "x$1" = "xl" ]; then
-        $topdir/configure CC=clang CFLAGS='-g -O0 -ftrapv' --enable-kdbus $args
-        make clean
-elif [ "x$1" = "xs" ]; then
-        scan-build $topdir/configure CFLAGS='-std=gnu99 -g -O0 -ftrapv' --enable-kdbus $args
+if [ "$verb" = "c" ]; then
+        set -x
+        $topdir/configure CFLAGS='-g -O0 -ftrapv' $args
+        make clean >/dev/null
+elif [ "$verb" = "g" ]; then
+        set -x
+        $topdir/configure CFLAGS='-g -Og -ftrapv' $args
+        make clean >/dev/null
+elif [ "$verb" = "a" ]; then
+        set -x
+        $topdir/configure CFLAGS='-g -O0 -Wsuggest-attribute=pure -Wsuggest-attribute=const -ftrapv' $args
+        make clean >/dev/null
+elif [ "$verb" = "l" ]; then
+        set -x
+        $topdir/configure CC=clang CFLAGS='-g -O0 -ftrapv' $args
+        make clean >/dev/null
+elif [ "$verb" = "s" ]; then
+        set -x
+        scan-build $topdir/configure CFLAGS='-std=gnu99 -g -O0 -ftrapv' $args
         scan-build make
 else
         echo
@@ -75,6 +89,6 @@ else
         echo "Initialized build system. For a common configuration please run:"
         echo "----------------------------------------------------------------"
         echo
-        echo "$topdir/configure CFLAGS='-g -O0 -ftrapv' --enable-kdbus $args"
+        echo "$topdir/configure CFLAGS='-g -O0 -ftrapv' $args"
         echo
 fi

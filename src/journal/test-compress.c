@@ -109,7 +109,7 @@ static void test_decompress_startswith(int compression,
         size_t csize, usize = 0, len;
         int r;
 
-        log_info("/* testing decompress_startswith with %s on %.20s text*/",
+        log_info("/* testing decompress_startswith with %s on %.20s text */",
                  object_compressed_to_string(compression), data);
 
 #define BUFSIZE_1 512
@@ -167,7 +167,7 @@ static void test_compress_stream(int compression,
 
         log_debug("/* test compression */");
 
-        assert_se((dst = mkostemp_safe(pattern, O_RDWR|O_CLOEXEC)) >= 0);
+        assert_se((dst = mkostemp_safe(pattern)) >= 0);
 
         assert_se(compress(src, dst, -1) == 0);
 
@@ -178,7 +178,7 @@ static void test_compress_stream(int compression,
 
         log_debug("/* test decompression */");
 
-        assert_se((dst2 = mkostemp_safe(pattern2, O_RDWR|O_CLOEXEC)) >= 0);
+        assert_se((dst2 = mkostemp_safe(pattern2)) >= 0);
 
         assert_se(stat(srcfile, &st) == 0);
 
@@ -216,7 +216,11 @@ static void test_lz4_decompress_partial(void) {
         memset(huge, 'x', HUGE_SIZE);
         memcpy(huge, "HUGE=", 5);
 
+#if LZ4_VERSION_NUMBER >= 10700
+        r = LZ4_compress_default(huge, buf, HUGE_SIZE, buf_size);
+#else
         r = LZ4_compress_limitedOutput(huge, buf, HUGE_SIZE, buf_size);
+#endif
         assert_se(r >= 0);
         compressed = r;
         log_info("Compressed %i → %zu", HUGE_SIZE, compressed);
@@ -247,6 +251,9 @@ int main(int argc, char *argv[]) {
                 "text\0foofoofoofoo AAAA aaaaaaaaa ghost busters barbarbar FFF"
                 "foofoofoofoo AAAA aaaaaaaaa ghost busters barbarbar FFF";
 
+        /* The file to test compression on can be specified as the first argument */
+        const char *srcfile = argc > 1 ? argv[1] : argv[0];
+
         char data[512] = "random\0";
 
         char huge[4096*1024];
@@ -275,7 +282,7 @@ int main(int argc, char *argv[]) {
                                    huge, sizeof(huge), true);
 
         test_compress_stream(OBJECT_COMPRESSED_XZ, "xzcat",
-                             compress_stream_xz, decompress_stream_xz, argv[0]);
+                             compress_stream_xz, decompress_stream_xz, srcfile);
 #else
         log_info("/* XZ test skipped */");
 #endif
@@ -297,7 +304,7 @@ int main(int argc, char *argv[]) {
                                    huge, sizeof(huge), true);
 
         test_compress_stream(OBJECT_COMPRESSED_LZ4, "lz4cat",
-                             compress_stream_lz4, decompress_stream_lz4, argv[0]);
+                             compress_stream_lz4, decompress_stream_lz4, srcfile);
 
         test_lz4_decompress_partial();
 #else

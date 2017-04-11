@@ -30,7 +30,7 @@
 #include "bus-match.h"
 #include "bus-util.h"
 #include "fd-util.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "log.h"
 #include "macro.h"
 #include "util.h"
@@ -351,7 +351,7 @@ finish:
 static int quit_callback(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
         bool *x = userdata;
 
-        log_error("Quit callback: %s", strerror(sd_bus_message_get_errno(m)));
+        log_error_errno(sd_bus_message_get_errno(m), "Quit callback: %m");
 
         *x = 1;
         return 1;

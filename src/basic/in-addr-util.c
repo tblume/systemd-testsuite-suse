@@ -20,24 +20,20 @@
 #include <arpa/inet.h>
 #include <endian.h>
 #include <errno.h>
+#include <net/if.h>
 #include <stdint.h>
 #include <stdlib.h>
 
 #include "alloc-util.h"
 #include "in-addr-util.h"
 #include "macro.h"
+#include "parse-util.h"
 #include "util.h"
 
 bool in4_addr_is_null(const struct in_addr *a) {
-        return a->s_addr == 0;
-}
+        assert(a);
 
-bool in6_addr_is_null(const struct in6_addr *a) {
-        return
-                a->s6_addr32[0] == 0 &&
-                a->s6_addr32[1] == 0 &&
-                a->s6_addr32[2] == 0 &&
-                a->s6_addr32[3] == 0;
+        return a->s_addr == 0;
 }
 
 int in_addr_is_null(int family, const union in_addr_union *u) {
@@ -47,16 +43,22 @@ int in_addr_is_null(int family, const union in_addr_union *u) {
                 return in4_addr_is_null(&u->in);
 
         if (family == AF_INET6)
-                return in6_addr_is_null(&u->in6);
+                return IN6_IS_ADDR_UNSPECIFIED(&u->in6);
 
         return -EAFNOSUPPORT;
+}
+
+bool in4_addr_is_link_local(const struct in_addr *a) {
+        assert(a);
+
+        return (be32toh(a->s_addr) & UINT32_C(0xFFFF0000)) == (UINT32_C(169) << 24 | UINT32_C(254) << 16);
 }
 
 int in_addr_is_link_local(int family, const union in_addr_union *u) {
         assert(u);
 
         if (family == AF_INET)
-                return (be32toh(u->in.s_addr) & UINT32_C(0xFFFF0000)) == (UINT32_C(169) << 24 | UINT32_C(254) << 16);
+                return in4_addr_is_link_local(&u->in);
 
         if (family == AF_INET6)
                 return IN6_IS_ADDR_LINKLOCAL(&u->in6);
@@ -64,12 +66,30 @@ int in_addr_is_link_local(int family, const union in_addr_union *u) {
         return -EAFNOSUPPORT;
 }
 
+int in_addr_is_multicast(int family, const union in_addr_union *u) {
+        assert(u);
+
+        if (family == AF_INET)
+                return IN_MULTICAST(be32toh(u->in.s_addr));
+
+        if (family == AF_INET6)
+                return IN6_IS_ADDR_MULTICAST(&u->in6);
+
+        return -EAFNOSUPPORT;
+}
+
+bool in4_addr_is_localhost(const struct in_addr *a) {
+        assert(a);
+
+        /* All of 127.x.x.x is localhost. */
+        return (be32toh(a->s_addr) & UINT32_C(0xFF000000)) == UINT32_C(127) << 24;
+}
+
 int in_addr_is_localhost(int family, const union in_addr_union *u) {
         assert(u);
 
         if (family == AF_INET)
-                /* All of 127.x.x.x is localhost. */
-                return (be32toh(u->in.s_addr) & UINT32_C(0xFF000000)) == UINT32_C(127) << 24;
+                return in4_addr_is_localhost(&u->in);
 
         if (family == AF_INET6)
                 return IN6_IS_ADDR_LOOPBACK(&u->in6);
@@ -232,16 +252,57 @@ int in_addr_to_string(int family, const union in_addr_union *u, char **ret) {
         return 0;
 }
 
-int in_addr_from_string(int family, const char *s, union in_addr_union *ret) {
+int in_addr_ifindex_to_string(int family, const union in_addr_union *u, int ifindex, char **ret) {
+        size_t l;
+        char *x;
+        int r;
 
-        assert(s);
+        assert(u);
         assert(ret);
+
+        /* Much like in_addr_to_string(), but optionally appends the zone interface index to the address, to properly
+         * handle IPv6 link-local addresses. */
+
+        if (family != AF_INET6)
+                goto fallback;
+        if (ifindex <= 0)
+                goto fallback;
+
+        r = in_addr_is_link_local(family, u);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                goto fallback;
+
+        l = INET6_ADDRSTRLEN + 1 + DECIMAL_STR_MAX(ifindex) + 1;
+        x = new(char, l);
+        if (!x)
+                return -ENOMEM;
+
+        errno = 0;
+        if (!inet_ntop(family, u, x, l)) {
+                free(x);
+                return errno > 0 ? -errno : -EINVAL;
+        }
+
+        sprintf(strchr(x, 0), "%%%i", ifindex);
+        *ret = x;
+
+        return 0;
+
+fallback:
+        return in_addr_to_string(family, u, ret);
+}
+
+int in_addr_from_string(int family, const char *s, union in_addr_union *ret) {
+        union in_addr_union buffer;
+        assert(s);
 
         if (!IN_SET(family, AF_INET, AF_INET6))
                 return -EAFNOSUPPORT;
 
         errno = 0;
-        if (inet_pton(family, s, ret) <= 0)
+        if (inet_pton(family, s, ret ?: &buffer) <= 0)
                 return errno > 0 ? -errno : -EINVAL;
 
         return 0;
@@ -251,22 +312,63 @@ int in_addr_from_string_auto(const char *s, int *family, union in_addr_union *re
         int r;
 
         assert(s);
-        assert(family);
-        assert(ret);
 
         r = in_addr_from_string(AF_INET, s, ret);
         if (r >= 0) {
-                *family = AF_INET;
+                if (family)
+                        *family = AF_INET;
                 return 0;
         }
 
         r = in_addr_from_string(AF_INET6, s, ret);
         if (r >= 0) {
-                *family = AF_INET6;
+                if (family)
+                        *family = AF_INET6;
                 return 0;
         }
 
         return -EINVAL;
+}
+
+int in_addr_ifindex_from_string_auto(const char *s, int *family, union in_addr_union *ret, int *ifindex) {
+        const char *suffix;
+        int r, ifi = 0;
+
+        assert(s);
+        assert(family);
+        assert(ret);
+
+        /* Similar to in_addr_from_string_auto() but also parses an optionally appended IPv6 zone suffix ("scope id")
+         * if one is found. */
+
+        suffix = strchr(s, '%');
+        if (suffix) {
+
+                if (ifindex) {
+                        /* If we shall return the interface index, try to parse it */
+                        r = parse_ifindex(suffix + 1, &ifi);
+                        if (r < 0) {
+                                unsigned u;
+
+                                u = if_nametoindex(suffix + 1);
+                                if (u <= 0)
+                                        return -errno;
+
+                                ifi = (int) u;
+                        }
+                }
+
+                s = strndupa(s, suffix - s);
+        }
+
+        r = in_addr_from_string_auto(s, family, ret);
+        if (r < 0)
+                return r;
+
+        if (ifindex)
+                *ifindex = ifi;
+
+        return r;
 }
 
 unsigned char in_addr_netmask_to_prefixlen(const struct in_addr *addr) {

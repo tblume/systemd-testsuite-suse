@@ -68,6 +68,9 @@ struct PTYForward {
 
         bool read_from_master:1;
 
+        bool done:1;
+        bool drain:1;
+
         bool last_char_set:1;
         char last_char;
 
@@ -76,9 +79,53 @@ struct PTYForward {
 
         usec_t escape_timestamp;
         unsigned escape_counter;
+
+        PTYForwardHandler handler;
+        void *userdata;
 };
 
 #define ESCAPE_USEC (1*USEC_PER_SEC)
+
+static void pty_forward_disconnect(PTYForward *f) {
+
+        if (f) {
+                f->stdin_event_source = sd_event_source_unref(f->stdin_event_source);
+                f->stdout_event_source = sd_event_source_unref(f->stdout_event_source);
+
+                f->master_event_source = sd_event_source_unref(f->master_event_source);
+                f->sigwinch_event_source = sd_event_source_unref(f->sigwinch_event_source);
+                f->event = sd_event_unref(f->event);
+
+                if (f->saved_stdout)
+                        tcsetattr(STDOUT_FILENO, TCSANOW, &f->saved_stdout_attr);
+                if (f->saved_stdin)
+                        tcsetattr(STDIN_FILENO, TCSANOW, &f->saved_stdin_attr);
+
+                f->saved_stdout = f->saved_stdin = false;
+        }
+
+        /* STDIN/STDOUT should not be nonblocking normally, so let's unconditionally reset it */
+        fd_nonblock(STDIN_FILENO, false);
+        fd_nonblock(STDOUT_FILENO, false);
+}
+
+static int pty_forward_done(PTYForward *f, int rcode) {
+        _cleanup_(sd_event_unrefp) sd_event *e = NULL;
+        assert(f);
+
+        if (f->done)
+                return 0;
+
+        e = sd_event_ref(f->event);
+
+        f->done = true;
+        pty_forward_disconnect(f);
+
+        if (f->handler)
+                return f->handler(f, rcode, f->userdata);
+        else
+                return sd_event_exit(e, rcode < 0 ? EXIT_FAILURE : rcode);
+}
 
 static bool look_for_escape(PTYForward *f, const char *buffer, size_t n) {
         const char *p;
@@ -147,7 +194,7 @@ static int shovel(PTYForward *f) {
                                         f->stdin_event_source = sd_event_source_unref(f->stdin_event_source);
                                 } else {
                                         log_error_errno(errno, "read(): %m");
-                                        return sd_event_exit(f->event, EXIT_FAILURE);
+                                        return pty_forward_done(f, -errno);
                                 }
                         } else if (k == 0) {
                                 /* EOF on stdin */
@@ -156,12 +203,10 @@ static int shovel(PTYForward *f) {
 
                                 f->stdin_event_source = sd_event_source_unref(f->stdin_event_source);
                         } else  {
-                                /* Check if ^] has been
-                                 * pressed three times within
-                                 * one second. If we get this
-                                 * we quite immediately. */
+                                /* Check if ^] has been pressed three times within one second. If we get this we quite
+                                 * immediately. */
                                 if (look_for_escape(f, f->in_buffer + f->in_buffer_full, k))
-                                        return sd_event_exit(f->event, EXIT_FAILURE);
+                                        return pty_forward_done(f, -ECANCELED);
 
                                 f->in_buffer_full += (size_t) k;
                         }
@@ -181,7 +226,7 @@ static int shovel(PTYForward *f) {
                                         f->master_event_source = sd_event_source_unref(f->master_event_source);
                                 } else {
                                         log_error_errno(errno, "write(): %m");
-                                        return sd_event_exit(f->event, EXIT_FAILURE);
+                                        return pty_forward_done(f, -errno);
                                 }
                         } else {
                                 assert(f->in_buffer_full >= (size_t) k);
@@ -211,7 +256,7 @@ static int shovel(PTYForward *f) {
                                         f->master_event_source = sd_event_source_unref(f->master_event_source);
                                 } else {
                                         log_error_errno(errno, "read(): %m");
-                                        return sd_event_exit(f->event, EXIT_FAILURE);
+                                        return pty_forward_done(f, -errno);
                                 }
                         }  else {
                                 f->read_from_master = true;
@@ -232,7 +277,7 @@ static int shovel(PTYForward *f) {
                                         f->stdout_event_source = sd_event_source_unref(f->stdout_event_source);
                                 } else {
                                         log_error_errno(errno, "write(): %m");
-                                        return sd_event_exit(f->event, EXIT_FAILURE);
+                                        return pty_forward_done(f, -errno);
                                 }
 
                         } else {
@@ -255,8 +300,13 @@ static int shovel(PTYForward *f) {
 
                 if ((f->out_buffer_full <= 0 || f->stdout_hangup) &&
                     (f->in_buffer_full <= 0 || f->master_hangup))
-                        return sd_event_exit(f->event, EXIT_SUCCESS);
+                        return pty_forward_done(f, 0);
         }
+
+        /* If we were asked to drain, and there's nothing more to handle from the master, then call the callback
+         * too. */
+        if (f->drain && f->out_buffer_full == 0 && !f->master_readable)
+                return pty_forward_done(f, 0);
 
         return 0;
 }
@@ -394,6 +444,9 @@ int pty_forward_new(
                 r = sd_event_add_io(f->event, &f->stdin_event_source, STDIN_FILENO, EPOLLIN|EPOLLET, on_stdin_event, f);
                 if (r < 0 && r != -EPERM)
                         return r;
+
+                if (r >= 0)
+                        (void) sd_event_source_set_description(f->stdin_event_source, "ptyfwd-stdin");
         }
 
         r = sd_event_add_io(f->event, &f->stdout_event_source, STDOUT_FILENO, EPOLLOUT|EPOLLET, on_stdout_event, f);
@@ -402,14 +455,20 @@ int pty_forward_new(
                 f->stdout_writable = true;
         else if (r < 0)
                 return r;
+        else
+                (void) sd_event_source_set_description(f->stdout_event_source, "ptyfwd-stdout");
 
         r = sd_event_add_io(f->event, &f->master_event_source, master, EPOLLIN|EPOLLOUT|EPOLLET, on_master_event, f);
         if (r < 0)
                 return r;
 
+        (void) sd_event_source_set_description(f->master_event_source, "ptyfwd-master");
+
         r = sd_event_add_signal(f->event, &f->sigwinch_event_source, SIGWINCH, on_sigwinch_event, f);
         if (r < 0)
                 return r;
+
+        (void) sd_event_source_set_description(f->sigwinch_event_source, "ptyfwd-sigwinch");
 
         *ret = f;
         f = NULL;
@@ -418,28 +477,8 @@ int pty_forward_new(
 }
 
 PTYForward *pty_forward_free(PTYForward *f) {
-
-        if (f) {
-                sd_event_source_unref(f->stdin_event_source);
-                sd_event_source_unref(f->stdout_event_source);
-                sd_event_source_unref(f->master_event_source);
-                sd_event_source_unref(f->sigwinch_event_source);
-                sd_event_unref(f->event);
-
-                if (f->saved_stdout)
-                        tcsetattr(STDOUT_FILENO, TCSANOW, &f->saved_stdout_attr);
-                if (f->saved_stdin)
-                        tcsetattr(STDIN_FILENO, TCSANOW, &f->saved_stdin_attr);
-
-                free(f);
-        }
-
-        /* STDIN/STDOUT should not be nonblocking normally, so let's
-         * unconditionally reset it */
-        fd_nonblock(STDIN_FILENO, false);
-        fd_nonblock(STDOUT_FILENO, false);
-
-        return NULL;
+        pty_forward_disconnect(f);
+        return mfree(f);
 }
 
 int pty_forward_get_last_char(PTYForward *f, char *ch) {
@@ -477,8 +516,36 @@ int pty_forward_set_ignore_vhangup(PTYForward *f, bool b) {
         return 0;
 }
 
-int pty_forward_get_ignore_vhangup(PTYForward *f) {
+bool pty_forward_get_ignore_vhangup(PTYForward *f) {
         assert(f);
 
         return !!(f->flags & PTY_FORWARD_IGNORE_VHANGUP);
+}
+
+bool pty_forward_is_done(PTYForward *f) {
+        assert(f);
+
+        return f->done;
+}
+
+void pty_forward_set_handler(PTYForward *f, PTYForwardHandler cb, void *userdata) {
+        assert(f);
+
+        f->handler = cb;
+        f->userdata = userdata;
+}
+
+bool pty_forward_drain(PTYForward *f) {
+        assert(f);
+
+        /* Starts draining the forwarder. Specifically:
+         *
+         * - Returns true if there are no unprocessed bytes from the pty, false otherwise
+         *
+         * - Makes sure the handler function is called the next time the number of unprocessed bytes hits zero
+         */
+
+        f->drain = true;
+
+        return f->out_buffer_full == 0 && !f->master_readable;
 }

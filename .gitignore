@@ -1,5 +1,6 @@
 *.a
 *.cache
+*.gch
 *.la
 *.lo
 *.log
@@ -18,6 +19,7 @@
 /*.tar.bz2
 /*.tar.gz
 /*.tar.xz
+/30-systemd-environment-d-generator
 /GPATH
 /GRTAGS
 /GSYMS
@@ -36,6 +38,7 @@
 /exported
 /exported-*
 /hostnamectl
+/image.raw
 /install-tree
 /journalctl
 /libtool
@@ -65,6 +68,7 @@
 /systemd-debug-generator
 /systemd-delta
 /systemd-detect-virt
+/systemd-dissect
 /systemd-escape
 /systemd-export
 /systemd-firstboot
@@ -89,6 +93,7 @@
 /systemd-machine-id-setup
 /systemd-machined
 /systemd-modules-load
+/systemd-mount
 /systemd-networkd
 /systemd-networkd-wait-online
 /systemd-notify
@@ -122,6 +127,9 @@
 /systemd-update-utmp
 /systemd-user-sessions
 /systemd-vconsole-setup
+/systemd-veritysetup
+/systemd-veritysetup-generator
+/systemd-volatile-root
 /tags
 /test-acd
 /test-acl-util
@@ -151,6 +159,7 @@
 /test-bus-policy
 /test-bus-server
 /test-bus-signature
+/test-bus-track
 /test-bus-zero-copy
 /test-calendarspec
 /test-cap-list
@@ -176,6 +185,7 @@
 /test-dhcp-option
 /test-dhcp-server
 /test-dhcp6-client
+/test-dissect-image
 /test-dns-domain
 /test-dns-packet
 /test-dnssec
@@ -185,6 +195,7 @@
 /test-env-util
 /test-escape
 /test-event
+/test-exec-util
 /test-execute
 /test-extract-word
 /test-fd-util
@@ -194,6 +205,7 @@
 /test-fs-util
 /test-fstab-util
 /test-glob-util
+/test-hash
 /test-hashmap
 /test-hexdecoct
 /test-hostname
@@ -210,6 +222,7 @@
 /test-journal
 /test-journal-enum
 /test-journal-flush
+/test-journal-importer
 /test-journal-init
 /test-journal-interleaving
 /test-journal-match
@@ -217,6 +230,7 @@
 /test-journal-stream
 /test-journal-syslog
 /test-journal-verify
+/test-keymap-util
 /test-libsystemd-sym*
 /test-libudev
 /test-libudev-sym*
@@ -231,6 +245,7 @@
 /test-loopback
 /test-machine-tables
 /test-mmap-cache
+/test-mount-util
 /test-namespace
 /test-ndisc-rs
 /test-netlink
@@ -257,6 +272,7 @@
 /test-ring
 /test-rlimit-util
 /test-sched-prio
+/test-seccomp
 /test-selinux
 /test-set
 /test-sizeof

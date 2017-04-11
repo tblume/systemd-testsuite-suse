@@ -26,7 +26,7 @@
 #include <time.h>
 
 #include "fd-util.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "udev-util.h"
 #include "udev.h"
 
@@ -150,6 +150,9 @@ static int adm_monitor(struct udev *udev, int argc, char *argv[]) {
         sigaddset(&mask, SIGINT);
         sigaddset(&mask, SIGTERM);
         sigprocmask(SIG_UNBLOCK, &mask, NULL);
+
+        /* Callers are expecting to see events as they happen: Line buffering */
+        setlinebuf(stdout);
 
         fd_ep = epoll_create1(EPOLL_CLOEXEC);
         if (fd_ep < 0) {

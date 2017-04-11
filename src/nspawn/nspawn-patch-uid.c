@@ -263,9 +263,12 @@ static int patch_fd(int fd, const char *name, const struct stat *st, uid_t shift
                         return -errno;
 
                 /* The Linux kernel alters the mode in some cases of chown(). Let's undo this. */
-                if (name && !S_ISLNK(st->st_mode))
-                        r = fchmodat(fd, name, st->st_mode, 0);
-                else
+                if (name) {
+                        if (!S_ISLNK(st->st_mode))
+                                r = fchmodat(fd, name, st->st_mode, 0);
+                        else /* AT_SYMLINK_NOFOLLOW is not available for fchmodat() */
+                                r = 0;
+                } else
                         r = fchmod(fd, st->st_mode);
                 if (r < 0)
                         return -errno;
@@ -372,7 +375,7 @@ static int recurse_fd(int fd, bool donate_fd, const struct stat *st, uid_t shift
                 FOREACH_DIRENT_ALL(de, d, r = -errno; goto finish) {
                         struct stat fst;
 
-                        if (STR_IN_SET(de->d_name, ".", ".."))
+                        if (dot_or_dot_dot(de->d_name))
                                 continue;
 
                         if (fstatat(dirfd(d), de->d_name, &fst, AT_SYMLINK_NOFOLLOW) < 0) {

@@ -57,11 +57,11 @@ typedef struct StatusInfo {
         char *timezone;
 
         usec_t rtc_time;
-        bool rtc_local;
+        int rtc_local;
 
-        bool ntp_enabled;
-        bool ntp_capable;
-        bool ntp_synced;
+        int ntp_enabled;
+        int ntp_capable;
+        int ntp_synced;
 } StatusInfo;
 
 static void status_info_clear(StatusInfo *info) {
@@ -165,6 +165,8 @@ static int show_status(sd_bus *bus, char **args, unsigned n) {
                 { "RTCTimeUSec",     "t", NULL, offsetof(StatusInfo, rtc_time) },
                 {}
         };
+
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
         assert(bus);
@@ -173,9 +175,10 @@ static int show_status(sd_bus *bus, char **args, unsigned n) {
                                    "org.freedesktop.timedate1",
                                    "/org/freedesktop/timedate1",
                                    map,
+                                   &error,
                                    &info);
         if (r < 0)
-                return log_error_errno(r, "Failed to query server: %m");
+                return log_error_errno(r, "Failed to query server: %s", bus_error_message(&error, r));
 
         print_status_info(&info);
 
@@ -480,7 +483,7 @@ static int timedatectl_main(sd_bus *bus, int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
-        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");
@@ -500,6 +503,7 @@ int main(int argc, char *argv[]) {
         r = timedatectl_main(bus, argc, argv);
 
 finish:
+        sd_bus_flush_close_unref(bus);
         pager_close();
 
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;

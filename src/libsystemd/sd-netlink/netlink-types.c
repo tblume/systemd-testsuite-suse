@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/can/netlink.h>
 #include <linux/in6.h>
 #include <linux/veth.h>
 #include <linux/if_bridge.h>
@@ -148,7 +149,7 @@ static const NLType rtnl_link_info_data_vxlan_types[] = {
         [IFLA_VXLAN_ID]                = { .type = NETLINK_TYPE_U32 },
         [IFLA_VXLAN_GROUP]             = { .type = NETLINK_TYPE_IN_ADDR },
         [IFLA_VXLAN_LINK]              = { .type = NETLINK_TYPE_U32 },
-        [IFLA_VXLAN_LOCAL]             = { .type = NETLINK_TYPE_U32},
+        [IFLA_VXLAN_LOCAL]             = { .type = NETLINK_TYPE_IN_ADDR },
         [IFLA_VXLAN_TTL]               = { .type = NETLINK_TYPE_U8 },
         [IFLA_VXLAN_TOS]               = { .type = NETLINK_TYPE_U8 },
         [IFLA_VXLAN_LEARNING]          = { .type = NETLINK_TYPE_U8 },
@@ -278,6 +279,10 @@ static const NLType rtnl_link_info_data_ip6tnl_types[] = {
         [IFLA_IPTUN_FLOWINFO]            = { .type = NETLINK_TYPE_U32 },
 };
 
+static const NLType rtnl_link_info_data_vrf_types[] = {
+        [IFLA_VRF_TABLE]                 = { .type = NETLINK_TYPE_U32 },
+};
+
 /* these strings must match the .kind entries in the kernel */
 static const char* const nl_union_link_info_data_table[] = {
         [NL_UNION_LINK_INFO_DATA_BOND] = "bond",
@@ -298,46 +303,49 @@ static const char* const nl_union_link_info_data_table[] = {
         [NL_UNION_LINK_INFO_DATA_VTI_TUNNEL] = "vti",
         [NL_UNION_LINK_INFO_DATA_VTI6_TUNNEL] = "vti6",
         [NL_UNION_LINK_INFO_DATA_IP6TNL_TUNNEL] = "ip6tnl",
+        [NL_UNION_LINK_INFO_DATA_VRF] = "vrf",
+        [NL_UNION_LINK_INFO_DATA_VCAN] = "vcan",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(nl_union_link_info_data, NLUnionLinkInfoData);
 
 static const NLTypeSystem rtnl_link_info_data_type_systems[] = {
-        [NL_UNION_LINK_INFO_DATA_BOND] =        { .count = ELEMENTSOF(rtnl_link_info_data_bond_types),
-                                                  .types = rtnl_link_info_data_bond_types },
-        [NL_UNION_LINK_INFO_DATA_BRIDGE] =      { .count = ELEMENTSOF(rtnl_link_info_data_bridge_types),
-                                                  .types = rtnl_link_info_data_bridge_types },
-        [NL_UNION_LINK_INFO_DATA_VLAN] =        { .count = ELEMENTSOF(rtnl_link_info_data_vlan_types),
-                                                  .types = rtnl_link_info_data_vlan_types },
-        [NL_UNION_LINK_INFO_DATA_VETH] =        { .count = ELEMENTSOF(rtnl_link_info_data_veth_types),
-                                                  .types = rtnl_link_info_data_veth_types },
-        [NL_UNION_LINK_INFO_DATA_MACVLAN] =     { .count = ELEMENTSOF(rtnl_link_info_data_macvlan_types),
-                                                  .types = rtnl_link_info_data_macvlan_types },
-        [NL_UNION_LINK_INFO_DATA_MACVTAP] =     { .count = ELEMENTSOF(rtnl_link_info_data_macvlan_types),
-                                                  .types = rtnl_link_info_data_macvlan_types },
-        [NL_UNION_LINK_INFO_DATA_IPVLAN] =      { .count = ELEMENTSOF(rtnl_link_info_data_ipvlan_types),
-                                                  .types = rtnl_link_info_data_ipvlan_types },
-        [NL_UNION_LINK_INFO_DATA_VXLAN] =       { .count = ELEMENTSOF(rtnl_link_info_data_vxlan_types),
-                                                  .types = rtnl_link_info_data_vxlan_types },
-        [NL_UNION_LINK_INFO_DATA_IPIP_TUNNEL] = { .count = ELEMENTSOF(rtnl_link_info_data_iptun_types),
-                                                  .types = rtnl_link_info_data_iptun_types },
-        [NL_UNION_LINK_INFO_DATA_IPGRE_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
-                                                    .types = rtnl_link_info_data_ipgre_types },
+        [NL_UNION_LINK_INFO_DATA_BOND] =             { .count = ELEMENTSOF(rtnl_link_info_data_bond_types),
+                                                       .types = rtnl_link_info_data_bond_types },
+        [NL_UNION_LINK_INFO_DATA_BRIDGE] =           { .count = ELEMENTSOF(rtnl_link_info_data_bridge_types),
+                                                       .types = rtnl_link_info_data_bridge_types },
+        [NL_UNION_LINK_INFO_DATA_VLAN] =             { .count = ELEMENTSOF(rtnl_link_info_data_vlan_types),
+                                                       .types = rtnl_link_info_data_vlan_types },
+        [NL_UNION_LINK_INFO_DATA_VETH] =             { .count = ELEMENTSOF(rtnl_link_info_data_veth_types),
+                                                       .types = rtnl_link_info_data_veth_types },
+        [NL_UNION_LINK_INFO_DATA_MACVLAN] =          { .count = ELEMENTSOF(rtnl_link_info_data_macvlan_types),
+                                                       .types = rtnl_link_info_data_macvlan_types },
+        [NL_UNION_LINK_INFO_DATA_MACVTAP] =          { .count = ELEMENTSOF(rtnl_link_info_data_macvlan_types),
+                                                       .types = rtnl_link_info_data_macvlan_types },
+        [NL_UNION_LINK_INFO_DATA_IPVLAN] =           { .count = ELEMENTSOF(rtnl_link_info_data_ipvlan_types),
+                                                       .types = rtnl_link_info_data_ipvlan_types },
+        [NL_UNION_LINK_INFO_DATA_VXLAN] =            { .count = ELEMENTSOF(rtnl_link_info_data_vxlan_types),
+                                                       .types = rtnl_link_info_data_vxlan_types },
+        [NL_UNION_LINK_INFO_DATA_IPIP_TUNNEL] =      { .count = ELEMENTSOF(rtnl_link_info_data_iptun_types),
+                                                       .types = rtnl_link_info_data_iptun_types },
+        [NL_UNION_LINK_INFO_DATA_IPGRE_TUNNEL] =     { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
+                                                       .types = rtnl_link_info_data_ipgre_types },
         [NL_UNION_LINK_INFO_DATA_IPGRETAP_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
-                                                    .types = rtnl_link_info_data_ipgre_types },
-        [NL_UNION_LINK_INFO_DATA_IP6GRE_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
-                                                    .types = rtnl_link_info_data_ipgre_types },
-        [NL_UNION_LINK_INFO_DATA_IP6GRETAP_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
-                                                    .types = rtnl_link_info_data_ipgre_types },
-        [NL_UNION_LINK_INFO_DATA_SIT_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_iptun_types),
-                                                  .types = rtnl_link_info_data_iptun_types },
-        [NL_UNION_LINK_INFO_DATA_VTI_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_ipvti_types),
-                                                  .types = rtnl_link_info_data_ipvti_types },
-        [NL_UNION_LINK_INFO_DATA_VTI6_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_ipvti_types),
-                                                  .types = rtnl_link_info_data_ipvti_types },
-        [NL_UNION_LINK_INFO_DATA_IP6TNL_TUNNEL] =  { .count = ELEMENTSOF(rtnl_link_info_data_ip6tnl_types),
-                                                     .types = rtnl_link_info_data_ip6tnl_types },
-
+                                                       .types = rtnl_link_info_data_ipgre_types },
+        [NL_UNION_LINK_INFO_DATA_IP6GRE_TUNNEL] =    { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
+                                                       .types = rtnl_link_info_data_ipgre_types },
+        [NL_UNION_LINK_INFO_DATA_IP6GRETAP_TUNNEL] = { .count = ELEMENTSOF(rtnl_link_info_data_ipgre_types),
+                                                       .types = rtnl_link_info_data_ipgre_types },
+        [NL_UNION_LINK_INFO_DATA_SIT_TUNNEL] =       { .count = ELEMENTSOF(rtnl_link_info_data_iptun_types),
+                                                       .types = rtnl_link_info_data_iptun_types },
+        [NL_UNION_LINK_INFO_DATA_VTI_TUNNEL] =       { .count = ELEMENTSOF(rtnl_link_info_data_ipvti_types),
+                                                       .types = rtnl_link_info_data_ipvti_types },
+        [NL_UNION_LINK_INFO_DATA_VTI6_TUNNEL] =      { .count = ELEMENTSOF(rtnl_link_info_data_ipvti_types),
+                                                       .types = rtnl_link_info_data_ipvti_types },
+        [NL_UNION_LINK_INFO_DATA_IP6TNL_TUNNEL] =    { .count = ELEMENTSOF(rtnl_link_info_data_ip6tnl_types),
+                                                       .types = rtnl_link_info_data_ip6tnl_types },
+        [NL_UNION_LINK_INFO_DATA_VRF] =              { .count = ELEMENTSOF(rtnl_link_info_data_vrf_types),
+                                                       .types = rtnl_link_info_data_vrf_types },
 };
 
 static const NLTypeSystemUnion rtnl_link_info_data_type_system_union = {
@@ -492,6 +500,28 @@ static const NLTypeSystem rtnl_address_type_system = {
         .types = rtnl_address_types,
 };
 
+/* RTM_METRICS --- array of struct rtattr with types of RTAX_* */
+
+static const NLType rtnl_route_metrics_types[] = {
+        [RTAX_MTU]               = { .type = NETLINK_TYPE_U32 },
+        [RTAX_WINDOW]            = { .type = NETLINK_TYPE_U32 },
+        [RTAX_RTT]               = { .type = NETLINK_TYPE_U32 },
+        [RTAX_RTTVAR]            = { .type = NETLINK_TYPE_U32 },
+        [RTAX_SSTHRESH]          = { .type = NETLINK_TYPE_U32 },
+        [RTAX_CWND]              = { .type = NETLINK_TYPE_U32 },
+        [RTAX_ADVMSS]            = { .type = NETLINK_TYPE_U32 },
+        [RTAX_REORDERING]        = { .type = NETLINK_TYPE_U32 },
+        [RTAX_HOPLIMIT]          = { .type = NETLINK_TYPE_U32 },
+        [RTAX_INITCWND]          = { .type = NETLINK_TYPE_U32 },
+        [RTAX_FEATURES]          = { .type = NETLINK_TYPE_U32 },
+        [RTAX_RTO_MIN]           = { .type = NETLINK_TYPE_U32 },
+};
+
+static const NLTypeSystem rtnl_route_metrics_type_system = {
+        .count = ELEMENTSOF(rtnl_route_metrics_types),
+        .types = rtnl_route_metrics_types,
+};
+
 static const NLType rtnl_route_types[] = {
         [RTA_DST]               = { .type = NETLINK_TYPE_IN_ADDR }, /* 6? */
         [RTA_SRC]               = { .type = NETLINK_TYPE_IN_ADDR }, /* 6? */
@@ -500,9 +530,8 @@ static const NLType rtnl_route_types[] = {
         [RTA_GATEWAY]           = { .type = NETLINK_TYPE_IN_ADDR },
         [RTA_PRIORITY]          = { .type = NETLINK_TYPE_U32 },
         [RTA_PREFSRC]           = { .type = NETLINK_TYPE_IN_ADDR }, /* 6? */
-/*
-        [RTA_METRICS]           = { .type = NETLINK_TYPE_NESTED },
-        [RTA_MULTIPATH]         = { .len = sizeof(struct rtnexthop) },
+        [RTA_METRICS]           = { .type = NETLINK_TYPE_NESTED, .type_system = &rtnl_route_metrics_type_system},
+/*      [RTA_MULTIPATH]         = { .len = sizeof(struct rtnexthop) },
 */
         [RTA_FLOW]              = { .type = NETLINK_TYPE_U32 }, /* 6? */
 /*

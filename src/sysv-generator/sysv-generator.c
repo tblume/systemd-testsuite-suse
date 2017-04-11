@@ -25,6 +25,7 @@
 
 #include "alloc-util.h"
 #include "dirent-util.h"
+#include "exit-status.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "hashmap.h"
@@ -199,6 +200,13 @@ static int generate_unit_file(SysvStub *s) {
         if (s->pid_file)
                 fprintf(f, "PIDFile=%s\n", s->pid_file);
 
+        /* Consider two special LSB exit codes a clean exit */
+        if (s->has_lsb)
+                fprintf(f,
+                        "SuccessExitStatus=%i %i\n",
+                        EXIT_NOTINSTALLED,
+                        EXIT_NOTCONFIGURED);
+
         fprintf(f,
                 "ExecStart=%s start\n"
                 "ExecStop=%s stop\n",
@@ -247,7 +255,7 @@ static char *sysv_translate_name(const char *name) {
         return res;
 }
 
-static int sysv_translate_facility(const char *name, const char *filename, char **ret) {
+static int sysv_translate_facility(SysvStub *s, unsigned line, const char *name, char **ret) {
 
         /* We silently ignore the $ prefix here. According to the LSB
          * spec it simply indicates whether something is a
@@ -266,14 +274,17 @@ static int sysv_translate_facility(const char *name, const char *filename, char 
                 "time",                 SPECIAL_TIME_SYNC_TARGET,
         };
 
+        const char *filename;
         char *filename_no_sh, *e, *m;
         const char *n;
         unsigned i;
         int r;
 
         assert(name);
-        assert(filename);
+        assert(s);
         assert(ret);
+
+        filename = basename(s->path);
 
         n = *name == '$' ? name + 1 : name;
 
@@ -281,8 +292,10 @@ static int sysv_translate_facility(const char *name, const char *filename, char 
                 if (!streq(table[i], n))
                         continue;
 
-                if (!table[i+1])
+                if (!table[i+1]) {
+                        *ret = NULL;
                         return 0;
+                }
 
                 m = strdup(table[i+1]);
                 if (!m)
@@ -299,9 +312,9 @@ static int sysv_translate_facility(const char *name, const char *filename, char 
         if (*name == '$')  {
                 r = unit_name_build(n, NULL, ".target", ret);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to build name: %m");
+                        return log_error_errno(r, "[%s:%u] Could not build name for facility %s: %m", s->path, line, name);
 
-                return r;
+                return 1;
         }
 
         /* Strip ".sh" suffix from file name for comparison */
@@ -313,8 +326,10 @@ static int sysv_translate_facility(const char *name, const char *filename, char 
         }
 
         /* Names equaling the file name of the services are redundant */
-        if (streq_ptr(n, filename))
+        if (streq_ptr(n, filename)) {
+                *ret = NULL;
                 return 0;
+        }
 
         /* Everything else we assume to be normal service names */
         m = sysv_translate_name(n);
@@ -337,11 +352,11 @@ static int handle_provides(SysvStub *s, unsigned line, const char *full_text, co
 
                 r = extract_first_word(&text, &word, NULL, EXTRACT_QUOTES|EXTRACT_RELAX);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to parse word from provides string: %m");
+                        return log_error_errno(r, "[%s:%u] Failed to parse word from provides string: %m", s->path, line);
                 if (r == 0)
                         break;
 
-                r = sysv_translate_facility(word, basename(s->path), &m);
+                r = sysv_translate_facility(s, line, word, &m);
                 if (r <= 0) /* continue on error */
                         continue;
 
@@ -403,11 +418,11 @@ static int handle_dependencies(SysvStub *s, unsigned line, const char *full_text
 
                 r = extract_first_word(&text, &word, NULL, EXTRACT_QUOTES|EXTRACT_RELAX);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to parse word from provides string: %m");
+                        return log_error_errno(r, "[%s:%u] Failed to parse word from provides string: %m", s->path, line);
                 if (r == 0)
                         break;
 
-                r = sysv_translate_facility(word, basename(s->path), &m);
+                r = sysv_translate_facility(s, line, word, &m);
                 if (r <= 0) /* continue on error */
                         continue;
 
@@ -551,7 +566,7 @@ static int load_sysv(SysvStub *s) {
                                 char *d = NULL;
 
                                 if (chkconfig_description)
-                                        d = strjoin(chkconfig_description, " ", j, NULL);
+                                        d = strjoin(chkconfig_description, " ", j);
                                 else
                                         d = strdup(j);
                                 if (!d)
@@ -613,7 +628,7 @@ static int load_sysv(SysvStub *s) {
                                                 char *d = NULL;
 
                                                 if (long_description)
-                                                        d = strjoin(long_description, " ", t, NULL);
+                                                        d = strjoin(long_description, " ", t);
                                                 else
                                                         d = strdup(j);
                                                 if (!d)
@@ -792,7 +807,7 @@ static int enumerate_sysv(const LookupPaths *lp, Hashmap *all_services) {
                                 continue;
                         }
 
-                        fpath = strjoin(*path, "/", de->d_name, NULL);
+                        fpath = strjoin(*path, "/", de->d_name);
                         if (!fpath)
                                 return log_oom();
 
@@ -838,7 +853,7 @@ static int set_dependencies_from_rcnd(const LookupPaths *lp, Hashmap *all_servic
                         _cleanup_free_ char *path = NULL;
                         struct dirent *de;
 
-                        path = strjoin(*p, "/", rcnd_table[i].path, NULL);
+                        path = strjoin(*p, "/", rcnd_table[i].path);
                         if (!path) {
                                 r = log_oom();
                                 goto finish;
@@ -868,7 +883,7 @@ static int set_dependencies_from_rcnd(const LookupPaths *lp, Hashmap *all_servic
                                 if (a < 0 || b < 0)
                                         continue;
 
-                                fpath = strjoin(*p, "/", de->d_name, NULL);
+                                fpath = strjoin(*p, "/", de->d_name);
                                 if (!fpath) {
                                         r = log_oom();
                                         goto finish;

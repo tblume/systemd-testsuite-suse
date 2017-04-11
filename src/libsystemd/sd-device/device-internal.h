@@ -34,7 +34,7 @@ struct sd_device {
         uint64_t properties_generation; /* changes whenever the properties are changed */
         uint64_t properties_iterator_generation; /* generation when iteration was started */
 
-        /* the subset of the properties that should be written to the db*/
+        /* the subset of the properties that should be written to the db */
         OrderedHashmap *properties_db;
 
         Hashmap *sysattr_values; /* cached sysattr values */
@@ -76,6 +76,8 @@ struct sd_device {
 
         char *subsystem;
         bool subsystem_set; /* don't reread subsystem */
+        char *driver_subsystem; /* only set for the 'drivers' subsystem */
+        bool driver_subsystem_set; /* don't reread subsystem */
         char *driver;
         bool driver_set; /* don't reread driver */
 

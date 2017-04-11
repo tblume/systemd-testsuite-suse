@@ -144,7 +144,10 @@ int sd_netlink_open(sd_netlink **ret) {
         return 0;
 }
 
-int sd_netlink_inc_rcvbuf(const sd_netlink *const rtnl, const int size) {
+int sd_netlink_inc_rcvbuf(sd_netlink *rtnl, size_t size) {
+        assert_return(rtnl, -EINVAL);
+        assert_return(!rtnl_pid_changed(rtnl), -ECHILD);
+
         return fd_inc_rcvbuf(rtnl->fd, size);
 }
 
@@ -273,6 +276,10 @@ static int dispatch_rqueue(sd_netlink *rtnl, sd_netlink_message **message) {
         if (rtnl->rqueue_size <= 0) {
                 /* Try to read a new message */
                 r = socket_read_message(rtnl);
+                if (r == -ENOBUFS) { /* FIXME: ignore buffer overruns for now */
+                        log_debug_errno(r, "Got ENOBUFS from netlink socket, ignoring.");
+                        return 1;
+                }
                 if (r <= 0)
                         return r;
         }

@@ -22,13 +22,22 @@ Type=notify
 Restart=always
 RestartSec=0
 ExecStart=@rootlibexecdir@/systemd-timesyncd
+WatchdogSec=3min
 CapabilityBoundingSet=CAP_SYS_TIME CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 PrivateTmp=yes
 PrivateDevices=yes
-ProtectSystem=full
+ProtectSystem=strict
 ProtectHome=yes
-WatchdogSec=3min
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
 MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=~@cpu-emulation @debug @keyring @module @mount @obsolete @raw-io @reboot @swap
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/systemd
 
 [Install]
 WantedBy=sysinit.target

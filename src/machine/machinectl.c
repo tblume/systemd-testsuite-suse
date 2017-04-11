@@ -32,6 +32,7 @@
 #include "sd-bus.h"
 
 #include "alloc-util.h"
+#include "bus-common-errors.h"
 #include "bus-error.h"
 #include "bus-unit-util.h"
 #include "bus-util.h"
@@ -59,6 +60,9 @@
 #include "util.h"
 #include "verbs.h"
 #include "web-util.h"
+#include "stdio-util.h"
+
+#define ALL_IP_ADDRESSES -1
 
 static char **arg_property = NULL;
 static bool arg_all = false;
@@ -81,6 +85,9 @@ static ImportVerify arg_verify = IMPORT_VERIFY_SIGNATURE;
 static const char* arg_format = NULL;
 static const char *arg_uid = NULL;
 static char **arg_setenv = NULL;
+static int arg_addrs = 1;
+
+static int print_addresses(sd_bus *bus, const char *name, int, const char *pr1, const char *pr2, int n_addr);
 
 static void polkit_agent_open_if_enabled(void) {
 
@@ -108,6 +115,8 @@ typedef struct MachineInfo {
         const char *name;
         const char *class;
         const char *service;
+        char *os;
+        char *version_id;
 } MachineInfo;
 
 static int compare_machine_info(const void *a, const void *b) {
@@ -116,12 +125,93 @@ static int compare_machine_info(const void *a, const void *b) {
         return strcmp(x->name, y->name);
 }
 
+static void clean_machine_info(MachineInfo *machines, size_t n_machines) {
+        size_t i;
+
+        if (!machines || n_machines == 0)
+                return;
+
+        for (i = 0; i < n_machines; i++) {
+                free(machines[i].os);
+                free(machines[i].version_id);
+        }
+        free(machines);
+}
+
+static int call_get_os_release(sd_bus *bus, const char *method, const char *name, const char *query, ...) {
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        const char *k, *v, *iter, **query_res = NULL;
+        size_t count = 0, awaited_args = 0;
+        va_list ap;
+        int r;
+
+        assert(bus);
+        assert(name);
+        assert(query);
+
+        NULSTR_FOREACH(iter, query)
+                awaited_args++;
+        query_res = newa0(const char *, awaited_args);
+
+        r = sd_bus_call_method(
+                        bus,
+                        "org.freedesktop.machine1",
+                        "/org/freedesktop/machine1",
+                        "org.freedesktop.machine1.Manager",
+                        method,
+                        NULL, &reply, "s", name);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_enter_container(reply, 'a', "{ss}");
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        while ((r = sd_bus_message_read(reply, "{ss}", &k, &v)) > 0) {
+                count = 0;
+                NULSTR_FOREACH(iter, query) {
+                        if (streq(k, iter)) {
+                                query_res[count] = v;
+                                break;
+                        }
+                        count++;
+                }
+        }
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        r = sd_bus_message_exit_container(reply);
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        va_start(ap, query);
+        for (count = 0; count < awaited_args; count++) {
+                char *val, **out;
+
+                out = va_arg(ap, char **);
+                assert(out);
+                if (query_res[count]) {
+                        val = strdup(query_res[count]);
+                        if (!val) {
+                                va_end(ap);
+                                return -ENOMEM;
+                        }
+                        *out = val;
+                }
+        }
+        va_end(ap);
+
+        return 0;
+}
+
 static int list_machines(int argc, char *argv[], void *userdata) {
 
-        size_t max_name = strlen("MACHINE"), max_class = strlen("CLASS"), max_service = strlen("SERVICE");
+        size_t max_name = strlen("MACHINE"), max_class = strlen("CLASS"),
+               max_service = strlen("SERVICE"), max_os = strlen("OS"), max_version_id = strlen("VERSION");
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
-        _cleanup_free_ MachineInfo *machines = NULL;
+        _cleanup_free_ char *prefix = NULL;
+        MachineInfo *machines = NULL;
         const char *name, *class, *service, *object;
         size_t n_machines = 0, n_allocated = 0, j;
         sd_bus *bus = userdata;
@@ -147,19 +237,29 @@ static int list_machines(int argc, char *argv[], void *userdata) {
         r = sd_bus_message_enter_container(reply, 'a', "(ssso)");
         if (r < 0)
                 return bus_log_parse_error(r);
-
         while ((r = sd_bus_message_read(reply, "(ssso)", &name, &class, &service, &object)) > 0) {
                 size_t l;
 
                 if (name[0] == '.' && !arg_all)
                         continue;
 
-                if (!GREEDY_REALLOC(machines, n_allocated, n_machines + 1))
-                        return log_oom();
+                if (!GREEDY_REALLOC0(machines, n_allocated, n_machines + 1)) {
+                        r = log_oom();
+                        goto out;
+                }
 
                 machines[n_machines].name = name;
                 machines[n_machines].class = class;
                 machines[n_machines].service = service;
+
+                (void) call_get_os_release(
+                                bus,
+                                "GetMachineOSRelease",
+                                name,
+                                "ID\0"
+                                "VERSION_ID\0",
+                                &machines[n_machines].os,
+                                &machines[n_machines].version_id);
 
                 l = strlen(name);
                 if (l > max_name)
@@ -173,33 +273,77 @@ static int list_machines(int argc, char *argv[], void *userdata) {
                 if (l > max_service)
                         max_service = l;
 
+                l = machines[n_machines].os ? strlen(machines[n_machines].os) : 1;
+                if (l > max_os)
+                        max_os = l;
+
+                l = machines[n_machines].version_id ? strlen(machines[n_machines].version_id) : 1;
+                if (l > max_version_id)
+                        max_version_id = l;
+
                 n_machines++;
         }
-        if (r < 0)
-                return bus_log_parse_error(r);
+        if (r < 0) {
+                r = bus_log_parse_error(r);
+                goto out;
+        }
 
         r = sd_bus_message_exit_container(reply);
-        if (r < 0)
-                return bus_log_parse_error(r);
+        if (r < 0) {
+                r = bus_log_parse_error(r);
+                goto out;
+        }
 
         qsort_safe(machines, n_machines, sizeof(MachineInfo), compare_machine_info);
 
-        if (arg_legend)
-                printf("%-*s %-*s %-*s\n",
+        /* Allocate for prefix max characters for all fields + spaces between them + strlen(",\n") */
+        r = asprintf(&prefix, "%-*s",
+                        (int) (max_name +
+                        max_class +
+                        max_service +
+                        max_os +
+                        max_version_id + 5 + strlen(",\n")),
+                        ",\n");
+        if (r < 0) {
+                r = log_oom();
+                goto out;
+        }
+
+        if (arg_legend && n_machines > 0)
+                printf("%-*s %-*s %-*s %-*s %-*s %s\n",
                        (int) max_name, "MACHINE",
                        (int) max_class, "CLASS",
-                       (int) max_service, "SERVICE");
+                       (int) max_service, "SERVICE",
+                       (int) max_os, "OS",
+                       (int) max_version_id, "VERSION",
+                       "ADDRESSES");
 
-        for (j = 0; j < n_machines; j++)
-                printf("%-*s %-*s %-*s\n",
+        for (j = 0; j < n_machines; j++) {
+                printf("%-*s %-*s %-*s %-*s %-*s ",
                        (int) max_name, machines[j].name,
                        (int) max_class, machines[j].class,
-                       (int) max_service, machines[j].service);
+                       (int) max_service, strdash_if_empty(machines[j].service),
+                       (int) max_os, strdash_if_empty(machines[j].os),
+                       (int) max_version_id, strdash_if_empty(machines[j].version_id));
 
-        if (arg_legend)
-                printf("\n%zu machines listed.\n", n_machines);
+                r = print_addresses(bus, machines[j].name, 0, "", prefix, arg_addrs);
+                if (r <= 0) /* error or no addresses defined? */
+                        fputs("-\n", stdout);
+                else
+                        fputc('\n', stdout);
+        }
 
-        return 0;
+        if (arg_legend) {
+                if (n_machines > 0)
+                        printf("\n%zu machines listed.\n", n_machines);
+                else
+                        printf("No machines.\n");
+        }
+
+        r = 0;
+out:
+        clean_machine_info(machines, n_machines);
+        return r;
 }
 
 typedef struct ImageInfo {
@@ -304,7 +448,7 @@ static int list_images(int argc, char *argv[], void *userdata) {
 
         qsort_safe(images, n_images, sizeof(ImageInfo), compare_image_info);
 
-        if (arg_legend)
+        if (arg_legend && n_images > 0)
                 printf("%-*s %-*s %-3s %-*s %-*s %-*s\n",
                        (int) max_name, "NAME",
                        (int) max_type, "TYPE",
@@ -325,42 +469,28 @@ static int list_images(int argc, char *argv[], void *userdata) {
                        (int) max_mtime, strna(format_timestamp(mtime_buf, sizeof(mtime_buf), images[j].mtime)));
         }
 
-        if (arg_legend)
-                printf("\n%zu images listed.\n", n_images);
+        if (arg_legend) {
+                if (n_images > 0)
+                        printf("\n%zu images listed.\n", n_images);
+                else
+                        printf("No images.\n");
+        }
 
         return 0;
 }
 
 static int show_unit_cgroup(sd_bus *bus, const char *unit, pid_t leader) {
+        _cleanup_free_ char *cgroup = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
-        _cleanup_free_ char *path = NULL;
-        const char *cgroup;
         int r;
         unsigned c;
 
         assert(bus);
         assert(unit);
 
-        path = unit_dbus_path_from_name(unit);
-        if (!path)
-                return log_oom();
-
-        r = sd_bus_get_property(
-                        bus,
-                        "org.freedesktop.systemd1",
-                        path,
-                        unit_dbus_interface_from_name(unit),
-                        "ControlGroup",
-                        &error,
-                        &reply,
-                        "s");
+        r = show_cgroup_get_unit_path_and_warn(bus, unit, &cgroup);
         if (r < 0)
-                return log_error_errno(r, "Failed to query ControlGroup: %s", bus_error_message(&error, r));
-
-        r = sd_bus_message_read(reply, "s", &cgroup);
-        if (r < 0)
-                return bus_log_parse_error(r);
+                return r;
 
         if (isempty(cgroup))
                 return 0;
@@ -389,8 +519,11 @@ static int show_unit_cgroup(sd_bus *bus, const char *unit, pid_t leader) {
         return 0;
 }
 
-static int print_addresses(sd_bus *bus, const char *name, int ifi, const char *prefix, const char *prefix2) {
+static int print_addresses(sd_bus *bus, const char *name, int ifi, const char *prefix, const char *prefix2, int n_addr) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        _cleanup_free_ char *addresses = NULL;
+        bool truncate = false;
+        unsigned n = 0;
         int r;
 
         assert(bus);
@@ -409,6 +542,11 @@ static int print_addresses(sd_bus *bus, const char *name, int ifi, const char *p
         if (r < 0)
                 return r;
 
+        addresses = strdup(prefix);
+        if (!addresses)
+                return log_oom();
+        prefix = "";
+
         r = sd_bus_message_enter_container(reply, 'a', "(iay)");
         if (r < 0)
                 return bus_log_parse_error(r);
@@ -417,7 +555,7 @@ static int print_addresses(sd_bus *bus, const char *name, int ifi, const char *p
                 int family;
                 const void *a;
                 size_t sz;
-                char buffer[MAX(INET6_ADDRSTRLEN, INET_ADDRSTRLEN)];
+                char buf_ifi[DECIMAL_STR_MAX(int) + 2], buffer[MAX(INET6_ADDRSTRLEN, INET_ADDRSTRLEN)];
 
                 r = sd_bus_message_read(reply, "i", &family);
                 if (r < 0)
@@ -427,11 +565,16 @@ static int print_addresses(sd_bus *bus, const char *name, int ifi, const char *p
                 if (r < 0)
                         return bus_log_parse_error(r);
 
-                fputs(prefix, stdout);
-                fputs(inet_ntop(family, a, buffer, sizeof(buffer)), stdout);
-                if (family == AF_INET6 && ifi > 0)
-                        printf("%%%i", ifi);
-                fputc('\n', stdout);
+                if (n_addr != 0) {
+                        if (family == AF_INET6 && ifi > 0)
+                                xsprintf(buf_ifi, "%%%i", ifi);
+                        else
+                                strcpy(buf_ifi, "");
+
+                        if (!strextend(&addresses, prefix, inet_ntop(family, a, buffer, sizeof(buffer)), buf_ifi, NULL))
+                                return log_oom();
+                } else
+                        truncate = true;
 
                 r = sd_bus_message_exit_container(reply);
                 if (r < 0)
@@ -439,6 +582,11 @@ static int print_addresses(sd_bus *bus, const char *name, int ifi, const char *p
 
                 if (prefix != prefix2)
                         prefix = prefix2;
+
+                if (n_addr > 0)
+                        n_addr -= 1;
+
+                n++;
         }
         if (r < 0)
                 return bus_log_parse_error(r);
@@ -447,48 +595,58 @@ static int print_addresses(sd_bus *bus, const char *name, int ifi, const char *p
         if (r < 0)
                 return bus_log_parse_error(r);
 
-        return 0;
+        if (n > 0)
+                fprintf(stdout, "%s%s", addresses, truncate ? "..." : "");
+
+        return (int) n;
 }
 
-static int print_os_release(sd_bus *bus, const char *name, const char *prefix) {
-        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
-        const char *k, *v, *pretty = NULL;
+static int print_os_release(sd_bus *bus, const char *method, const char *name, const char *prefix) {
+        _cleanup_free_ char *pretty = NULL;
         int r;
 
         assert(bus);
         assert(name);
         assert(prefix);
 
-        r = sd_bus_call_method(bus,
-                               "org.freedesktop.machine1",
-                               "/org/freedesktop/machine1",
-                               "org.freedesktop.machine1.Manager",
-                               "GetMachineOSRelease",
-                               NULL,
-                               &reply,
-                               "s", name);
+        r = call_get_os_release(bus, method, name, "PRETTY_NAME\0", &pretty, NULL);
         if (r < 0)
                 return r;
-
-        r = sd_bus_message_enter_container(reply, 'a', "{ss}");
-        if (r < 0)
-                return bus_log_parse_error(r);
-
-        while ((r = sd_bus_message_read(reply, "{ss}", &k, &v)) > 0) {
-                if (streq(k, "PRETTY_NAME"))
-                        pretty = v;
-
-        }
-        if (r < 0)
-                return bus_log_parse_error(r);
-
-        r = sd_bus_message_exit_container(reply);
-        if (r < 0)
-                return bus_log_parse_error(r);
 
         if (pretty)
                 printf("%s%s\n", prefix, pretty);
 
+        return 0;
+}
+
+static int print_uid_shift(sd_bus *bus, const char *name) {
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        uint32_t shift;
+        int r;
+
+        assert(bus);
+        assert(name);
+
+        r = sd_bus_call_method(bus,
+                               "org.freedesktop.machine1",
+                               "/org/freedesktop/machine1",
+                               "org.freedesktop.machine1.Manager",
+                               "GetMachineUIDShift",
+                               &error,
+                               &reply,
+                               "s", name);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to query UID/GID shift: %s", bus_error_message(&error, r));
+
+        r = sd_bus_message_read(reply, "u", &shift);
+        if (r < 0)
+                return r;
+
+        if (shift == 0) /* Don't show trivial mappings */
+                return 0;
+
+        printf("       UID Shift: %" PRIu32 "\n", shift);
         return 0;
 }
 
@@ -527,7 +685,7 @@ static void print_machine_status_info(sd_bus *bus, MachineStatusInfo *i) {
 
         fputs(strna(i->name), stdout);
 
-        if (!sd_id128_equal(i->id, SD_ID128_NULL))
+        if (!sd_id128_is_null(i->id))
                 printf("(" SD_ID128_FORMAT_STR ")\n", SD_ID128_FORMAT_VAL(i->id));
         else
                 putchar('\n');
@@ -588,11 +746,15 @@ static void print_machine_status_info(sd_bus *bus, MachineStatusInfo *i) {
                 fputc('\n', stdout);
         }
 
-        print_addresses(bus, i->name, ifi,
-                       "\t Address: ",
-                       "\t          ");
+        if (print_addresses(bus, i->name, ifi,
+                            "\t Address: ",
+                            "\n\t          ",
+                            ALL_IP_ADDRESSES) > 0)
+                fputc('\n', stdout);
 
-        print_os_release(bus, i->name, "\t      OS: ");
+        print_os_release(bus, "GetMachineOSRelease", i->name, "\t      OS: ");
+
+        print_uid_shift(bus, i->name);
 
         if (i->unit) {
                 printf("\t    Unit: %s\n", i->unit);
@@ -652,6 +814,7 @@ static int show_machine_info(const char *verb, sd_bus *bus, const char *path, bo
                 {}
         };
 
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(machine_status_info_clear) MachineStatusInfo info = {};
         int r;
 
@@ -664,9 +827,10 @@ static int show_machine_info(const char *verb, sd_bus *bus, const char *path, bo
                                    "org.freedesktop.machine1",
                                    path,
                                    map,
+                                   &error,
                                    &info);
         if (r < 0)
-                return log_error_errno(r, "Could not get properties: %m");
+                return log_error_errno(r, "Could not get properties: %s", bus_error_message(&error, r));
 
         if (*new_line)
                 printf("\n");
@@ -790,6 +954,8 @@ static void print_image_status_info(sd_bus *bus, ImageStatusInfo *i) {
         if (i->path)
                 printf("\t    Path: %s\n", i->path);
 
+        print_os_release(bus, "GetImageOSRelease", i->name, "\t      OS: ");
+
         printf("\t      RO: %s%s%s\n",
                i->read_only ? ansi_highlight_red() : "",
                i->read_only ? "read-only" : "writable",
@@ -840,6 +1006,7 @@ static int show_image_info(sd_bus *bus, const char *path, bool *new_line) {
                 {}
         };
 
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(image_status_info_clear) ImageStatusInfo info = {};
         int r;
 
@@ -851,9 +1018,10 @@ static int show_image_info(sd_bus *bus, const char *path, bool *new_line) {
                                    "org.freedesktop.machine1",
                                    path,
                                    map,
+                                   &error,
                                    &info);
         if (r < 0)
-                return log_error_errno(r, "Could not get properties: %m");
+                return log_error_errno(r, "Could not get properties: %s", bus_error_message(&error, r));
 
         if (*new_line)
                 printf("\n");
@@ -907,6 +1075,8 @@ static int show_pool_info(sd_bus *bus) {
                 .usage = (uint64_t) -1,
                 .limit = (uint64_t) -1,
         };
+
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
         assert(bus);
@@ -915,9 +1085,10 @@ static int show_pool_info(sd_bus *bus) {
                                    "org.freedesktop.machine1",
                                    "/org/freedesktop/machine1",
                                    map,
+                                   &error,
                                    &info);
         if (r < 0)
-                return log_error_errno(r, "Could not get properties: %m");
+                return log_error_errno(r, "Could not get properties: %s", bus_error_message(&error, r));
 
         print_pool_status_info(bus, &info);
 
@@ -1193,10 +1364,12 @@ static int process_forward(sd_event *event, PTYForward **forward, int master, PT
 
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGWINCH, SIGTERM, SIGINT, -1) >= 0);
 
-        if (streq(name, ".host"))
-                log_info("Connected to the local host. Press ^] three times within 1s to exit session.");
-        else
-                log_info("Connected to machine %s. Press ^] three times within 1s to exit session.", name);
+        if (!arg_quiet) {
+                if (streq(name, ".host"))
+                        log_info("Connected to the local host. Press ^] three times within 1s to exit session.");
+                else
+                        log_info("Connected to machine %s. Press ^] three times within 1s to exit session.", name);
+        }
 
         sd_event_add_signal(event, NULL, SIGINT, NULL, NULL);
         sd_event_add_signal(event, NULL, SIGTERM, NULL, NULL);
@@ -1220,15 +1393,52 @@ static int process_forward(sd_event *event, PTYForward **forward, int master, PT
         if (last_char != '\n')
                 fputc('\n', stdout);
 
-        if (machine_died)
-                log_info("Machine %s terminated.", name);
-        else if (streq(name, ".host"))
-                log_info("Connection to the local host terminated.");
-        else
-                log_info("Connection to machine %s terminated.", name);
+        if (!arg_quiet) {
+                if (machine_died)
+                        log_info("Machine %s terminated.", name);
+                else if (streq(name, ".host"))
+                        log_info("Connection to the local host terminated.");
+                else
+                        log_info("Connection to machine %s terminated.", name);
+        }
 
         sd_event_get_exit_code(event, &ret);
         return ret;
+}
+
+static int parse_machine_uid(const char *spec, const char **machine, char **uid) {
+        /*
+         * Whatever is specified in the spec takes priority over global arguments.
+         */
+        char *_uid = NULL;
+        const char *_machine = NULL;
+
+        if (spec) {
+                const char *at;
+
+                at = strchr(spec, '@');
+                if (at) {
+                        if (at == spec)
+                                /* Do the same as ssh and refuse "@host". */
+                                return -EINVAL;
+
+                        _machine = at + 1;
+                        _uid = strndup(spec, at - spec);
+                        if (!_uid)
+                                return -ENOMEM;
+                } else
+                        _machine = spec;
+        };
+
+        if (arg_uid && !_uid) {
+                _uid = strdup(arg_uid);
+                if (!_uid)
+                        return -ENOMEM;
+        }
+
+        *uid = _uid;
+        *machine = isempty(_machine) ? ".host" : _machine;
+        return 0;
 }
 
 static int login_machine(int argc, char *argv[], void *userdata) {
@@ -1306,7 +1516,8 @@ static int shell_machine(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_event_unrefp) sd_event *event = NULL;
         int master = -1, r;
         sd_bus *bus = userdata;
-        const char *pty, *match, *machine, *path, *uid = NULL;
+        const char *pty, *match, *machine, *path;
+        _cleanup_free_ char *uid = NULL;
 
         assert(bus);
 
@@ -1337,22 +1548,9 @@ static int shell_machine(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return log_error_errno(r, "Failed to attach bus to event loop: %m");
 
-        machine = argc < 2 || isempty(argv[1]) ? NULL : argv[1];
-
-        if (arg_uid)
-                uid = arg_uid;
-        else if (machine) {
-                const char *at;
-
-                at = strchr(machine, '@');
-                if (at) {
-                        uid = strndupa(machine, at - machine);
-                        machine = at + 1;
-                }
-        }
-
-        if (isempty(machine))
-                machine = ".host";
+        r = parse_machine_uid(argc >= 2 ? argv[1] : NULL, &machine, &uid);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse machine specification: %m");
 
         match = strjoina("type='signal',"
                          "sender='org.freedesktop.machine1',"
@@ -1523,8 +1721,33 @@ static int read_only_image(int argc, char *argv[], void *userdata) {
         return 0;
 }
 
+static int image_exists(sd_bus *bus, const char *name) {
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+        int r;
+
+        assert(bus);
+        assert(name);
+
+        r = sd_bus_call_method(
+                        bus,
+                        "org.freedesktop.machine1",
+                        "/org/freedesktop/machine1",
+                        "org.freedesktop.machine1.Manager",
+                        "GetImage",
+                        &error,
+                        NULL,
+                        "s", name);
+        if (r < 0) {
+                if (sd_bus_error_has_name(&error, BUS_ERROR_NO_SUCH_IMAGE))
+                        return 0;
+
+                return log_error_errno(r, "Failed to check whether image %s exists: %s", name, bus_error_message(&error, -r));
+        }
+
+        return 1;
+}
+
 static int make_service_name(const char *name, char **ret) {
-        _cleanup_free_ char *e = NULL;
         int r;
 
         assert(name);
@@ -1535,11 +1758,7 @@ static int make_service_name(const char *name, char **ret) {
                 return -EINVAL;
         }
 
-        e = unit_name_escape(name);
-        if (!e)
-                return log_oom();
-
-        r = unit_name_build("systemd-nspawn", e, ".service", ret);
+        r = unit_name_build("systemd-nspawn", name, ".service", ret);
         if (r < 0)
                 return log_error_errno(r, "Failed to build unit name: %m");
 
@@ -1568,6 +1787,14 @@ static int start_machine(int argc, char *argv[], void *userdata) {
                 r = make_service_name(argv[i], &unit);
                 if (r < 0)
                         return r;
+
+                r = image_exists(bus, argv[i]);
+                if (r < 0)
+                        return r;
+                if (r == 0) {
+                        log_error("Machine image '%s' does not exist.", argv[1]);
+                        return -ENXIO;
+                }
 
                 r = sd_bus_call_method(
                                 bus,
@@ -1635,6 +1862,14 @@ static int enable_machine(int argc, char *argv[], void *userdata) {
                 r = make_service_name(argv[i], &unit);
                 if (r < 0)
                         return r;
+
+                r = image_exists(bus, argv[i]);
+                if (r < 0)
+                        return r;
+                if (r == 0) {
+                        log_error("Machine image '%s' does not exist.", argv[1]);
+                        return -ENXIO;
+                }
 
                 r = sd_bus_message_append(m, "s", unit);
                 if (r < 0)
@@ -2276,7 +2511,7 @@ static int list_transfers(int argc, char *argv[], void *userdata) {
 
         qsort_safe(transfers, n_transfers, sizeof(TransferInfo), compare_transfer_info);
 
-        if (arg_legend)
+        if (arg_legend && n_transfers > 0)
                 printf("%-*s %-*s %-*s %-*s %-*s\n",
                        (int) MAX(2U, DECIMAL_STR_WIDTH(max_id)), "ID",
                        (int) 7, "PERCENT",
@@ -2292,8 +2527,12 @@ static int list_transfers(int argc, char *argv[], void *userdata) {
                        (int) max_local, transfers[j].local,
                        (int) max_remote, transfers[j].remote);
 
-        if (arg_legend)
-                printf("\n%zu transfers listed.\n", n_transfers);
+        if (arg_legend) {
+                if (n_transfers > 0)
+                        printf("\n%zu transfers listed.\n", n_transfers);
+                else
+                        printf("No transfers.\n");
+        }
 
         return 0;
 }
@@ -2379,7 +2618,7 @@ static int set_limit(int argc, char *argv[], void *userdata) {
 }
 
 static int clean_images(int argc, char *argv[], void *userdata) {
-        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         uint64_t usage, total = 0;
         char fb[FORMAT_BYTES_MAX];
@@ -2388,15 +2627,22 @@ static int clean_images(int argc, char *argv[], void *userdata) {
         unsigned c = 0;
         int r;
 
-        r = sd_bus_call_method(
+        r = sd_bus_message_new_method_call(
                         bus,
+                        &m,
                         "org.freedesktop.machine1",
                         "/org/freedesktop/machine1",
                         "org.freedesktop.machine1.Manager",
-                        "CleanPool",
-                        &error,
-                        &reply,
-                        "s", arg_all ? "all" : "hidden");
+                        "CleanPool");
+        if (r < 0)
+                return bus_log_create_error(r);
+
+        r = sd_bus_message_append(m, "s", arg_all ? "all" : "hidden");
+        if (r < 0)
+                return bus_log_create_error(r);
+
+        /* This is a slow operation, hence permit a longer time for completion. */
+        r = sd_bus_call(bus, m, USEC_INFINITY, &error, &reply);
         if (r < 0)
                 return log_error_errno(r, "Could not clean pool: %s", bus_error_message(&error, r));
 
@@ -2423,6 +2669,7 @@ static int clean_images(int argc, char *argv[], void *userdata) {
 }
 
 static int help(int argc, char *argv[], void *userdata) {
+        pager_open(arg_no_pager, false);
 
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
                "Send control commands to or query the virtual machine and container\n"
@@ -2446,12 +2693,13 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --read-only              Create read-only bind mount\n"
                "     --mkdir                  Create directory before bind mounting, if missing\n"
                "  -n --lines=INTEGER          Number of journal entries to show\n"
+               "     --max-addresses=INTEGER  Number of internet addresses to show at most\n"
                "  -o --output=STRING          Change journal output mode (short,\n"
                "                              short-monotonic, verbose, export, json,\n"
                "                              json-pretty, json-sse, cat)\n"
-               "      --verify=MODE           Verification mode for downloaded images (no,\n"
+               "     --verify=MODE            Verification mode for downloaded images (no,\n"
                "                              checksum, signature)\n"
-               "      --force                 Download image even if already exists\n\n"
+               "     --force                  Download image even if already exists\n\n"
                "Machine Commands:\n"
                "  list                        List running VMs and containers\n"
                "  status NAME...              Show VM/container details\n"
@@ -2510,6 +2758,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_FORCE,
                 ARG_FORMAT,
                 ARG_UID,
+                ARG_NUMBER_IPS,
         };
 
         static const struct option options[] = {
@@ -2536,39 +2785,70 @@ static int parse_argv(int argc, char *argv[]) {
                 { "format",          required_argument, NULL, ARG_FORMAT          },
                 { "uid",             required_argument, NULL, ARG_UID             },
                 { "setenv",          required_argument, NULL, 'E'                 },
+                { "max-addresses",   required_argument, NULL, ARG_NUMBER_IPS      },
                 {}
         };
 
         bool reorder = false;
-        int c, r;
+        int c, r, shell = -1;
 
         assert(argc >= 0);
         assert(argv);
 
         for (;;) {
-                const char * const option_string = "+hp:als:H:M:qn:o:";
+                static const char option_string[] = "-hp:als:H:M:qn:o:E:";
 
                 c = getopt_long(argc, argv, option_string + reorder, options, NULL);
-                if (c < 0) {
+                if (c < 0)
+                        break;
+
+                switch (c) {
+
+                case 1: /* getopt_long() returns 1 if "-" was the first character of the option string, and a
+                         * non-option argument was discovered. */
+
+                        assert(!reorder);
+
                         /* We generally are fine with the fact that getopt_long() reorders the command line, and looks
                          * for switches after the main verb. However, for "shell" we really don't want that, since we
-                         * want that switches passed after that are passed to the program to execute, and not processed
-                         * by us. To make this possible, we'll first invoke getopt_long() with reordering disabled
-                         * (i.e. with the "+" prefix in the option string), and as soon as we hit the end (i.e. the
-                         * verb) we check if that's "shell". If it is, we exit the loop, since we don't want any
-                         * further options processed. However, if it is anything else, we process the same argument
-                         * again, but this time allow reordering. */
+                         * want that switches specified after the machine name are passed to the program to execute,
+                         * and not processed by us. To make this possible, we'll first invoke getopt_long() with
+                         * reordering disabled (i.e. with the "-" prefix in the option string), looking for the first
+                         * non-option parameter. If it's the verb "shell" we remember its position and continue
+                         * processing options. In this case, as soon as we hit the next non-option argument we found
+                         * the machine name, and stop further processing. If the first non-option argument is any other
+                         * verb than "shell" we switch to normal reordering mode and continue processing arguments
+                         * normally. */
 
-                        if (!reorder && optind < argc && !streq(argv[optind], "shell")) {
+                        if (shell >= 0) {
+                                /* If we already found the "shell" verb on the command line, and now found the next
+                                 * non-option argument, then this is the machine name and we should stop processing
+                                 * further arguments.  */
+                                optind --; /* don't process this argument, go one step back */
+                                goto done;
+                        }
+                        if (streq(optarg, "shell"))
+                                /* Remember the position of the "shell" verb, and continue processing normally. */
+                                shell = optind - 1;
+                        else {
+                                int saved_optind;
+
+                                /* OK, this is some other verb. In this case, turn on reordering again, and continue
+                                 * processing normally. */
                                 reorder = true;
-                                optind--;
-                                continue;
+
+                                /* We changed the option string. getopt_long() only looks at it again if we invoke it
+                                 * at least once with a reset option index. Hence, let's reset the option index here,
+                                 * then invoke getopt_long() again (ignoring what it has to say, after all we most
+                                 * likely already processed it), and the bump the option index so that we read the
+                                 * intended argument again. */
+                                saved_optind = optind;
+                                optind = 0;
+                                (void) getopt_long(argc, argv, option_string + reorder, options, NULL);
+                                optind = saved_optind - 1; /* go one step back, process this argument again */
                         }
 
                         break;
-                }
-
-                switch (c) {
 
                 case 'h':
                         return help(0, NULL, NULL);
@@ -2696,12 +2976,40 @@ static int parse_argv(int argc, char *argv[]) {
                                 return log_oom();
                         break;
 
+                case ARG_NUMBER_IPS:
+                        if (streq(optarg, "all"))
+                                arg_addrs = ALL_IP_ADDRESSES;
+                        else if (safe_atoi(optarg, &arg_addrs) < 0) {
+                                log_error("Invalid number of IPs");
+                                return -EINVAL;
+                        } else if (arg_addrs < 0) {
+                                log_error("Number of IPs cannot be negative");
+                                return -EINVAL;
+                        }
+                        break;
+
                 case '?':
                         return -EINVAL;
 
                 default:
                         assert_not_reached("Unhandled option");
                 }
+        }
+
+done:
+        if (shell >= 0) {
+                char *t;
+                int i;
+
+                /* We found the "shell" verb while processing the argument list. Since we turned off reordering of the
+                 * argument list initially let's readjust it now, and move the "shell" verb to the back. */
+
+                optind -= 1; /* place the option index where the "shell" verb will be placed */
+
+                t = argv[shell];
+                for (i = shell; i < optind; i++)
+                        argv[i] = argv[i+1];
+                argv[optind] = t;
         }
 
         return 1;
@@ -2751,7 +3059,7 @@ static int machinectl_main(int argc, char *argv[], sd_bus *bus) {
 }
 
 int main(int argc, char*argv[]) {
-        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");
@@ -2773,6 +3081,7 @@ int main(int argc, char*argv[]) {
         r = machinectl_main(argc, argv, bus);
 
 finish:
+        sd_bus_flush_close_unref(bus);
         pager_close();
         polkit_agent_close();
 

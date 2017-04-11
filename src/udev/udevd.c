@@ -49,7 +49,7 @@
 #include "dev-setup.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "hashmap.h"
 #include "io-util.h"
@@ -776,9 +776,9 @@ static void manager_reload(Manager *manager) {
         manager->rules = udev_rules_unref(manager->rules);
         udev_builtin_exit(manager->udev);
 
-        sd_notify(false,
-                  "READY=1\n"
-                  "STATUS=Processing...");
+        sd_notifyf(false,
+                   "READY=1\n"
+                   "STATUS=Processing with %u children at max", arg_children_max);
 }
 
 static void event_queue_start(Manager *manager) {
@@ -1000,6 +1000,10 @@ static int on_ctrl_msg(sd_event_source *s, int fd, uint32_t revents, void *userd
         if (i >= 0) {
                 log_debug("udevd message (SET_MAX_CHILDREN) received, children_max=%i", i);
                 arg_children_max = i;
+
+                (void) sd_notifyf(false,
+                                  "READY=1\n"
+                                  "STATUS=Processing with %u children at max", arg_children_max);
         }
 
         if (udev_ctrl_get_ping(ctrl_msg) > 0)
@@ -1206,7 +1210,7 @@ static int on_sigchld(sd_event_source *s, const struct signalfd_siginfo *si, voi
                         else
                                 log_warning("worker ["PID_FMT"] exited with return code %i", pid, WEXITSTATUS(status));
                 } else if (WIFSIGNALED(status)) {
-                        log_warning("worker ["PID_FMT"] terminated by signal %i (%s)", pid, WTERMSIG(status), strsignal(WTERMSIG(status)));
+                        log_warning("worker ["PID_FMT"] terminated by signal %i (%s)", pid, WTERMSIG(status), signal_to_string(WTERMSIG(status)));
                 } else if (WIFSTOPPED(status)) {
                         log_info("worker ["PID_FMT"] stopped", pid);
                         continue;
@@ -1256,7 +1260,7 @@ static int on_post(sd_event_source *s, void *userdata) {
                                         return r;
                         } else if (manager->cgroup)
                                 /* cleanup possible left-over processes in our cgroup */
-                                cg_kill(SYSTEMD_CGROUP_CONTROLLER, manager->cgroup, SIGKILL, false, true, NULL);
+                                cg_kill(SYSTEMD_CGROUP_CONTROLLER, manager->cgroup, SIGKILL, CGROUP_IGNORE_SELF, NULL, NULL, NULL);
                 }
         }
 
@@ -1341,7 +1345,7 @@ static int listen_fds(int *rctrl, int *rnetlink) {
                         return log_error_errno(netlink_fd, "could not get uevent fd: %m");
 
                 netlink_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
-                if (ctrl_fd < 0)
+                if (netlink_fd < 0)
                         return log_error_errno(errno, "could not dup netlink fd: %m");
         }
 
@@ -1353,54 +1357,59 @@ static int listen_fds(int *rctrl, int *rnetlink) {
 
 /*
  * read the kernel command line, in case we need to get into debug mode
- *   udev.log-priority=<level>                 syslog priority
- *   udev.children-max=<number of workers>     events are fully serialized if set to 1
- *   udev.exec-delay=<number of seconds>       delay execution of every executed program
- *   udev.event-timeout=<number of seconds>    seconds to wait before terminating an event
+ *   udev.log_priority=<level>                 syslog priority
+ *   udev.children_max=<number of workers>     events are fully serialized if set to 1
+ *   udev.exec_delay=<number of seconds>       delay execution of every executed program
+ *   udev.event_timeout=<number of seconds>    seconds to wait before terminating an event
  */
-static int parse_proc_cmdline_item(const char *key, const char *value) {
-        const char *full_key = key;
-        int r;
+static int parse_proc_cmdline_item(const char *key, const char *value, void *data) {
+        int r = 0;
 
         assert(key);
 
         if (!value)
                 return 0;
 
-        if (startswith(key, "rd."))
-                key += strlen("rd.");
+        if (proc_cmdline_key_streq(key, "udev.log_priority")) {
 
-        if (startswith(key, "udev."))
-                key += strlen("udev.");
-        else
-                return 0;
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
 
-        if (streq(key, "log-priority")) {
-                int prio;
+                r = util_log_priority(value);
+                if (r >= 0)
+                        log_set_max_level(r);
 
-                prio = util_log_priority(value);
-                if (prio < 0)
-                        goto invalid;
-                log_set_max_level(prio);
-        } else if (streq(key, "children-max")) {
-                r = safe_atou(value, &arg_children_max);
-                if (r < 0)
-                        goto invalid;
-        } else if (streq(key, "exec-delay")) {
-                r = safe_atoi(value, &arg_exec_delay);
-                if (r < 0)
-                        goto invalid;
-        } else if (streq(key, "event-timeout")) {
+        } else if (proc_cmdline_key_streq(key, "udev.event_timeout")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
                 r = safe_atou64(value, &arg_event_timeout_usec);
-                if (r < 0)
-                        goto invalid;
-                arg_event_timeout_usec *= USEC_PER_SEC;
-                arg_event_timeout_warn_usec = (arg_event_timeout_usec / 3) ? : 1;
-        }
+                if (r >= 0) {
+                        arg_event_timeout_usec *= USEC_PER_SEC;
+                        arg_event_timeout_warn_usec = (arg_event_timeout_usec / 3) ? : 1;
+                }
 
-        return 0;
-invalid:
-        log_warning("invalid %s ignored: %s", full_key, value);
+        } else if (proc_cmdline_key_streq(key, "udev.children_max")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                r = safe_atou(value, &arg_children_max);
+
+        } else if (proc_cmdline_key_streq(key, "udev.exec_delay")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                r = safe_atoi(value, &arg_exec_delay);
+
+        } else if (startswith(key, "udev."))
+                log_warning("Unknown udev kernel command line option \"%s\"", key);
+
+        if (r < 0)
+                log_warning_errno(r, "Failed to parse \"%s=%s\", ignoring: %m", key, value);
+
         return 0;
 }
 
@@ -1627,9 +1636,9 @@ static int run(int fd_ctrl, int fd_uevent, const char *cgroup) {
         if (r < 0)
                 log_error_errno(r, "failed to apply permissions on static device nodes: %m");
 
-        (void) sd_notify(false,
-                         "READY=1\n"
-                         "STATUS=Processing...");
+        (void) sd_notifyf(false,
+                          "READY=1\n"
+                          "STATUS=Processing with %u children at max", arg_children_max);
 
         r = sd_event_loop(manager->event);
         if (r < 0) {
@@ -1661,7 +1670,7 @@ int main(int argc, char *argv[]) {
         if (r <= 0)
                 goto exit;
 
-        r = parse_proc_cmdline(parse_proc_cmdline_item);
+        r = proc_cmdline_parse(parse_proc_cmdline_item, NULL, PROC_CMDLINE_STRIP_RD_PREFIX);
         if (r < 0)
                 log_warning_errno(r, "failed to parse kernel command line, ignoring: %m");
 
@@ -1734,8 +1743,13 @@ int main(int argc, char *argv[]) {
                 log_info("starting version " VERSION);
 
                 /* connect /dev/null to stdin, stdout, stderr */
-                if (log_get_max_level() < LOG_DEBUG)
-                        (void) make_null_stdio();
+                if (log_get_max_level() < LOG_DEBUG) {
+                        r = make_null_stdio();
+                        if (r < 0)
+                                log_warning_errno(r, "Failed to redirect standard streams to /dev/null: %m");
+                }
+
+
 
                 pid = fork();
                 switch (pid) {

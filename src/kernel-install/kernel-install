@@ -19,6 +19,8 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with systemd; If not, see <http://www.gnu.org/licenses/>.
 
+SKIP_REMAINING=77
+
 usage()
 {
     echo "Usage:"
@@ -32,7 +34,7 @@ dropindirs_sort()
     local -a files
     local f d i
 
-    readarray -t files < <(
+    readarray -t files <<<"$(
         for d in "$@"; do
             for i in "$d/"*"$suffix"; do
                 if [[ -e "$i" ]]; then
@@ -40,7 +42,7 @@ dropindirs_sort()
                 fi
             done
         done | sort -Vu
-    )
+    )"
 
     for f in "${files[@]}"; do
         for d in "$@"; do
@@ -86,14 +88,27 @@ if [[ ! $COMMAND ]] || [[ ! $KERNEL_VERSION ]]; then
     exit 1
 fi
 
-BOOT_DIR_ABS="/boot/$MACHINE_ID/$KERNEL_VERSION"
+if [[ -d /efi/loader/entries ]] || [[ -d /efi/$MACHINE_ID ]]; then
+    BOOT_DIR_ABS="/efi/$MACHINE_ID/$KERNEL_VERSION"
+elif [[ -d /boot/loader/entries ]] || [[ -d /boot/$MACHINE_ID ]]; then
+    BOOT_DIR_ABS="/boot/$MACHINE_ID/$KERNEL_VERSION"
+elif [[ -d /boot/efi/loader/entries ]] || [[ -d /boot/efi/$MACHINE_ID ]]; then
+    BOOT_DIR_ABS="/boot/efi/$MACHINE_ID/$KERNEL_VERSION"
+elif mountpoint -q /efi; then
+    BOOT_DIR_ABS="/efi/$MACHINE_ID/$KERNEL_VERSION"
+elif mountpoint -q /boot/efi; then
+    BOOT_DIR_ABS="/boot/efi/$MACHINE_ID/$KERNEL_VERSION"
+else
+    BOOT_DIR_ABS="/boot/$MACHINE_ID/$KERNEL_VERSION"
+fi
+
 ret=0
 
-readarray -t PLUGINS < <(
+readarray -t PLUGINS <<<"$(
     dropindirs_sort ".install" \
         "/etc/kernel/install.d" \
         "/usr/lib/kernel/install.d"
-)
+)"
 
 case $COMMAND in
     add)
@@ -110,7 +125,11 @@ case $COMMAND in
         for f in "${PLUGINS[@]}"; do
             if [[ -x $f ]]; then
                 "$f" add "$KERNEL_VERSION" "$BOOT_DIR_ABS" "$KERNEL_IMAGE"
-                ((ret+=$?))
+                x=$?
+                if [[ $x == $SKIP_REMAINING ]]; then
+                    exit 0
+                fi
+                ((ret+=$x))
             fi
         done
         ;;
@@ -119,7 +138,11 @@ case $COMMAND in
         for f in "${PLUGINS[@]}"; do
             if [[ -x $f ]]; then
                 "$f" remove "$KERNEL_VERSION" "$BOOT_DIR_ABS"
-                ((ret+=$?))
+                x=$?
+                if [[ $x == $SKIP_REMAINING ]]; then
+                    exit 0
+                fi
+                ((ret+=$x))
             fi
         done
 

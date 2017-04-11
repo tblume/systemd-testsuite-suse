@@ -26,7 +26,7 @@
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "logind-inhibit.h"
 #include "mkdir.h"
 #include "parse-util.h"
@@ -45,17 +45,14 @@ Inhibitor* inhibitor_new(Manager *m, const char* id) {
                 return NULL;
 
         i->state_file = strappend("/run/systemd/inhibit/", id);
-        if (!i->state_file) {
-                free(i);
-                return NULL;
-        }
+        if (!i->state_file)
+                return mfree(i);
 
         i->id = basename(i->state_file);
 
         if (hashmap_put(m->inhibitors, i->id, i) < 0) {
                 free(i->state_file);
-                free(i);
-                return NULL;
+                return mfree(i);
         }
 
         i->manager = m;
@@ -297,7 +294,7 @@ int inhibitor_create_fifo(Inhibitor *i) {
                 if (r < 0)
                         return r;
 
-                i->fifo_path = strjoin("/run/systemd/inhibit/", i->id, ".ref", NULL);
+                i->fifo_path = strjoin("/run/systemd/inhibit/", i->id, ".ref");
                 if (!i->fifo_path)
                         return -ENOMEM;
 

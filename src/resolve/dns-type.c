@@ -29,7 +29,7 @@ typedef const struct {
 } dns_type;
 
 static const struct dns_type_name *
-lookup_dns_type (register const char *str, register unsigned int len);
+lookup_dns_type (register const char *str, register GPERF_LEN_TYPE len);
 
 #include "dns_type-from-name.h"
 #include "dns_type-to-name.h"
@@ -94,6 +94,15 @@ bool dns_type_is_valid_query(uint16_t type) {
                         * own. After all they are the signatures, and have no signatures of their own validating
                         * them. */
                        DNS_TYPE_RRSIG);
+}
+
+bool dns_type_is_zone_transer(uint16_t type) {
+
+        /* Zone transfers, either normal or incremental */
+
+        return IN_SET(type,
+                      DNS_TYPE_AXFR,
+                      DNS_TYPE_IXFR);
 }
 
 bool dns_type_is_valid_rr(uint16_t type) {

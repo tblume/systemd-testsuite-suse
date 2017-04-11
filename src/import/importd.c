@@ -141,8 +141,7 @@ static Transfer *transfer_unref(Transfer *t) {
         safe_close(t->stdin_fd);
         safe_close(t->stdout_fd);
 
-        free(t);
-        return NULL;
+        return mfree(t);
 }
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Transfer*, transfer_unref);
@@ -448,12 +447,13 @@ static int transfer_start(Transfer *t) {
                                 safe_close(null_fd);
                 }
 
-                fd_cloexec(STDIN_FILENO, false);
-                fd_cloexec(STDOUT_FILENO, false);
-                fd_cloexec(STDERR_FILENO, false);
+                stdio_unset_cloexec();
 
-                setenv("SYSTEMD_LOG_TARGET", "console-prefixed", 1);
-                setenv("NOTIFY_SOCKET", "/run/systemd/import/notify", 1);
+                if (setenv("SYSTEMD_LOG_TARGET", "console-prefixed", 1) < 0 ||
+                    setenv("NOTIFY_SOCKET", "/run/systemd/import/notify", 1) < 0) {
+                        log_error_errno(errno, "setenv() failed: %m");
+                        _exit(EXIT_FAILURE);
+                }
 
                 if (IN_SET(t->type, TRANSFER_IMPORT_TAR, TRANSFER_IMPORT_RAW))
                         cmd[k++] = SYSTEMD_IMPORT_PATH;
@@ -550,8 +550,7 @@ static Manager *manager_unref(Manager *m) {
         m->bus = sd_bus_flush_close_unref(m->bus);
         sd_event_unref(m->event);
 
-        free(m);
-        return NULL;
+        return mfree(m);
 }
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(Manager*, manager_unref);

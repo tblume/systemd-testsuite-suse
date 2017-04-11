@@ -148,9 +148,7 @@ _public_ sd_ndisc *sd_ndisc_unref(sd_ndisc *nd) {
 
         ndisc_reset(nd);
         sd_ndisc_detach_event(nd);
-        free(nd);
-
-        return NULL;
+        return mfree(nd);
 }
 
 _public_ int sd_ndisc_new(sd_ndisc **ret) {
@@ -307,7 +305,7 @@ static int ndisc_recv(sd_event_source *s, int fd, uint32_t revents, void *userda
                 if (cmsg->cmsg_level == SOL_SOCKET &&
                     cmsg->cmsg_type == SO_TIMESTAMP &&
                     cmsg->cmsg_len == CMSG_LEN(sizeof(struct timeval)))
-                        triple_timestamp_from_realtime(&rt->timestamp, timeval_load(CMSG_DATA(cmsg)));
+                        triple_timestamp_from_realtime(&rt->timestamp, timeval_load((struct timeval*) CMSG_DATA(cmsg)));
         }
 
         if (!triple_timestamp_is_set(&rt->timestamp))

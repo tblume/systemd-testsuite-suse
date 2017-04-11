@@ -26,6 +26,7 @@
 #include "compress.h"
 #include "fd-util.h"
 #include "fileio.h"
+#include "fs-util.h"
 #include "journal-authenticate.h"
 #include "journal-def.h"
 #include "journal-file.h"
@@ -117,6 +118,11 @@ static void flush_progress(void) {
                 log_error(OFSfmt": " _fmt, (uint64_t)_offset, ##__VA_ARGS__); \
         } while (0)
 
+#define error_errno(_offset, error, _fmt, ...) do {               \
+                flush_progress();                                       \
+                log_error_errno(error, OFSfmt": " _fmt, (uint64_t)_offset, ##__VA_ARGS__); \
+        } while (0)
+
 static int journal_file_object_verify(JournalFile *f, uint64_t offset, Object *o) {
         uint64_t i;
 
@@ -167,8 +173,8 @@ static int journal_file_object_verify(JournalFile *f, uint64_t offset, Object *o
                                             le64toh(o->object.size) - offsetof(Object, data.payload),
                                             &b, &alloc, &b_size, 0);
                         if (r < 0) {
-                                error(offset, "%s decompression failed: %s",
-                                      object_compressed_to_string(compression), strerror(-r));
+                                error_errno(offset, r, "%s decompression failed: %m",
+                                            object_compressed_to_string(compression));
                                 return r;
                         }
 
@@ -825,6 +831,8 @@ int journal_file_verify(
         int data_fd = -1, entry_fd = -1, entry_array_fd = -1;
         unsigned i;
         bool found_last = false;
+        const char *tmp_dir = NULL;
+
 #ifdef HAVE_GCRYPT
         uint64_t last_tag = 0;
 #endif
@@ -843,19 +851,25 @@ int journal_file_verify(
         } else if (f->seal)
                 return -ENOKEY;
 
-        data_fd = open_tmpfile_unlinkable("/var/tmp", O_RDWR | O_CLOEXEC);
+        r = var_tmp_dir(&tmp_dir);
+        if (r < 0) {
+                log_error_errno(r, "Failed to determine temporary directory: %m");
+                goto fail;
+        }
+
+        data_fd = open_tmpfile_unlinkable(tmp_dir, O_RDWR | O_CLOEXEC);
         if (data_fd < 0) {
                 r = log_error_errno(data_fd, "Failed to create data file: %m");
                 goto fail;
         }
 
-        entry_fd = open_tmpfile_unlinkable("/var/tmp", O_RDWR | O_CLOEXEC);
+        entry_fd = open_tmpfile_unlinkable(tmp_dir, O_RDWR | O_CLOEXEC);
         if (entry_fd < 0) {
                 r = log_error_errno(entry_fd, "Failed to create entry file: %m");
                 goto fail;
         }
 
-        entry_array_fd = open_tmpfile_unlinkable("/var/tmp", O_RDWR | O_CLOEXEC);
+        entry_array_fd = open_tmpfile_unlinkable(tmp_dir, O_RDWR | O_CLOEXEC);
         if (entry_array_fd < 0) {
                 r = log_error_errno(entry_array_fd,
                                     "Failed to create entry array file: %m");
@@ -903,7 +917,7 @@ int journal_file_verify(
 
                 r = journal_file_object_verify(f, p, o);
                 if (r < 0) {
-                        error(p, "Invalid object contents: %s", strerror(-r));
+                        error_errno(p, r, "Invalid object contents: %m");
                         goto fail;
                 }
 

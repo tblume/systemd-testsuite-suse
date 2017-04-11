@@ -107,7 +107,7 @@
         <listitem>
           <para>A whitespace-separated list of shell-style globs matching
           the device name, as exposed by the udev property
-          "INTERFACE". This can not be used to match on names that have
+          "INTERFACE". This cannot be used to match on names that have
           already been changed from userspace. Caution is advised when matching on
           kernel-assigned names, as they are known to be unstable
           between reboots.</para>
@@ -359,6 +359,20 @@
         </listitem>
       </varlistentry>
       <varlistentry>
+        <term><varname>AutoNegotiation=</varname></term>
+        <listitem>
+          <para>Enables or disables automatic negotiation of transmission parameters.
+          Autonegotiation is a procedure by which two connected ethernet devices choose
+          common transmission parameters, such as speed, duplex mode, and flow control.
+          Takes a boolean value. Unset by default, which means that the kernel default
+          will be used.</para>
+
+          <para>Note that if autonegotiation is enabled, speed and duplex settings are
+          read-only. If autonegotation is disabled, speed and duplex settings are writable
+          if the driver supports multiple link modes.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
         <term><varname>WakeOnLan=</varname></term>
         <listitem>
           <para>The Wake-on-LAN policy to set for the device. The
@@ -385,6 +399,46 @@
               </listitem>
             </varlistentry>
           </variablelist>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>TCPSegmentationOffload=</varname></term>
+        <listitem>
+          <para>The TCP Segmentation Offload (TSO) when true enables
+          TCP segmentation offload. Takes a boolean value.
+          Defaults to "unset".</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>GenericSegmentationOffload=</varname></term>
+        <listitem>
+          <para>The Generic Segmentation Offload (GSO) when true enables
+          generic segmentation offload. Takes a boolean value.
+          Defaults to "unset".</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>UDPSegmentationOffload=</varname></term>
+        <listitem>
+          <para>The UDP Segmentation Offload (USO) when true enables
+          UDP segmentation offload. Takes a boolean value.
+          Defaults to "unset".</para>
+        </listitem>
+      </varlistentry>
+    <varlistentry>
+        <term><varname>GenericReceiveOffload=</varname></term>
+        <listitem>
+          <para>The Generic Receive Offload (GRO) when true enables
+          generic receive offload. Takes a boolean value.
+          Defaults to "unset".</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>LargeReceiveOffload=</varname></term>
+        <listitem>
+          <para>The Large Receive Offload (LRO) when true enables
+          large receive offload. Takes a boolean value.
+          Defaults to "unset".</para>
         </listitem>
       </varlistentry>
     </variablelist>

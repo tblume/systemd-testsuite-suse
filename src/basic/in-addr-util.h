@@ -37,17 +37,24 @@ struct in_addr_data {
 };
 
 bool in4_addr_is_null(const struct in_addr *a);
-bool in6_addr_is_null(const struct in6_addr *a);
-
 int in_addr_is_null(int family, const union in_addr_union *u);
+
+int in_addr_is_multicast(int family, const union in_addr_union *u);
+
+bool in4_addr_is_link_local(const struct in_addr *a);
 int in_addr_is_link_local(int family, const union in_addr_union *u);
+
+bool in4_addr_is_localhost(const struct in_addr *a);
 int in_addr_is_localhost(int family, const union in_addr_union *u);
+
 int in_addr_equal(int family, const union in_addr_union *a, const union in_addr_union *b);
 int in_addr_prefix_intersect(int family, const union in_addr_union *a, unsigned aprefixlen, const union in_addr_union *b, unsigned bprefixlen);
 int in_addr_prefix_next(int family, union in_addr_union *u, unsigned prefixlen);
 int in_addr_to_string(int family, const union in_addr_union *u, char **ret);
+int in_addr_ifindex_to_string(int family, const union in_addr_union *u, int ifindex, char **ret);
 int in_addr_from_string(int family, const char *s, union in_addr_union *ret);
 int in_addr_from_string_auto(const char *s, int *family, union in_addr_union *ret);
+int in_addr_ifindex_from_string_auto(const char *s, int *family, union in_addr_union *ret, int *ifindex);
 unsigned char in_addr_netmask_to_prefixlen(const struct in_addr *addr);
 struct in_addr* in_addr_prefixlen_to_netmask(struct in_addr *addr, unsigned char prefixlen);
 int in_addr_default_prefixlen(const struct in_addr *addr, unsigned char *prefixlen);

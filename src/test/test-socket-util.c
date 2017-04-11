@@ -92,6 +92,14 @@ static void test_socket_address_parse(void) {
 
         assert_se(socket_address_parse(&a, "@abstract") >= 0);
         assert_se(a.sockaddr.sa.sa_family == AF_UNIX);
+
+        assert_se(socket_address_parse(&a, "vsock::1234") >= 0);
+        assert_se(a.sockaddr.sa.sa_family == AF_VSOCK);
+        assert_se(socket_address_parse(&a, "vsock:2:1234") >= 0);
+        assert_se(a.sockaddr.sa.sa_family == AF_VSOCK);
+        assert_se(socket_address_parse(&a, "vsock:2:1234x") < 0);
+        assert_se(socket_address_parse(&a, "vsock:2x:1234") < 0);
+        assert_se(socket_address_parse(&a, "vsock:2") < 0);
 }
 
 static void test_socket_address_parse_netlink(void) {
@@ -145,6 +153,14 @@ static void test_socket_address_equal(void) {
         assert_se(socket_address_parse_netlink(&a, "firewall") >= 0);
         assert_se(socket_address_parse_netlink(&b, "firewall") >= 0);
         assert_se(socket_address_equal(&a, &b));
+
+        assert_se(socket_address_parse(&a, "vsock:2:1234") >= 0);
+        assert_se(socket_address_parse(&b, "vsock:2:1234") >= 0);
+        assert_se(socket_address_equal(&a, &b));
+        assert_se(socket_address_parse(&b, "vsock:2:1235") >= 0);
+        assert_se(!socket_address_equal(&a, &b));
+        assert_se(socket_address_parse(&b, "vsock:3:1234") >= 0);
+        assert_se(!socket_address_equal(&a, &b));
 }
 
 static void test_socket_address_get_path(void) {
@@ -161,6 +177,9 @@ static void test_socket_address_get_path(void) {
 
         assert_se(socket_address_parse(&a, "/foo/bar") >= 0);
         assert_se(streq(socket_address_get_path(&a), "/foo/bar"));
+
+        assert_se(socket_address_parse(&a, "vsock:2:1234") >= 0);
+        assert_se(!socket_address_get_path(&a));
 }
 
 static void test_socket_address_is(void) {
@@ -286,6 +305,55 @@ static void test_in_addr_to_string(void) {
         test_in_addr_to_string_one(AF_INET6, "fe80::");
 }
 
+static void test_in_addr_ifindex_to_string_one(int f, const char *a, int ifindex, const char *b) {
+        _cleanup_free_ char *r = NULL;
+        union in_addr_union ua, uuaa;
+        int ff, ifindex2;
+
+        assert_se(in_addr_from_string(f, a, &ua) >= 0);
+        assert_se(in_addr_ifindex_to_string(f, &ua, ifindex, &r) >= 0);
+        printf("test_in_addr_ifindex_to_string_one: %s == %s\n", b, r);
+        assert_se(streq(b, r));
+
+        assert_se(in_addr_ifindex_from_string_auto(b, &ff, &uuaa, &ifindex2) >= 0);
+        assert_se(ff == f);
+        assert_se(in_addr_equal(f, &ua, &uuaa));
+        assert_se(ifindex2 == ifindex || ifindex2 == 0);
+}
+
+static void test_in_addr_ifindex_to_string(void) {
+        test_in_addr_ifindex_to_string_one(AF_INET, "192.168.0.1", 7, "192.168.0.1");
+        test_in_addr_ifindex_to_string_one(AF_INET, "10.11.12.13", 9, "10.11.12.13");
+        test_in_addr_ifindex_to_string_one(AF_INET6, "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 10, "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff");
+        test_in_addr_ifindex_to_string_one(AF_INET6, "::1", 11, "::1");
+        test_in_addr_ifindex_to_string_one(AF_INET6, "fe80::", 12, "fe80::%12");
+        test_in_addr_ifindex_to_string_one(AF_INET6, "fe80::", 0, "fe80::");
+        test_in_addr_ifindex_to_string_one(AF_INET6, "fe80::14", 12, "fe80::14%12");
+        test_in_addr_ifindex_to_string_one(AF_INET6, "fe80::15", -7, "fe80::15");
+        test_in_addr_ifindex_to_string_one(AF_INET6, "fe80::16", LOOPBACK_IFINDEX, "fe80::16%1");
+}
+
+static void test_in_addr_ifindex_from_string_auto(void) {
+        int family, ifindex;
+        union in_addr_union ua;
+
+        /* Most in_addr_ifindex_from_string_auto() invocations have already been tested above, but let's test some more */
+
+        assert_se(in_addr_ifindex_from_string_auto("fe80::17", &family, &ua, &ifindex) >= 0);
+        assert_se(family == AF_INET6);
+        assert_se(ifindex == 0);
+
+        assert_se(in_addr_ifindex_from_string_auto("fe80::18%19", &family, &ua, &ifindex) >= 0);
+        assert_se(family == AF_INET6);
+        assert_se(ifindex == 19);
+
+        assert_se(in_addr_ifindex_from_string_auto("fe80::18%lo", &family, &ua, &ifindex) >= 0);
+        assert_se(family == AF_INET6);
+        assert_se(ifindex == LOOPBACK_IFINDEX);
+
+        assert_se(in_addr_ifindex_from_string_auto("fe80::19%thisinterfacecantexist", &family, &ua, &ifindex) == -ENODEV);
+}
+
 static void *connect_thread(void *arg) {
         union sockaddr_union *sa = arg;
         _cleanup_close_ int fd = -1;
@@ -304,7 +372,7 @@ static void test_nameinfo_pretty(void) {
         union sockaddr_union s = {
                 .in.sin_family = AF_INET,
                 .in.sin_port = 0,
-                .in.sin_addr.s_addr = htonl(INADDR_ANY),
+                .in.sin_addr.s_addr = htobe32(INADDR_ANY),
         };
         int r;
 
@@ -342,28 +410,35 @@ static void test_sockaddr_equal(void) {
         union sockaddr_union a = {
                 .in.sin_family = AF_INET,
                 .in.sin_port = 0,
-                .in.sin_addr.s_addr = htonl(INADDR_ANY),
+                .in.sin_addr.s_addr = htobe32(INADDR_ANY),
         };
         union sockaddr_union b = {
                 .in.sin_family = AF_INET,
                 .in.sin_port = 0,
-                .in.sin_addr.s_addr = htonl(INADDR_ANY),
+                .in.sin_addr.s_addr = htobe32(INADDR_ANY),
         };
         union sockaddr_union c = {
                 .in.sin_family = AF_INET,
                 .in.sin_port = 0,
-                .in.sin_addr.s_addr = htonl(1234),
+                .in.sin_addr.s_addr = htobe32(1234),
         };
         union sockaddr_union d = {
                 .in6.sin6_family = AF_INET6,
                 .in6.sin6_port = 0,
                 .in6.sin6_addr = IN6ADDR_ANY_INIT,
         };
+        union sockaddr_union e = {
+                .vm.svm_family = AF_VSOCK,
+                .vm.svm_port = 0,
+                .vm.svm_cid = VMADDR_CID_ANY,
+        };
         assert_se(sockaddr_equal(&a, &a));
         assert_se(sockaddr_equal(&a, &b));
         assert_se(sockaddr_equal(&d, &d));
+        assert_se(sockaddr_equal(&e, &e));
         assert_se(!sockaddr_equal(&a, &c));
         assert_se(!sockaddr_equal(&b, &c));
+        assert_se(!sockaddr_equal(&a, &e));
 }
 
 static void test_sockaddr_un_len(void) {
@@ -379,6 +454,23 @@ static void test_sockaddr_un_len(void) {
 
         assert_se(SOCKADDR_UN_LEN(fs) == offsetof(struct sockaddr_un, sun_path) + strlen(fs.sun_path));
         assert_se(SOCKADDR_UN_LEN(abstract) == offsetof(struct sockaddr_un, sun_path) + 1 + strlen(abstract.sun_path + 1));
+}
+
+static void test_in_addr_is_multicast(void) {
+        union in_addr_union a, b;
+        int f;
+
+        assert_se(in_addr_from_string_auto("192.168.3.11", &f, &a) >= 0);
+        assert_se(in_addr_is_multicast(f, &a) == 0);
+
+        assert_se(in_addr_from_string_auto("224.0.0.1", &f, &a) >= 0);
+        assert_se(in_addr_is_multicast(f, &a) == 1);
+
+        assert_se(in_addr_from_string_auto("FF01:0:0:0:0:0:0:1", &f, &b) >= 0);
+        assert_se(in_addr_is_multicast(f, &b) == 1);
+
+        assert_se(in_addr_from_string_auto("2001:db8::c:69b:aeff:fe53:743e", &f, &b) >= 0);
+        assert_se(in_addr_is_multicast(f, &b) == 0);
 }
 
 int main(int argc, char *argv[]) {
@@ -398,12 +490,16 @@ int main(int argc, char *argv[]) {
         test_in_addr_prefix_intersect();
         test_in_addr_prefix_next();
         test_in_addr_to_string();
+        test_in_addr_ifindex_to_string();
+        test_in_addr_ifindex_from_string_auto();
 
         test_nameinfo_pretty();
 
         test_sockaddr_equal();
 
         test_sockaddr_un_len();
+
+        test_in_addr_is_multicast();
 
         return 0;
 }

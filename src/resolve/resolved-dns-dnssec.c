@@ -1303,7 +1303,7 @@ static int nsec3_hashed_domain_format(const uint8_t *hashed, size_t hashed_size,
         if (!l)
                 return -ENOMEM;
 
-        j = strjoin(l, ".", zone, NULL);
+        j = strjoin(l, ".", zone);
         if (!j)
                 return -ENOMEM;
 
@@ -1642,7 +1642,7 @@ static int dnssec_nsec_in_path(DnsResourceRecord *rr, const char *name) {
         if (r <= 0)
                 return r;
 
-        /* If the name we we are interested in is not a prefix of the common suffix of the NSEC RR's owner and next domain names, then we can't say anything either. */
+        /* If the name we are interested in is not a prefix of the common suffix of the NSEC RR's owner and next domain names, then we can't say anything either. */
         r = dns_name_common_suffix(dns_resource_key_name(rr->key), rr->nsec.next_domain_name, &common_suffix);
         if (r < 0)
                 return r;
@@ -1710,7 +1710,8 @@ static int dnssec_nsec_covers(DnsResourceRecord *rr, const char *name) {
 }
 
 static int dnssec_nsec_covers_wildcard(DnsResourceRecord *rr, const char *name) {
-        const char *common_suffix, *wc;
+        _cleanup_free_ char *wc = NULL;
+        const char *common_suffix;
         int r;
 
         assert(rr);
@@ -1734,7 +1735,10 @@ static int dnssec_nsec_covers_wildcard(DnsResourceRecord *rr, const char *name) 
         if (r <= 0)
                 return r;
 
-        wc = strjoina("*.", common_suffix);
+        r = dns_name_concat("*", common_suffix, &wc);
+        if (r < 0)
+                return r;
+
         return dns_name_between(dns_resource_key_name(rr->key), wc, rr->nsec.next_domain_name);
 }
 

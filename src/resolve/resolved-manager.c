@@ -23,6 +23,7 @@
 
 #include "af-list.h"
 #include "alloc-util.h"
+#include "dirent-util.h"
 #include "dns-domain.h"
 #include "fd-util.h"
 #include "fileio-label.h"
@@ -35,6 +36,7 @@
 #include "random-util.h"
 #include "resolved-bus.h"
 #include "resolved-conf.h"
+#include "resolved-dns-stub.h"
 #include "resolved-etc-hosts.h"
 #include "resolved-llmnr.h"
 #include "resolved-manager.h"
@@ -78,11 +80,11 @@ static int manager_process_link(sd_netlink *rtnl, sd_netlink_message *mm, void *
                                 goto fail;
                 }
 
-                r = link_update_rtnl(l, mm);
+                r = link_process_rtnl(l, mm);
                 if (r < 0)
                         goto fail;
 
-                r = link_update_monitor(l);
+                r = link_update(l);
                 if (r < 0)
                         goto fail;
 
@@ -95,6 +97,7 @@ static int manager_process_link(sd_netlink *rtnl, sd_netlink_message *mm, void *
         case RTM_DELLINK:
                 if (l) {
                         log_debug("Removing link %i/%s", l->ifindex, l->name);
+                        link_remove_user(l);
                         link_free(l);
                 }
 
@@ -279,14 +282,12 @@ static int on_network_event(sd_event_source *s, int fd, uint32_t revents, void *
         sd_network_monitor_flush(m->network_monitor);
 
         HASHMAP_FOREACH(l, m->links, i) {
-                r = link_update_monitor(l);
+                r = link_update(l);
                 if (r < 0)
                         log_warning_errno(r, "Failed to update monitor information for %i: %m", l->ifindex);
         }
 
-        r = manager_write_resolv_conf(m);
-        if (r < 0)
-                log_warning_errno(r, "Could not update "PRIVATE_RESOLV_CONF": %m");
+        (void) manager_write_resolv_conf(m);
 
         return 0;
 }
@@ -321,28 +322,28 @@ static int manager_network_monitor_listen(Manager *m) {
         return 0;
 }
 
-static int determine_hostname(char **llmnr_hostname, char **mdns_hostname) {
+static int determine_hostname(char **full_hostname, char **llmnr_hostname, char **mdns_hostname) {
         _cleanup_free_ char *h = NULL, *n = NULL;
         char label[DNS_LABEL_MAX];
         const char *p;
         int r, k;
 
+        assert(full_hostname);
         assert(llmnr_hostname);
         assert(mdns_hostname);
 
-        /* Extract and normalize the first label of the locally
-         * configured hostname, and check it's not "localhost". */
+        /* Extract and normalize the first label of the locally configured hostname, and check it's not "localhost". */
 
-        h = gethostname_malloc();
-        if (!h)
-                return log_oom();
+        r = gethostname_strict(&h);
+        if (r < 0)
+                return log_debug_errno(r, "Can't determine system hostname: %m");
 
         p = h;
         r = dns_label_unescape(&p, label, sizeof(label));
         if (r < 0)
                 return log_error_errno(r, "Failed to unescape host name: %m");
         if (r == 0) {
-                log_error("Couldn't find a single label in hosntame.");
+                log_error("Couldn't find a single label in hostname.");
                 return -EINVAL;
         }
 
@@ -373,32 +374,84 @@ static int determine_hostname(char **llmnr_hostname, char **mdns_hostname) {
         *llmnr_hostname = n;
         n = NULL;
 
+        *full_hostname = h;
+        h = NULL;
+
+        return 0;
+}
+
+static const char *fallback_hostname(void) {
+
+        /* Determine the fall back hostname. For exposing this system to the outside world, we cannot have it to be
+         * "localhost" even if that's the compiled in hostname. In this case, let's revert to "linux" instead. */
+
+        if (is_localhost(FALLBACK_HOSTNAME))
+                return "linux";
+
+        return FALLBACK_HOSTNAME;
+}
+
+static int make_fallback_hostnames(char **full_hostname, char **llmnr_hostname, char **mdns_hostname) {
+        _cleanup_free_ char *n = NULL, *m = NULL;
+        char label[DNS_LABEL_MAX], *h;
+        const char *p;
+        int r;
+
+        assert(full_hostname);
+        assert(llmnr_hostname);
+        assert(mdns_hostname);
+
+        p = fallback_hostname();
+        r = dns_label_unescape(&p, label, sizeof(label));
+        if (r < 0)
+                return log_error_errno(r, "Failed to unescape fallback host name: %m");
+
+        assert(r > 0); /* The fallback hostname must have at least one label */
+
+        r = dns_label_escape_new(label, r, &n);
+        if (r < 0)
+                return log_error_errno(r, "Failed to escape fallback hostname: %m");
+
+        r = dns_name_concat(n, "local", &m);
+        if (r < 0)
+                return log_error_errno(r, "Failed to concatenate mDNS hostname: %m");
+
+        h = strdup(fallback_hostname());
+        if (!h)
+                return log_oom();
+
+        *llmnr_hostname = n;
+        n = NULL;
+
+        *mdns_hostname = m;
+        m = NULL;
+
+        *full_hostname = h;
+
         return 0;
 }
 
 static int on_hostname_change(sd_event_source *es, int fd, uint32_t revents, void *userdata) {
-        _cleanup_free_ char *llmnr_hostname = NULL, *mdns_hostname = NULL;
+        _cleanup_free_ char *full_hostname = NULL, *llmnr_hostname = NULL, *mdns_hostname = NULL;
         Manager *m = userdata;
         int r;
 
         assert(m);
 
-        r = determine_hostname(&llmnr_hostname, &mdns_hostname);
+        r = determine_hostname(&full_hostname, &llmnr_hostname, &mdns_hostname);
         if (r < 0)
                 return 0; /* ignore invalid hostnames */
 
-        if (streq(llmnr_hostname, m->llmnr_hostname) && streq(mdns_hostname, m->mdns_hostname))
+        if (streq(full_hostname, m->full_hostname) &&
+            streq(llmnr_hostname, m->llmnr_hostname) &&
+            streq(mdns_hostname, m->mdns_hostname))
                 return 0;
 
-        log_info("System hostname changed to '%s'.", llmnr_hostname);
+        log_info("System hostname changed to '%s'.", full_hostname);
 
-        free(m->llmnr_hostname);
-        free(m->mdns_hostname);
-
-        m->llmnr_hostname = llmnr_hostname;
-        m->mdns_hostname = mdns_hostname;
-
-        llmnr_hostname = mdns_hostname = NULL;
+        free_and_replace(m->full_hostname, full_hostname);
+        free_and_replace(m->llmnr_hostname, llmnr_hostname);
+        free_and_replace(m->mdns_hostname, mdns_hostname);
 
         manager_refresh_rrs(m);
 
@@ -427,18 +480,15 @@ static int manager_watch_hostname(Manager *m) {
 
         (void) sd_event_source_set_description(m->hostname_event_source, "hostname");
 
-        r = determine_hostname(&m->llmnr_hostname, &m->mdns_hostname);
+        r = determine_hostname(&m->full_hostname, &m->llmnr_hostname, &m->mdns_hostname);
         if (r < 0) {
-                log_info("Defaulting to hostname 'linux'.");
-                m->llmnr_hostname = strdup("linux");
-                if (!m->llmnr_hostname)
-                        return log_oom();
+                log_info("Defaulting to hostname '%s'.", fallback_hostname());
 
-                m->mdns_hostname = strdup("linux.local");
-                if (!m->mdns_hostname)
-                        return log_oom();
+                r = make_fallback_hostnames(&m->full_hostname, &m->llmnr_hostname, &m->mdns_hostname);
+                if (r < 0)
+                        return r;
         } else
-                log_info("Using system hostname '%s'.", m->llmnr_hostname);
+                log_info("Using system hostname '%s'.", m->full_hostname);
 
         return 0;
 }
@@ -468,6 +518,18 @@ static int manager_sigusr1(sd_event_source *s, const struct signalfd_siginfo *si
         return 0;
 }
 
+static int manager_sigusr2(sd_event_source *s, const struct signalfd_siginfo *si, void *userdata) {
+        Manager *m = userdata;
+
+        assert(s);
+        assert(si);
+        assert(m);
+
+        manager_flush_caches(m);
+
+        return 0;
+}
+
 int manager_new(Manager **ret) {
         _cleanup_(manager_freep) Manager *m = NULL;
         int r;
@@ -481,11 +543,14 @@ int manager_new(Manager **ret) {
         m->llmnr_ipv4_udp_fd = m->llmnr_ipv6_udp_fd = -1;
         m->llmnr_ipv4_tcp_fd = m->llmnr_ipv6_tcp_fd = -1;
         m->mdns_ipv4_fd = m->mdns_ipv6_fd = -1;
+        m->dns_stub_udp_fd = m->dns_stub_tcp_fd = -1;
         m->hostname_fd = -1;
 
         m->llmnr_support = RESOLVE_SUPPORT_YES;
-        m->mdns_support = RESOLVE_SUPPORT_NO;
+        m->mdns_support = RESOLVE_SUPPORT_YES;
         m->dnssec_mode = DEFAULT_DNSSEC_MODE;
+        m->enable_cache = true;
+        m->dns_stub_listener_mode = DNS_STUB_LISTENER_UDP;
         m->read_resolv_conf = true;
         m->need_builtin_fallbacks = true;
         m->etc_hosts_last = m->etc_hosts_mtime = USEC_INFINITY;
@@ -528,6 +593,9 @@ int manager_new(Manager **ret) {
                 return r;
 
         (void) sd_event_add_signal(m->event, &m->sigusr1_event_source, SIGUSR1, manager_sigusr1, m);
+        (void) sd_event_add_signal(m->event, &m->sigusr2_event_source, SIGUSR2, manager_sigusr2, m);
+
+        manager_cleanup_saved_user(m);
 
         *ret = m;
         m = NULL;
@@ -539,6 +607,10 @@ int manager_start(Manager *m) {
         int r;
 
         assert(m);
+
+        r = manager_dns_stub_start(m);
+        if (r < 0)
+                return r;
 
         r = manager_llmnr_start(m);
         if (r < 0)
@@ -569,6 +641,11 @@ Manager *manager_free(Manager *m) {
 
         dns_scope_free(m->unicast_scope);
 
+        /* At this point only orphaned streams should remain. All others should have been freed already by their
+         * owners */
+        while (m->dns_streams)
+                dns_stream_unref(m->dns_streams);
+
         hashmap_free(m->links);
         hashmap_free(m->dns_transactions);
 
@@ -580,29 +657,33 @@ Manager *manager_free(Manager *m) {
 
         manager_llmnr_stop(m);
         manager_mdns_stop(m);
+        manager_dns_stub_stop(m);
 
         sd_bus_slot_unref(m->prepare_for_sleep_slot);
         sd_event_source_unref(m->bus_retry_event_source);
         sd_bus_unref(m->bus);
 
         sd_event_source_unref(m->sigusr1_event_source);
+        sd_event_source_unref(m->sigusr2_event_source);
 
         sd_event_unref(m->event);
 
         dns_resource_key_unref(m->llmnr_host_ipv4_key);
         dns_resource_key_unref(m->llmnr_host_ipv6_key);
+        dns_resource_key_unref(m->mdns_host_ipv4_key);
+        dns_resource_key_unref(m->mdns_host_ipv6_key);
 
         sd_event_source_unref(m->hostname_event_source);
         safe_close(m->hostname_fd);
+
+        free(m->full_hostname);
         free(m->llmnr_hostname);
         free(m->mdns_hostname);
 
         dns_trust_anchor_flush(&m->trust_anchor);
         manager_etc_hosts_flush(m);
 
-        free(m);
-
-        return NULL;
+        return mfree(m);
 }
 
 int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
@@ -793,7 +874,14 @@ int manager_write(Manager *m, int fd, DnsPacket *p) {
         return 0;
 }
 
-static int manager_ipv4_send(Manager *m, int fd, int ifindex, const struct in_addr *addr, uint16_t port, DnsPacket *p) {
+static int manager_ipv4_send(
+                Manager *m,
+                int fd,
+                int ifindex,
+                const struct in_addr *destination,
+                uint16_t port,
+                const struct in_addr *source,
+                DnsPacket *p) {
         union sockaddr_union sa = {
                 .in.sin_family = AF_INET,
         };
@@ -806,14 +894,14 @@ static int manager_ipv4_send(Manager *m, int fd, int ifindex, const struct in_ad
 
         assert(m);
         assert(fd >= 0);
-        assert(addr);
+        assert(destination);
         assert(port > 0);
         assert(p);
 
         iov.iov_base = DNS_PACKET_DATA(p);
         iov.iov_len = p->size;
 
-        sa.in.sin_addr = *addr;
+        sa.in.sin_addr = *destination;
         sa.in.sin_port = htobe16(port),
 
         mh.msg_iov = &iov;
@@ -837,12 +925,23 @@ static int manager_ipv4_send(Manager *m, int fd, int ifindex, const struct in_ad
 
                 pi = (struct in_pktinfo*) CMSG_DATA(cmsg);
                 pi->ipi_ifindex = ifindex;
+
+                if (source)
+                        pi->ipi_spec_dst = *source;
         }
 
         return sendmsg_loop(fd, &mh, 0);
 }
 
-static int manager_ipv6_send(Manager *m, int fd, int ifindex, const struct in6_addr *addr, uint16_t port, DnsPacket *p) {
+static int manager_ipv6_send(
+                Manager *m,
+                int fd,
+                int ifindex,
+                const struct in6_addr *destination,
+                uint16_t port,
+                const struct in6_addr *source,
+                DnsPacket *p) {
+
         union sockaddr_union sa = {
                 .in6.sin6_family = AF_INET6,
         };
@@ -855,14 +954,14 @@ static int manager_ipv6_send(Manager *m, int fd, int ifindex, const struct in6_a
 
         assert(m);
         assert(fd >= 0);
-        assert(addr);
+        assert(destination);
         assert(port > 0);
         assert(p);
 
         iov.iov_base = DNS_PACKET_DATA(p);
         iov.iov_len = p->size;
 
-        sa.in6.sin6_addr = *addr;
+        sa.in6.sin6_addr = *destination;
         sa.in6.sin6_port = htobe16(port),
         sa.in6.sin6_scope_id = ifindex;
 
@@ -887,24 +986,36 @@ static int manager_ipv6_send(Manager *m, int fd, int ifindex, const struct in6_a
 
                 pi = (struct in6_pktinfo*) CMSG_DATA(cmsg);
                 pi->ipi6_ifindex = ifindex;
+
+                if (source)
+                        pi->ipi6_addr = *source;
         }
 
         return sendmsg_loop(fd, &mh, 0);
 }
 
-int manager_send(Manager *m, int fd, int ifindex, int family, const union in_addr_union *addr, uint16_t port, DnsPacket *p) {
+int manager_send(
+                Manager *m,
+                int fd,
+                int ifindex,
+                int family,
+                const union in_addr_union *destination,
+                uint16_t port,
+                const union in_addr_union *source,
+                DnsPacket *p) {
+
         assert(m);
         assert(fd >= 0);
-        assert(addr);
+        assert(destination);
         assert(port > 0);
         assert(p);
 
         log_debug("Sending %s packet with id %" PRIu16 " on interface %i/%s.", DNS_PACKET_QR(p) ? "response" : "query", DNS_PACKET_ID(p), ifindex, af_to_name(family));
 
         if (family == AF_INET)
-                return manager_ipv4_send(m, fd, ifindex, &addr->in, port, p);
-        else if (family == AF_INET6)
-                return manager_ipv6_send(m, fd, ifindex, &addr->in6, port, p);
+                return manager_ipv4_send(m, fd, ifindex, &destination->in, port, &source->in, p);
+        if (family == AF_INET6)
+                return manager_ipv6_send(m, fd, ifindex, &destination->in6, port, &source->in6, p);
 
         return -EAFNOSUPPORT;
 }
@@ -949,6 +1060,8 @@ void manager_refresh_rrs(Manager *m) {
 
         m->llmnr_host_ipv4_key = dns_resource_key_unref(m->llmnr_host_ipv4_key);
         m->llmnr_host_ipv6_key = dns_resource_key_unref(m->llmnr_host_ipv6_key);
+        m->mdns_host_ipv4_key = dns_resource_key_unref(m->mdns_host_ipv4_key);
+        m->mdns_host_ipv6_key = dns_resource_key_unref(m->mdns_host_ipv6_key);
 
         HASHMAP_FOREACH(l, m->links, i) {
                 link_add_rrs(l, true);
@@ -1088,8 +1201,14 @@ int manager_is_own_hostname(Manager *m, const char *name) {
                         return r;
         }
 
-        if (m->mdns_hostname)
-                return dns_name_equal(name, m->mdns_hostname);
+        if (m->mdns_hostname) {
+                r = dns_name_equal(name, m->mdns_hostname);
+                if (r != 0)
+                        return r;
+        }
+
+        if (m->full_hostname)
+                return dns_name_equal(name, m->full_hostname);
 
         return 0;
 }
@@ -1141,7 +1260,12 @@ int manager_compile_dns_servers(Manager *m, OrderedSet **dns) {
         return 0;
 }
 
-int manager_compile_search_domains(Manager *m, OrderedSet **domains) {
+/* filter_route is a tri-state:
+ *   < 0: no filtering
+ *   = 0 or false: return only domains which should be used for searching
+ *   > 0 or true: return only domains which are for routing only
+ */
+int manager_compile_search_domains(Manager *m, OrderedSet **domains, int filter_route) {
         DnsSearchDomain *d;
         Iterator i;
         Link *l;
@@ -1155,6 +1279,11 @@ int manager_compile_search_domains(Manager *m, OrderedSet **domains) {
                 return r;
 
         LIST_FOREACH(domains, d, m->search_domains) {
+
+                if (filter_route >= 0 &&
+                    d->route_only != !!filter_route)
+                        continue;
+
                 r = ordered_set_put(*domains, d->name);
                 if (r == -EEXIST)
                         continue;
@@ -1165,6 +1294,11 @@ int manager_compile_search_domains(Manager *m, OrderedSet **domains) {
         HASHMAP_FOREACH(l, m->links, i) {
 
                 LIST_FOREACH(domains, d, l->search_domains) {
+
+                        if (filter_route >= 0 &&
+                            d->route_only != !!filter_route)
+                                continue;
+
                         r = ordered_set_put(*domains, d->name);
                         if (r == -EEXIST)
                                 continue;
@@ -1235,4 +1369,70 @@ bool manager_routable(Manager *m, int family) {
                         return true;
 
         return false;
+}
+
+void manager_flush_caches(Manager *m) {
+        DnsScope *scope;
+
+        assert(m);
+
+        LIST_FOREACH(scopes, scope, m->dns_scopes)
+                dns_cache_flush(&scope->cache);
+
+        log_info("Flushed all caches.");
+}
+
+void manager_cleanup_saved_user(Manager *m) {
+        _cleanup_closedir_ DIR *d = NULL;
+        struct dirent *de;
+        int r;
+
+        assert(m);
+
+        /* Clean up all saved per-link files in /run/systemd/resolve/netif/ that don't have a matching interface
+         * anymore. These files are created to persist settings pushed in by the user via the bus, so that resolved can
+         * be restarted without losing this data. */
+
+        d = opendir("/run/systemd/resolve/netif/");
+        if (!d) {
+                if (errno == ENOENT)
+                        return;
+
+                log_warning_errno(errno, "Failed to open interface directory: %m");
+                return;
+        }
+
+        FOREACH_DIRENT_ALL(de, d, log_error_errno(errno, "Failed to read interface directory: %m")) {
+                _cleanup_free_ char *p = NULL;
+                int ifindex;
+                Link *l;
+
+                if (!IN_SET(de->d_type, DT_UNKNOWN, DT_REG))
+                        continue;
+
+                if (dot_or_dot_dot(de->d_name))
+                        continue;
+
+                r = parse_ifindex(de->d_name, &ifindex);
+                if (r < 0) /* Probably some temporary file from a previous run. Delete it */
+                        goto rm;
+
+                l = hashmap_get(m->links, INT_TO_PTR(ifindex));
+                if (!l) /* link vanished */
+                        goto rm;
+
+                if (l->is_managed) /* now managed by networkd, hence the bus settings are useless */
+                        goto rm;
+
+                continue;
+
+        rm:
+                p = strappend("/run/systemd/resolve/netif/", de->d_name);
+                if (!p) {
+                        log_oom();
+                        return;
+                }
+
+                (void) unlink(p);
+        }
 }

@@ -10,9 +10,8 @@ Description=Network Service
 Documentation=man:systemd-networkd.service(8)
 ConditionCapability=CAP_NET_ADMIN
 DefaultDependencies=no
-# dbus.service can be dropped once on kdbus, and systemd-udevd.service can be
-# dropped once tuntap is moved to netlink
-After=systemd-udevd.service dbus.service network-pre.target systemd-sysusers.service systemd-sysctl.service
+# systemd-udevd.service can be dropped once tuntap is moved to netlink
+After=systemd-udevd.service network-pre.target systemd-sysusers.service systemd-sysctl.service
 Before=network.target multi-user.target shutdown.target
 Conflicts=shutdown.target
 Wants=network.target
@@ -27,11 +26,18 @@ Type=notify
 Restart=on-failure
 RestartSec=0
 ExecStart=@rootlibexecdir@/systemd-networkd
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_BROADCAST CAP_NET_RAW CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
-ProtectSystem=full
-ProtectHome=yes
 WatchdogSec=3min
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_BROADCAST CAP_NET_RAW CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
 MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6 AF_PACKET
+SystemCallFilter=~@clock @cpu-emulation @debug @keyring @module @mount @obsolete @raw-io @reboot @swap
+SystemCallArchitectures=native
+ReadWritePaths=/run/systemd
 
 [Install]
 WantedBy=multi-user.target

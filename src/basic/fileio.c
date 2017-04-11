@@ -30,6 +30,7 @@
 
 #include "alloc-util.h"
 #include "ctype.h"
+#include "env-util.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -37,6 +38,7 @@
 #include "hexdecoct.h"
 #include "log.h"
 #include "macro.h"
+#include "missing.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "random-util.h"
@@ -46,6 +48,8 @@
 #include "time-util.h"
 #include "umask-util.h"
 #include "utf8.h"
+
+#define READ_FULL_BYTES_MAX (4U*1024U*1024U)
 
 int write_string_stream(FILE *f, const char *line, bool enforce_newline) {
 
@@ -230,7 +234,7 @@ int read_full_stream(FILE *f, char **contents, size_t *size) {
         if (S_ISREG(st.st_mode)) {
 
                 /* Safety check */
-                if (st.st_size > 4*1024*1024)
+                if (st.st_size > READ_FULL_BYTES_MAX)
                         return -E2BIG;
 
                 /* Start with the right file size, but be prepared for
@@ -245,26 +249,31 @@ int read_full_stream(FILE *f, char **contents, size_t *size) {
                 char *t;
                 size_t k;
 
-                t = realloc(buf, n+1);
+                t = realloc(buf, n + 1);
                 if (!t)
                         return -ENOMEM;
 
                 buf = t;
                 k = fread(buf + l, 1, n - l, f);
+                if (k > 0)
+                        l += k;
 
-                if (k <= 0) {
-                        if (ferror(f))
-                                return -errno;
+                if (ferror(f))
+                        return -errno;
 
+                if (feof(f))
                         break;
-                }
 
-                l += k;
-                n *= 2;
+                /* We aren't expecting fread() to return a short read outside
+                 * of (error && eof), assert buffer is full and enlarge buffer.
+                 */
+                assert(l == n);
 
                 /* Safety check */
-                if (n > 4*1024*1024)
+                if (n >= READ_FULL_BYTES_MAX)
                         return -E2BIG;
+
+                n = MIN(n * 2, READ_FULL_BYTES_MAX);
         }
 
         buf[l] = 0;
@@ -545,13 +554,14 @@ static int parse_env_file_internal(
                 }
         }
 
-        if (state == PRE_VALUE ||
-            state == VALUE ||
-            state == VALUE_ESCAPE ||
-            state == SINGLE_QUOTE_VALUE ||
-            state == SINGLE_QUOTE_VALUE_ESCAPE ||
-            state == DOUBLE_QUOTE_VALUE ||
-            state == DOUBLE_QUOTE_VALUE_ESCAPE) {
+        if (IN_SET(state,
+                   PRE_VALUE,
+                   VALUE,
+                   VALUE_ESCAPE,
+                   SINGLE_QUOTE_VALUE,
+                   SINGLE_QUOTE_VALUE_ESCAPE,
+                   DOUBLE_QUOTE_VALUE,
+                   DOUBLE_QUOTE_VALUE_ESCAPE)) {
 
                 key[n_key] = 0;
 
@@ -578,14 +588,9 @@ fail:
         return r;
 }
 
-static int parse_env_file_push(
+static int check_utf8ness_and_warn(
                 const char *filename, unsigned line,
-                const char *key, char *value,
-                void *userdata,
-                int *n_pushed) {
-
-        const char *k;
-        va_list aq, *ap = userdata;
+                const char *key, char *value) {
 
         if (!utf8_is_valid(key)) {
                 _cleanup_free_ char *p = NULL;
@@ -602,6 +607,23 @@ static int parse_env_file_push(
                 log_error("%s:%u: invalid UTF-8 value for key %s: '%s', ignoring.", strna(filename), line, key, p);
                 return -EINVAL;
         }
+
+        return 0;
+}
+
+static int parse_env_file_push(
+                const char *filename, unsigned line,
+                const char *key, char *value,
+                void *userdata,
+                int *n_pushed) {
+
+        const char *k;
+        va_list aq, *ap = userdata;
+        int r;
+
+        r = check_utf8ness_and_warn(filename, line, key, value);
+        if (r < 0)
+                return r;
 
         va_copy(aq, *ap);
 
@@ -654,27 +676,19 @@ static int load_env_file_push(
         char *p;
         int r;
 
-        if (!utf8_is_valid(key)) {
-                _cleanup_free_ char *t = utf8_escape_invalid(key);
+        r = check_utf8ness_and_warn(filename, line, key, value);
+        if (r < 0)
+                return r;
 
-                log_error("%s:%u: invalid UTF-8 for key '%s', ignoring.", strna(filename), line, t);
-                return -EINVAL;
-        }
-
-        if (value && !utf8_is_valid(value)) {
-                _cleanup_free_ char *t = utf8_escape_invalid(value);
-
-                log_error("%s:%u: invalid UTF-8 value for key %s: '%s', ignoring.", strna(filename), line, key, t);
-                return -EINVAL;
-        }
-
-        p = strjoin(key, "=", strempty(value), NULL);
+        p = strjoin(key, "=", value);
         if (!p)
                 return -ENOMEM;
 
-        r = strv_consume(m, p);
-        if (r < 0)
+        r = strv_env_replace(m, p);
+        if (r < 0) {
+                free(p);
                 return r;
+        }
 
         if (n_pushed)
                 (*n_pushed)++;
@@ -708,19 +722,9 @@ static int load_env_file_push_pairs(
         char ***m = userdata;
         int r;
 
-        if (!utf8_is_valid(key)) {
-                _cleanup_free_ char *t = utf8_escape_invalid(key);
-
-                log_error("%s:%u: invalid UTF-8 for key '%s', ignoring.", strna(filename), line, t);
-                return -EINVAL;
-        }
-
-        if (value && !utf8_is_valid(value)) {
-                _cleanup_free_ char *t = utf8_escape_invalid(value);
-
-                log_error("%s:%u: invalid UTF-8 value for key %s: '%s', ignoring.", strna(filename), line, key, t);
-                return -EINVAL;
-        }
+        r = check_utf8ness_and_warn(filename, line, key, value);
+        if (r < 0)
+                return r;
 
         r = strv_extend(m, key);
         if (r < 0)
@@ -757,6 +761,52 @@ int load_env_file_pairs(FILE *f, const char *fname, const char *newline, char **
 
         *rl = m;
         return 0;
+}
+
+static int merge_env_file_push(
+                const char *filename, unsigned line,
+                const char *key, char *value,
+                void *userdata,
+                int *n_pushed) {
+
+        char ***env = userdata;
+        char *expanded_value;
+
+        assert(env);
+
+        if (!value) {
+                log_error("%s:%u: invalid syntax (around \"%s\"), ignoring.", strna(filename), line, key);
+                return 0;
+        }
+
+        if (!env_name_is_valid(key)) {
+                log_error("%s:%u: invalid variable name \"%s\", ignoring.", strna(filename), line, key);
+                free(value);
+                return 0;
+        }
+
+        expanded_value = replace_env(value, *env,
+                                     REPLACE_ENV_USE_ENVIRONMENT|
+                                     REPLACE_ENV_ALLOW_BRACELESS|
+                                     REPLACE_ENV_ALLOW_EXTENDED);
+        if (!expanded_value)
+                return -ENOMEM;
+
+        free_and_replace(value, expanded_value);
+
+        return load_env_file_push(filename, line, key, value, env, n_pushed);
+}
+
+int merge_env_file(
+                char ***env,
+                FILE *f,
+                const char *fname) {
+
+        /* NOTE: this function supports braceful and braceless variable expansions,
+         * plus "extended" substitutions, unlike other exported parsing functions.
+         */
+
+        return parse_env_file_internal(f, fname, NEWLINE, merge_env_file_push, env, NULL);
 }
 
 static void write_env_var(FILE *f, const char *v) {
@@ -955,9 +1005,9 @@ static int search_and_fopen_internal(const char *path, const char *mode, const c
                 FILE *f;
 
                 if (root)
-                        p = strjoin(root, *i, "/", path, NULL);
+                        p = strjoin(root, *i, "/", path);
                 else
-                        p = strjoin(*i, "/", path, NULL);
+                        p = strjoin(*i, "/", path);
                 if (!p)
                         return -ENOMEM;
 
@@ -1035,7 +1085,7 @@ int fopen_temporary(const char *path, FILE **_f, char **_temp_path) {
         if (r < 0)
                 return r;
 
-        fd = mkostemp_safe(t, O_WRONLY|O_CLOEXEC);
+        fd = mkostemp_safe(t);
         if (fd < 0) {
                 free(t);
                 return -errno;
@@ -1067,8 +1117,8 @@ int fflush_and_check(FILE *f) {
         return 0;
 }
 
-/* This is much like like mkostemp() but is subject to umask(). */
-int mkostemp_safe(char *pattern, int flags) {
+/* This is much like mkostemp() but is subject to umask(). */
+int mkostemp_safe(char *pattern) {
         _cleanup_umask_ mode_t u = 0;
         int fd;
 
@@ -1076,7 +1126,7 @@ int mkostemp_safe(char *pattern, int flags) {
 
         u = umask(077);
 
-        fd = mkostemp(pattern, flags);
+        fd = mkostemp(pattern, O_CLOEXEC);
         if (fd < 0)
                 return -errno;
 
@@ -1161,8 +1211,8 @@ int tempfn_random_child(const char *p, const char *extra, char **ret) {
         char *t, *x;
         uint64_t u;
         unsigned i;
+        int r;
 
-        assert(p);
         assert(ret);
 
         /* Turns this:
@@ -1170,6 +1220,12 @@ int tempfn_random_child(const char *p, const char *extra, char **ret) {
          * Into this:
          *         /foo/bar/waldo/.#<extra>3c2b6219aa75d7d0
          */
+
+        if (!p) {
+                r = tmp_dir(&p);
+                if (r < 0)
+                        return r;
+        }
 
         if (!extra)
                 extra = "";
@@ -1257,23 +1313,25 @@ int fputs_with_space(FILE *f, const char *s, const char *separator, bool *space)
 
 int open_tmpfile_unlinkable(const char *directory, int flags) {
         char *p;
-        int fd;
+        int fd, r;
 
-        assert(directory);
+        if (!directory) {
+                r = tmp_dir(&directory);
+                if (r < 0)
+                        return r;
+        }
 
         /* Returns an unlinked temporary file that cannot be linked into the file system anymore */
 
-#ifdef O_TMPFILE
         /* Try O_TMPFILE first, if it is supported */
         fd = open(directory, flags|O_TMPFILE|O_EXCL, S_IRUSR|S_IWUSR);
         if (fd >= 0)
                 return fd;
-#endif
 
         /* Fall back to unguessable name + unlinking */
         p = strjoina(directory, "/systemd-tmp-XXXXXX");
 
-        fd = mkostemp_safe(p, flags);
+        fd = mkostemp_safe(p);
         if (fd < 0)
                 return fd;
 
@@ -1296,7 +1354,6 @@ int open_tmpfile_linkable(const char *target, int flags, char **ret_path) {
          * which case "ret_path" will be returned as NULL. If not possible a the tempoary path name used is returned in
          * "ret_path". Use link_tmpfile() below to rename the result after writing the file in full. */
 
-#ifdef O_TMPFILE
         {
                 _cleanup_free_ char *dn = NULL;
 
@@ -1312,7 +1369,6 @@ int open_tmpfile_linkable(const char *target, int flags, char **ret_path) {
 
                 log_debug_errno(errno, "Failed to use O_TMPFILE on %s: %m", dn);
         }
-#endif
 
         r = tempfn_random(target, NULL, &tmp);
         if (r < 0)
@@ -1324,6 +1380,25 @@ int open_tmpfile_linkable(const char *target, int flags, char **ret_path) {
 
         *ret_path = tmp;
         tmp = NULL;
+
+        return fd;
+}
+
+int open_serialization_fd(const char *ident) {
+        int fd = -1;
+
+        fd = memfd_create(ident, MFD_CLOEXEC);
+        if (fd < 0) {
+                const char *path;
+
+                path = getpid() == 1 ? "/run/systemd" : "/tmp";
+                fd = open_tmpfile_unlinkable(path, O_RDWR|O_CLOEXEC);
+                if (fd < 0)
+                        return fd;
+
+                log_debug("Serializing %s to %s.", ident, path);
+        } else
+                log_debug("Serializing %s to memfd.", ident);
 
         return fd;
 }
@@ -1352,5 +1427,65 @@ int link_tmpfile(int fd, const char *path, const char *target) {
                         return -errno;
         }
 
+        return 0;
+}
+
+int read_nul_string(FILE *f, char **ret) {
+        _cleanup_free_ char *x = NULL;
+        size_t allocated = 0, n = 0;
+
+        assert(f);
+        assert(ret);
+
+        /* Reads a NUL-terminated string from the specified file. */
+
+        for (;;) {
+                int c;
+
+                if (!GREEDY_REALLOC(x, allocated, n+2))
+                        return -ENOMEM;
+
+                c = fgetc(f);
+                if (c == 0) /* Terminate at NUL byte */
+                        break;
+                if (c == EOF) {
+                        if (ferror(f))
+                                return -errno;
+                        break; /* Terminate at EOF */
+                }
+
+                x[n++] = (char) c;
+        }
+
+        if (x)
+                x[n] = 0;
+        else {
+                x = new0(char, 1);
+                if (!x)
+                        return -ENOMEM;
+        }
+
+        *ret = x;
+        x = NULL;
+
+        return 0;
+}
+
+int mkdtemp_malloc(const char *template, char **ret) {
+        char *p;
+
+        assert(template);
+        assert(ret);
+
+        p = strdup(template);
+        if (!p)
+                return -ENOMEM;
+
+        if (!mkdtemp(p)) {
+                free(p);
+                return -errno;
+        }
+
+        *ret = p;
         return 0;
 }

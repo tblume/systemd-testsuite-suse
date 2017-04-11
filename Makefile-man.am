@@ -11,6 +11,7 @@ MANPAGES += \
 	man/bootup.7 \
 	man/busctl.1 \
 	man/daemon.7 \
+	man/environment.d.5 \
 	man/file-hierarchy.7 \
 	man/halt.8 \
 	man/hostname.5 \
@@ -23,6 +24,7 @@ MANPAGES += \
 	man/localtime.5 \
 	man/machine-id.5 \
 	man/machine-info.5 \
+	man/nss-systemd.8 \
 	man/os-release.5 \
 	man/sd-bus-errors.3 \
 	man/sd-bus.3 \
@@ -31,11 +33,13 @@ MANPAGES += \
 	man/sd-id128.3 \
 	man/sd-journal.3 \
 	man/sd_booted.3 \
+	man/sd_bus_add_match.3 \
 	man/sd_bus_creds_get_pid.3 \
 	man/sd_bus_creds_new_from_pid.3 \
 	man/sd_bus_default.3 \
 	man/sd_bus_error.3 \
 	man/sd_bus_error_add_map.3 \
+	man/sd_bus_get_fd.3 \
 	man/sd_bus_message_append.3 \
 	man/sd_bus_message_append_array.3 \
 	man/sd_bus_message_append_basic.3 \
@@ -43,10 +47,14 @@ MANPAGES += \
 	man/sd_bus_message_append_strv.3 \
 	man/sd_bus_message_get_cookie.3 \
 	man/sd_bus_message_get_monotonic_usec.3 \
+	man/sd_bus_message_read_basic.3 \
 	man/sd_bus_negotiate_fds.3 \
 	man/sd_bus_new.3 \
 	man/sd_bus_path_encode.3 \
+	man/sd_bus_process.3 \
 	man/sd_bus_request_name.3 \
+	man/sd_bus_track_add_name.3 \
+	man/sd_bus_track_new.3 \
 	man/sd_event_add_child.3 \
 	man/sd_event_add_defer.3 \
 	man/sd_event_add_io.3 \
@@ -103,6 +111,7 @@ MANPAGES += \
 	man/systemd-debug-generator.8 \
 	man/systemd-delta.1 \
 	man/systemd-detect-virt.1 \
+	man/systemd-environment-d-generator.8 \
 	man/systemd-escape.1 \
 	man/systemd-fsck@.service.8 \
 	man/systemd-fstab-generator.8 \
@@ -116,6 +125,7 @@ MANPAGES += \
 	man/systemd-journald.service.8 \
 	man/systemd-machine-id-commit.service.8 \
 	man/systemd-machine-id-setup.1 \
+	man/systemd-mount.1 \
 	man/systemd-notify.1 \
 	man/systemd-nspawn.1 \
 	man/systemd-path.1 \
@@ -134,9 +144,11 @@ MANPAGES += \
 	man/systemd-tty-ask-password-agent.1 \
 	man/systemd-udevd.service.8 \
 	man/systemd-update-done.service.8 \
+	man/systemd-volatile-root.service.8 \
 	man/systemd.1 \
 	man/systemd.automount.5 \
 	man/systemd.device.5 \
+	man/systemd.environment-generator.7 \
 	man/systemd.exec.5 \
 	man/systemd.generator.7 \
 	man/systemd.journal-fields.7 \
@@ -175,6 +187,7 @@ MANPAGES += \
 	man/udev_new.3 \
 	man/udevadm.8
 MANPAGES_ALIAS += \
+	man/30-systemd-environment-d-generator.8 \
 	man/SD_ALERT.3 \
 	man/SD_BUS_ERROR_ACCESS_DENIED.3 \
 	man/SD_BUS_ERROR_ADDRESS_IN_USE.3 \
@@ -231,6 +244,8 @@ MANPAGES_ALIAS += \
 	man/SD_ID128_FORMAT_STR.3 \
 	man/SD_ID128_FORMAT_VAL.3 \
 	man/SD_ID128_MAKE.3 \
+	man/SD_ID128_MAKE_STR.3 \
+	man/SD_ID128_NULL.3 \
 	man/SD_INFO.3 \
 	man/SD_JOURNAL_APPEND.3 \
 	man/SD_JOURNAL_CURRENT_USER.3 \
@@ -251,6 +266,7 @@ MANPAGES_ALIAS += \
 	man/SD_WARNING.3 \
 	man/init.1 \
 	man/journald.conf.d.5 \
+	man/libnss_systemd.so.2.8 \
 	man/poweroff.8 \
 	man/reboot.8 \
 	man/sd_bus_creds_get_audit_login_uid.3 \
@@ -325,6 +341,23 @@ MANPAGES_ALIAS += \
 	man/sd_bus_path_encode_many.3 \
 	man/sd_bus_ref.3 \
 	man/sd_bus_release_name.3 \
+	man/sd_bus_track_add_sender.3 \
+	man/sd_bus_track_contains.3 \
+	man/sd_bus_track_count.3 \
+	man/sd_bus_track_count_name.3 \
+	man/sd_bus_track_count_sender.3 \
+	man/sd_bus_track_first.3 \
+	man/sd_bus_track_get_bus.3 \
+	man/sd_bus_track_get_recursive.3 \
+	man/sd_bus_track_get_userdata.3 \
+	man/sd_bus_track_next.3 \
+	man/sd_bus_track_ref.3 \
+	man/sd_bus_track_remove_name.3 \
+	man/sd_bus_track_remove_sender.3 \
+	man/sd_bus_track_set_recursive.3 \
+	man/sd_bus_track_set_userdata.3 \
+	man/sd_bus_track_unref.3 \
+	man/sd_bus_track_unrefp.3 \
 	man/sd_bus_unref.3 \
 	man/sd_bus_unrefp.3 \
 	man/sd_event.3 \
@@ -334,6 +367,7 @@ MANPAGES_ALIAS += \
 	man/sd_event_default.3 \
 	man/sd_event_dispatch.3 \
 	man/sd_event_get_exit_code.3 \
+	man/sd_event_get_iteration.3 \
 	man/sd_event_get_state.3 \
 	man/sd_event_get_tid.3 \
 	man/sd_event_get_watchdog.3 \
@@ -368,10 +402,14 @@ MANPAGES_ALIAS += \
 	man/sd_id128_equal.3 \
 	man/sd_id128_from_string.3 \
 	man/sd_id128_get_boot.3 \
+	man/sd_id128_get_invocation.3 \
+	man/sd_id128_get_machine_app_specific.3 \
+	man/sd_id128_is_null.3 \
 	man/sd_id128_t.3 \
 	man/sd_is_mq.3 \
 	man/sd_is_socket.3 \
 	man/sd_is_socket_inet.3 \
+	man/sd_is_socket_sockaddr.3 \
 	man/sd_is_socket_unix.3 \
 	man/sd_is_special.3 \
 	man/sd_journal.3 \
@@ -448,8 +486,10 @@ MANPAGES_ALIAS += \
 	man/systemd-udevd-control.socket.8 \
 	man/systemd-udevd-kernel.socket.8 \
 	man/systemd-udevd.8 \
+	man/systemd-umount.1 \
 	man/systemd-update-done.8 \
 	man/systemd-user.conf.5 \
+	man/systemd-volatile-root.8 \
 	man/udev_device_get_action.3 \
 	man/udev_device_get_devlinks_list_entry.3 \
 	man/udev_device_get_devnode.3 \
@@ -506,6 +546,7 @@ MANPAGES_ALIAS += \
 	man/udev_ref.3 \
 	man/udev_unref.3 \
 	man/user.conf.d.5
+man/30-systemd-environment-d-generator.8: man/systemd-environment-d-generator.8
 man/SD_ALERT.3: man/sd-daemon.3
 man/SD_BUS_ERROR_ACCESS_DENIED.3: man/sd-bus-errors.3
 man/SD_BUS_ERROR_ADDRESS_IN_USE.3: man/sd-bus-errors.3
@@ -562,6 +603,8 @@ man/SD_ID128_CONST_STR.3: man/sd-id128.3
 man/SD_ID128_FORMAT_STR.3: man/sd-id128.3
 man/SD_ID128_FORMAT_VAL.3: man/sd-id128.3
 man/SD_ID128_MAKE.3: man/sd-id128.3
+man/SD_ID128_MAKE_STR.3: man/sd-id128.3
+man/SD_ID128_NULL.3: man/sd-id128.3
 man/SD_INFO.3: man/sd-daemon.3
 man/SD_JOURNAL_APPEND.3: man/sd_journal_get_fd.3
 man/SD_JOURNAL_CURRENT_USER.3: man/sd_journal_open.3
@@ -582,6 +625,7 @@ man/SD_NOTICE.3: man/sd-daemon.3
 man/SD_WARNING.3: man/sd-daemon.3
 man/init.1: man/systemd.1
 man/journald.conf.d.5: man/journald.conf.5
+man/libnss_systemd.so.2.8: man/nss-systemd.8
 man/poweroff.8: man/halt.8
 man/reboot.8: man/halt.8
 man/sd_bus_creds_get_audit_login_uid.3: man/sd_bus_creds_get_pid.3
@@ -656,6 +700,23 @@ man/sd_bus_path_decode_many.3: man/sd_bus_path_encode.3
 man/sd_bus_path_encode_many.3: man/sd_bus_path_encode.3
 man/sd_bus_ref.3: man/sd_bus_new.3
 man/sd_bus_release_name.3: man/sd_bus_request_name.3
+man/sd_bus_track_add_sender.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_contains.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_count.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_count_name.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_count_sender.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_first.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_get_bus.3: man/sd_bus_track_new.3
+man/sd_bus_track_get_recursive.3: man/sd_bus_track_new.3
+man/sd_bus_track_get_userdata.3: man/sd_bus_track_new.3
+man/sd_bus_track_next.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_ref.3: man/sd_bus_track_new.3
+man/sd_bus_track_remove_name.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_remove_sender.3: man/sd_bus_track_add_name.3
+man/sd_bus_track_set_recursive.3: man/sd_bus_track_new.3
+man/sd_bus_track_set_userdata.3: man/sd_bus_track_new.3
+man/sd_bus_track_unref.3: man/sd_bus_track_new.3
+man/sd_bus_track_unrefp.3: man/sd_bus_track_new.3
 man/sd_bus_unref.3: man/sd_bus_new.3
 man/sd_bus_unrefp.3: man/sd_bus_new.3
 man/sd_event.3: man/sd_event_new.3
@@ -665,6 +726,7 @@ man/sd_event_child_handler_t.3: man/sd_event_add_child.3
 man/sd_event_default.3: man/sd_event_new.3
 man/sd_event_dispatch.3: man/sd_event_wait.3
 man/sd_event_get_exit_code.3: man/sd_event_exit.3
+man/sd_event_get_iteration.3: man/sd_event_wait.3
 man/sd_event_get_state.3: man/sd_event_wait.3
 man/sd_event_get_tid.3: man/sd_event_new.3
 man/sd_event_get_watchdog.3: man/sd_event_set_watchdog.3
@@ -699,10 +761,14 @@ man/sd_event_unrefp.3: man/sd_event_new.3
 man/sd_id128_equal.3: man/sd-id128.3
 man/sd_id128_from_string.3: man/sd_id128_to_string.3
 man/sd_id128_get_boot.3: man/sd_id128_get_machine.3
+man/sd_id128_get_invocation.3: man/sd_id128_get_machine.3
+man/sd_id128_get_machine_app_specific.3: man/sd_id128_get_machine.3
+man/sd_id128_is_null.3: man/sd-id128.3
 man/sd_id128_t.3: man/sd-id128.3
 man/sd_is_mq.3: man/sd_is_fifo.3
 man/sd_is_socket.3: man/sd_is_fifo.3
 man/sd_is_socket_inet.3: man/sd_is_fifo.3
+man/sd_is_socket_sockaddr.3: man/sd_is_fifo.3
 man/sd_is_socket_unix.3: man/sd_is_fifo.3
 man/sd_is_special.3: man/sd_is_fifo.3
 man/sd_journal.3: man/sd_journal_open.3
@@ -779,8 +845,10 @@ man/systemd-tmpfiles-setup.service.8: man/systemd-tmpfiles.8
 man/systemd-udevd-control.socket.8: man/systemd-udevd.service.8
 man/systemd-udevd-kernel.socket.8: man/systemd-udevd.service.8
 man/systemd-udevd.8: man/systemd-udevd.service.8
+man/systemd-umount.1: man/systemd-mount.1
 man/systemd-update-done.8: man/systemd-update-done.service.8
 man/systemd-user.conf.5: man/systemd-system.conf.5
+man/systemd-volatile-root.8: man/systemd-volatile-root.service.8
 man/udev_device_get_action.3: man/udev_device_get_syspath.3
 man/udev_device_get_devlinks_list_entry.3: man/udev_device_has_tag.3
 man/udev_device_get_devnode.3: man/udev_device_get_syspath.3
@@ -837,6 +905,9 @@ man/udev_monitor_unref.3: man/udev_monitor_new_from_netlink.3
 man/udev_ref.3: man/udev_new.3
 man/udev_unref.3: man/udev_new.3
 man/user.conf.d.5: man/systemd-system.conf.5
+man/30-systemd-environment-d-generator.html: man/systemd-environment-d-generator.html
+	$(html-alias)
+
 man/SD_ALERT.html: man/sd-daemon.html
 	$(html-alias)
 
@@ -1005,6 +1076,12 @@ man/SD_ID128_FORMAT_VAL.html: man/sd-id128.html
 man/SD_ID128_MAKE.html: man/sd-id128.html
 	$(html-alias)
 
+man/SD_ID128_MAKE_STR.html: man/sd-id128.html
+	$(html-alias)
+
+man/SD_ID128_NULL.html: man/sd-id128.html
+	$(html-alias)
+
 man/SD_INFO.html: man/sd-daemon.html
 	$(html-alias)
 
@@ -1063,6 +1140,9 @@ man/init.html: man/systemd.html
 	$(html-alias)
 
 man/journald.conf.d.html: man/journald.conf.html
+	$(html-alias)
+
+man/libnss_systemd.so.2.html: man/nss-systemd.html
 	$(html-alias)
 
 man/poweroff.html: man/halt.html
@@ -1287,6 +1367,57 @@ man/sd_bus_ref.html: man/sd_bus_new.html
 man/sd_bus_release_name.html: man/sd_bus_request_name.html
 	$(html-alias)
 
+man/sd_bus_track_add_sender.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_contains.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_count.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_count_name.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_count_sender.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_first.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_get_bus.html: man/sd_bus_track_new.html
+	$(html-alias)
+
+man/sd_bus_track_get_recursive.html: man/sd_bus_track_new.html
+	$(html-alias)
+
+man/sd_bus_track_get_userdata.html: man/sd_bus_track_new.html
+	$(html-alias)
+
+man/sd_bus_track_next.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_ref.html: man/sd_bus_track_new.html
+	$(html-alias)
+
+man/sd_bus_track_remove_name.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_remove_sender.html: man/sd_bus_track_add_name.html
+	$(html-alias)
+
+man/sd_bus_track_set_recursive.html: man/sd_bus_track_new.html
+	$(html-alias)
+
+man/sd_bus_track_set_userdata.html: man/sd_bus_track_new.html
+	$(html-alias)
+
+man/sd_bus_track_unref.html: man/sd_bus_track_new.html
+	$(html-alias)
+
+man/sd_bus_track_unrefp.html: man/sd_bus_track_new.html
+	$(html-alias)
+
 man/sd_bus_unref.html: man/sd_bus_new.html
 	$(html-alias)
 
@@ -1312,6 +1443,9 @@ man/sd_event_dispatch.html: man/sd_event_wait.html
 	$(html-alias)
 
 man/sd_event_get_exit_code.html: man/sd_event_exit.html
+	$(html-alias)
+
+man/sd_event_get_iteration.html: man/sd_event_wait.html
 	$(html-alias)
 
 man/sd_event_get_state.html: man/sd_event_wait.html
@@ -1416,6 +1550,15 @@ man/sd_id128_from_string.html: man/sd_id128_to_string.html
 man/sd_id128_get_boot.html: man/sd_id128_get_machine.html
 	$(html-alias)
 
+man/sd_id128_get_invocation.html: man/sd_id128_get_machine.html
+	$(html-alias)
+
+man/sd_id128_get_machine_app_specific.html: man/sd_id128_get_machine.html
+	$(html-alias)
+
+man/sd_id128_is_null.html: man/sd-id128.html
+	$(html-alias)
+
 man/sd_id128_t.html: man/sd-id128.html
 	$(html-alias)
 
@@ -1426,6 +1569,9 @@ man/sd_is_socket.html: man/sd_is_fifo.html
 	$(html-alias)
 
 man/sd_is_socket_inet.html: man/sd_is_fifo.html
+	$(html-alias)
+
+man/sd_is_socket_sockaddr.html: man/sd_is_fifo.html
 	$(html-alias)
 
 man/sd_is_socket_unix.html: man/sd_is_fifo.html
@@ -1656,10 +1802,16 @@ man/systemd-udevd-kernel.socket.html: man/systemd-udevd.service.html
 man/systemd-udevd.html: man/systemd-udevd.service.html
 	$(html-alias)
 
+man/systemd-umount.html: man/systemd-mount.html
+	$(html-alias)
+
 man/systemd-update-done.html: man/systemd-update-done.service.html
 	$(html-alias)
 
 man/systemd-user.conf.html: man/systemd-system.conf.html
+	$(html-alias)
+
+man/systemd-volatile-root.html: man/systemd-volatile-root.service.html
 	$(html-alias)
 
 man/udev_device_get_action.html: man/udev_device_get_syspath.html
@@ -2142,11 +2294,18 @@ if HAVE_LIBCRYPTSETUP
 MANPAGES += \
 	man/crypttab.5 \
 	man/systemd-cryptsetup-generator.8 \
-	man/systemd-cryptsetup@.service.8
+	man/systemd-cryptsetup@.service.8 \
+	man/systemd-veritysetup-generator.8 \
+	man/systemd-veritysetup@.service.8
 MANPAGES_ALIAS += \
-	man/systemd-cryptsetup.8
+	man/systemd-cryptsetup.8 \
+	man/systemd-veritysetup.8
 man/systemd-cryptsetup.8: man/systemd-cryptsetup@.service.8
+man/systemd-veritysetup.8: man/systemd-veritysetup@.service.8
 man/systemd-cryptsetup.html: man/systemd-cryptsetup@.service.html
+	$(html-alias)
+
+man/systemd-veritysetup.html: man/systemd-veritysetup@.service.html
 	$(html-alias)
 
 endif
@@ -2154,17 +2313,23 @@ endif
 if HAVE_MICROHTTPD
 MANPAGES += \
 	man/journal-remote.conf.5 \
+	man/journal-upload.conf.5 \
 	man/systemd-journal-gatewayd.service.8 \
 	man/systemd-journal-remote.8 \
 	man/systemd-journal-upload.8
 MANPAGES_ALIAS += \
 	man/journal-remote.conf.d.5 \
+	man/journal-upload.conf.d.5 \
 	man/systemd-journal-gatewayd.8 \
 	man/systemd-journal-gatewayd.socket.8
 man/journal-remote.conf.d.5: man/journal-remote.conf.5
+man/journal-upload.conf.d.5: man/journal-upload.conf.5
 man/systemd-journal-gatewayd.8: man/systemd-journal-gatewayd.service.8
 man/systemd-journal-gatewayd.socket.8: man/systemd-journal-gatewayd.service.8
 man/journal-remote.conf.d.html: man/journal-remote.conf.html
+	$(html-alias)
+
+man/journal-upload.conf.d.html: man/journal-upload.conf.html
 	$(html-alias)
 
 man/systemd-journal-gatewayd.html: man/systemd-journal-gatewayd.service.html
@@ -2483,12 +2648,14 @@ EXTRA_DIST += \
 	man/crypttab.xml \
 	man/daemon.xml \
 	man/dnssec-trust-anchors.d.xml \
+	man/environment.d.xml \
 	man/file-hierarchy.xml \
 	man/halt.xml \
 	man/hostname.xml \
 	man/hostnamectl.xml \
 	man/hwdb.xml \
 	man/journal-remote.conf.xml \
+	man/journal-upload.conf.xml \
 	man/journalctl.xml \
 	man/journald.conf.xml \
 	man/kernel-command-line.xml \
@@ -2510,6 +2677,7 @@ EXTRA_DIST += \
 	man/nss-myhostname.xml \
 	man/nss-mymachines.xml \
 	man/nss-resolve.xml \
+	man/nss-systemd.xml \
 	man/os-release.xml \
 	man/pam_systemd.xml \
 	man/resolved.conf.xml \
@@ -2522,11 +2690,13 @@ EXTRA_DIST += \
 	man/sd-journal.xml \
 	man/sd-login.xml \
 	man/sd_booted.xml \
+	man/sd_bus_add_match.xml \
 	man/sd_bus_creds_get_pid.xml \
 	man/sd_bus_creds_new_from_pid.xml \
 	man/sd_bus_default.xml \
 	man/sd_bus_error.xml \
 	man/sd_bus_error_add_map.xml \
+	man/sd_bus_get_fd.xml \
 	man/sd_bus_message_append.xml \
 	man/sd_bus_message_append_array.xml \
 	man/sd_bus_message_append_basic.xml \
@@ -2534,10 +2704,14 @@ EXTRA_DIST += \
 	man/sd_bus_message_append_strv.xml \
 	man/sd_bus_message_get_cookie.xml \
 	man/sd_bus_message_get_monotonic_usec.xml \
+	man/sd_bus_message_read_basic.xml \
 	man/sd_bus_negotiate_fds.xml \
 	man/sd_bus_new.xml \
 	man/sd_bus_path_encode.xml \
+	man/sd_bus_process.xml \
 	man/sd_bus_request_name.xml \
+	man/sd_bus_track_add_name.xml \
+	man/sd_bus_track_new.xml \
 	man/sd_event_add_child.xml \
 	man/sd_event_add_defer.xml \
 	man/sd_event_add_io.xml \
@@ -2607,6 +2781,7 @@ EXTRA_DIST += \
 	man/systemd-debug-generator.xml \
 	man/systemd-delta.xml \
 	man/systemd-detect-virt.xml \
+	man/systemd-environment-d-generator.xml \
 	man/systemd-escape.xml \
 	man/systemd-firstboot.xml \
 	man/systemd-fsck@.service.xml \
@@ -2631,6 +2806,7 @@ EXTRA_DIST += \
 	man/systemd-machine-id-setup.xml \
 	man/systemd-machined.service.xml \
 	man/systemd-modules-load.service.xml \
+	man/systemd-mount.xml \
 	man/systemd-networkd-wait-online.service.xml \
 	man/systemd-networkd.service.xml \
 	man/systemd-notify.xml \
@@ -2661,8 +2837,12 @@ EXTRA_DIST += \
 	man/systemd-update-utmp.service.xml \
 	man/systemd-user-sessions.service.xml \
 	man/systemd-vconsole-setup.service.xml \
+	man/systemd-veritysetup-generator.xml \
+	man/systemd-veritysetup@.service.xml \
+	man/systemd-volatile-root.service.xml \
 	man/systemd.automount.xml \
 	man/systemd.device.xml \
+	man/systemd.environment-generator.xml \
 	man/systemd.exec.xml \
 	man/systemd.generator.xml \
 	man/systemd.journal-fields.xml \

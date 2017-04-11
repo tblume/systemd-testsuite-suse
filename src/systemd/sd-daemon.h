@@ -22,6 +22,7 @@
 
 #include <inttypes.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 
 #include "_sd-common.h"
 
@@ -131,6 +132,18 @@ int sd_is_socket(int fd, int family, int type, int listening);
 int sd_is_socket_inet(int fd, int family, int type, int listening, uint16_t port);
 
 /*
+  Helper call for identifying a passed file descriptor. Returns 1 if the
+  file descriptor is an Internet socket of the specified type
+  (SOCK_DGRAM, SOCK_STREAM, ...), and if the address of the socket is
+  the same as the address specified by addr. The listening flag is used
+  the same way as in sd_is_socket(). Returns a negative errno style
+  error code on failure.
+
+  See sd_is_socket_sockaddr(3) for more information.
+*/
+int sd_is_socket_sockaddr(int fd, int type, const struct sockaddr* addr, unsigned addr_len, int listening);
+
+/*
   Helper call for identifying a passed file descriptor. Returns 1 if
   the file descriptor is an AF_UNIX socket of the specified type
   (SOCK_DGRAM, SOCK_STREAM, ...) and path, 0 otherwise. If type is 0
@@ -195,6 +208,11 @@ int sd_is_mq(int fd, const char *path);
                   and pass them to the main process again on next
                   invocation. This variable is only supported with
                   sd_pid_notify_with_fds().
+
+     WATCHDOG_USEC=...
+                  Reset watchdog_usec value during runtime.
+                  To reset watchdog_usec value, start the service again.
+                  Example: "WATCHDOG_USEC=20000000"
 
   Daemons can choose to send additional variables. However, it is
   recommended to prefix variable names not listed above with X_.

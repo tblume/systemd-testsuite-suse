@@ -83,6 +83,34 @@ static OutputFlags get_output_flags(void) {
                 colors_enabled() * OUTPUT_COLOR;
 }
 
+static int get_session_path(sd_bus *bus, const char *session_id, sd_bus_error *error, char **path) {
+        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
+        int r;
+        char *ans;
+
+        r = sd_bus_call_method(
+                        bus,
+                        "org.freedesktop.login1",
+                        "/org/freedesktop/login1",
+                        "org.freedesktop.login1.Manager",
+                        "GetSession",
+                        error, &reply,
+                        "s", session_id);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_read(reply, "o", &ans);
+        if (r < 0)
+                return r;
+
+        ans = strdup(ans);
+        if (!ans)
+                return -ENOMEM;
+
+        *path = ans;
+        return 0;
+}
+
 static int list_sessions(int argc, char *argv[], void *userdata) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
@@ -115,10 +143,38 @@ static int list_sessions(int argc, char *argv[], void *userdata) {
                 return bus_log_parse_error(r);
 
         if (arg_legend)
-                printf("%10s %10s %-16s %-16s\n", "SESSION", "UID", "USER", "SEAT");
+                printf("%10s %10s %-16s %-16s %-16s\n", "SESSION", "UID", "USER", "SEAT", "TTY");
 
         while ((r = sd_bus_message_read(reply, "(susso)", &id, &uid, &user, &seat, &object)) > 0) {
-                printf("%10s %10u %-16s %-16s\n", id, (unsigned) uid, user, seat);
+                _cleanup_(sd_bus_error_free) sd_bus_error error2 = SD_BUS_ERROR_NULL;
+                _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply2 = NULL;
+                _cleanup_free_ char *path = NULL;
+                const char *tty = NULL;
+
+                r = get_session_path(bus, id, &error2, &path);
+                if (r < 0)
+                        log_warning("Failed to get session path: %s", bus_error_message(&error, r));
+                else {
+                        r = sd_bus_get_property(
+                                        bus,
+                                        "org.freedesktop.login1",
+                                        path,
+                                        "org.freedesktop.login1.Session",
+                                        "TTY",
+                                        &error2,
+                                        &reply2,
+                                        "s");
+                        if (r < 0)
+                                log_warning("Failed to get TTY for session %s: %s",
+                                            id, bus_error_message(&error2, r));
+                        else {
+                                r = sd_bus_message_read(reply2, "s", &tty);
+                                if (r < 0)
+                                        return bus_log_parse_error(r);
+                        }
+                }
+
+                printf("%10s %10"PRIu32" %-16s %-16s %-16s\n", id, uid, user, seat, strna(tty));
                 k++;
         }
         if (r < 0)
@@ -165,7 +221,7 @@ static int list_users(int argc, char *argv[], void *userdata) {
                 printf("%10s %-16s\n", "UID", "USER");
 
         while ((r = sd_bus_message_read(reply, "(uso)", &uid, &user, &object)) > 0) {
-                printf("%10u %-16s\n", (unsigned) uid, user);
+                printf("%10"PRIu32" %-16s\n", uid, user);
                 k++;
         }
         if (r < 0)
@@ -184,7 +240,6 @@ static int list_seats(int argc, char *argv[], void *userdata) {
         sd_bus *bus = userdata;
         unsigned k = 0;
         int r;
-
         assert(bus);
         assert(argv);
 
@@ -224,35 +279,17 @@ static int list_seats(int argc, char *argv[], void *userdata) {
 }
 
 static int show_unit_cgroup(sd_bus *bus, const char *interface, const char *unit, pid_t leader) {
+        _cleanup_free_ char *cgroup = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-        _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
-        _cleanup_free_ char *path = NULL;
-        const char *cgroup;
         unsigned c;
         int r;
 
         assert(bus);
         assert(unit);
 
-        path = unit_dbus_path_from_name(unit);
-        if (!path)
-                return log_oom();
-
-        r = sd_bus_get_property(
-                        bus,
-                        "org.freedesktop.systemd1",
-                        path,
-                        interface,
-                        "ControlGroup",
-                        &error,
-                        &reply,
-                        "s");
+        r = show_cgroup_get_unit_path_and_warn(bus, unit, &cgroup);
         if (r < 0)
-                return log_error_errno(r, "Failed to query ControlGroup: %s", bus_error_message(&error, r));
-
-        r = sd_bus_message_read(reply, "s", &cgroup);
-        if (r < 0)
-                return bus_log_parse_error(r);
+                return r;
 
         if (isempty(cgroup))
                 return 0;
@@ -290,7 +327,7 @@ typedef struct SessionStatusInfo {
         char *seat;
         char *tty;
         char *display;
-        bool remote;
+        int remote;
         char *remote_host;
         char *remote_user;
         char *service;
@@ -304,7 +341,7 @@ typedef struct SessionStatusInfo {
 
 typedef struct UserStatusInfo {
         uid_t uid;
-        bool linger;
+        int linger;
         char *name;
         struct dual_timestamp timestamp;
         char *state;
@@ -445,14 +482,15 @@ static int print_session_status_info(sd_bus *bus, const char *path, bool *new_li
                 {}
         };
 
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         char since1[FORMAT_TIMESTAMP_RELATIVE_MAX], *s1;
         char since2[FORMAT_TIMESTAMP_MAX], *s2;
         _cleanup_(session_status_info_clear) SessionStatusInfo i = {};
         int r;
 
-        r = bus_map_all_properties(bus, "org.freedesktop.login1", path, map, &i);
+        r = bus_map_all_properties(bus, "org.freedesktop.login1", path, map, &error, &i);
         if (r < 0)
-                return log_error_errno(r, "Could not get properties: %m");
+                return log_error_errno(r, "Could not get properties: %s", bus_error_message(&error, r));
 
         if (*new_line)
                 printf("\n");
@@ -462,9 +500,9 @@ static int print_session_status_info(sd_bus *bus, const char *path, bool *new_li
         printf("%s - ", strna(i.id));
 
         if (i.name)
-                printf("%s (%u)\n", i.name, (unsigned) i.uid);
+                printf("%s (%"PRIu32")\n", i.name, i.uid);
         else
-                printf("%u\n", (unsigned) i.uid);
+                printf("%"PRIu32"\n", i.uid);
 
         s1 = format_timestamp_relative(since1, sizeof(since1), i.timestamp.realtime);
         s2 = format_timestamp(since2, sizeof(since2), i.timestamp.realtime);
@@ -477,7 +515,7 @@ static int print_session_status_info(sd_bus *bus, const char *path, bool *new_li
         if (i.leader > 0) {
                 _cleanup_free_ char *t = NULL;
 
-                printf("\t  Leader: %u", (unsigned) i.leader);
+                printf("\t  Leader: %"PRIu32, i.leader);
 
                 get_process_comm(i.leader, &t);
                 if (t)
@@ -574,14 +612,15 @@ static int print_user_status_info(sd_bus *bus, const char *path, bool *new_line)
                 {}
         };
 
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         char since1[FORMAT_TIMESTAMP_RELATIVE_MAX], *s1;
         char since2[FORMAT_TIMESTAMP_MAX], *s2;
         _cleanup_(user_status_info_clear) UserStatusInfo i = {};
         int r;
 
-        r = bus_map_all_properties(bus, "org.freedesktop.login1", path, map, &i);
+        r = bus_map_all_properties(bus, "org.freedesktop.login1", path, map, &error, &i);
         if (r < 0)
-                return log_error_errno(r, "Could not get properties: %m");
+                return log_error_errno(r, "Could not get properties: %s", bus_error_message(&error, r));
 
         if (*new_line)
                 printf("\n");
@@ -589,9 +628,9 @@ static int print_user_status_info(sd_bus *bus, const char *path, bool *new_line)
         *new_line = true;
 
         if (i.name)
-                printf("%s (%u)\n", i.name, (unsigned) i.uid);
+                printf("%s (%"PRIu32")\n", i.name, i.uid);
         else
-                printf("%u\n", (unsigned) i.uid);
+                printf("%"PRIu32"\n", i.uid);
 
         s1 = format_timestamp_relative(since1, sizeof(since1), i.timestamp.realtime);
         s2 = format_timestamp(since2, sizeof(since2), i.timestamp.realtime);
@@ -648,12 +687,13 @@ static int print_seat_status_info(sd_bus *bus, const char *path, bool *new_line)
                 {}
         };
 
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         _cleanup_(seat_status_info_clear) SeatStatusInfo i = {};
         int r;
 
-        r = bus_map_all_properties(bus, "org.freedesktop.login1", path, map, &i);
+        r = bus_map_all_properties(bus, "org.freedesktop.login1", path, map, &error, &i);
         if (r < 0)
-                return log_error_errno(r, "Could not get properties: %m");
+                return log_error_errno(r, "Could not get properties: %s", bus_error_message(&error, r));
 
         if (*new_line)
                 printf("\n");
@@ -887,25 +927,13 @@ static int show_session(int argc, char *argv[], void *userdata) {
 
         for (i = 1; i < argc; i++) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-                _cleanup_(sd_bus_message_unrefp) sd_bus_message * reply = NULL;
-                const char *path = NULL;
+                _cleanup_free_ char *path = NULL;
 
-                r = sd_bus_call_method(
-                                bus,
-                                "org.freedesktop.login1",
-                                "/org/freedesktop/login1",
-                                "org.freedesktop.login1.Manager",
-                                "GetSession",
-                                &error, &reply,
-                                "s", argv[i]);
+                r = get_session_path(bus, argv[1], &error, &path);
                 if (r < 0) {
-                        log_error("Failed to get session: %s", bus_error_message(&error, r));
+                        log_error("Failed to get session path: %s", bus_error_message(&error, r));
                         return r;
                 }
-
-                r = sd_bus_message_read(reply, "o", &path);
-                if (r < 0)
-                        return bus_log_parse_error(r);
 
                 if (properties)
                         r = show_properties(bus, path, &new_line);
@@ -1554,7 +1582,7 @@ static int loginctl_main(int argc, char *argv[], sd_bus *bus) {
 }
 
 int main(int argc, char *argv[]) {
-        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");
@@ -1576,6 +1604,8 @@ int main(int argc, char *argv[]) {
         r = loginctl_main(argc, argv, bus);
 
 finish:
+        sd_bus_flush_close_unref(bus);
+
         pager_close();
         polkit_agent_close();
 

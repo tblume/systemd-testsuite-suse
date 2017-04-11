@@ -60,7 +60,7 @@ int manager_read_resolv_conf(Manager *m) {
                 return 0;
 
         /* Is it symlinked to our own file? */
-        if (stat("/run/systemd/resolve/resolv.conf", &own) >= 0 &&
+        if (stat(PRIVATE_RESOLV_CONF, &own) >= 0 &&
             st.st_dev == own.st_dev &&
             st.st_ino == own.st_ino)
                 return 0;
@@ -92,7 +92,7 @@ int manager_read_resolv_conf(Manager *m) {
 
                 a = first_word(l, "nameserver");
                 if (a) {
-                        r = manager_add_dns_server_by_string(m, DNS_SERVER_SYSTEM, a);
+                        r = manager_parse_dns_server_string_and_warn(m, DNS_SERVER_SYSTEM, a);
                         if (r < 0)
                                 log_warning_errno(r, "Failed to parse DNS server address '%s', ignoring.", a);
 
@@ -149,10 +149,18 @@ static void write_resolv_conf_server(DnsServer *s, FILE *f, unsigned *count) {
         assert(f);
         assert(count);
 
-        (void) dns_server_string(s);
-
-        if (!s->server_string) {
+        if (!dns_server_string(s)) {
                 log_warning("Our of memory, or invalid DNS address. Ignoring server.");
+                return;
+        }
+
+        /* Check if the DNS server is limited to particular domains;
+         * resolv.conf does not have a syntax to express that, so it must not
+         * appear as a global name server to avoid routing unrelated domains to
+         * it (which is a privacy violation, will most probably fail anyway,
+         * and adds unnecessary load) */
+        if (dns_server_limited_domains(s)) {
+                log_debug("DNS server %s has route-only domains, not using as global name server", dns_server_string(s));
                 return;
         }
 
@@ -160,7 +168,7 @@ static void write_resolv_conf_server(DnsServer *s, FILE *f, unsigned *count) {
                 fputs("# Too many DNS servers configured, the following entries may be ignored.\n", f);
         (*count)++;
 
-        fprintf(f, "nameserver %s\n", s->server_string);
+        fprintf(f, "nameserver %s\n", dns_server_string(s));
 }
 
 static void write_resolv_conf_search(
@@ -195,11 +203,14 @@ static void write_resolv_conf_search(
 static int write_resolv_conf_contents(FILE *f, OrderedSet *dns, OrderedSet *domains) {
         Iterator i;
 
-        fputs("# This file is managed by systemd-resolved(8). Do not edit.\n#\n"
-              "# Third party programs must not access this file directly, but\n"
-              "# only through the symlink at /etc/resolv.conf. To manage\n"
-              "# resolv.conf(5) in a different way, replace the symlink by a\n"
-              "# static file or a different symlink.\n\n", f);
+        fputs("# This file is managed by man:systemd-resolved(8). Do not edit.\n#\n"
+              "# This is a dynamic resolv.conf file for connecting local clients directly to\n"
+              "# all known DNS servers.\n#\n"
+              "# Third party programs must not access this file directly, but only through the\n"
+              "# symlink at /etc/resolv.conf. To manage man:resolv.conf(5) in a different way,\n"
+              "# replace this symlink by a static file or a different symlink.\n#\n"
+              "# See man:systemd-resolved.service(8) for details about the supported modes of\n"
+              "# operation for /etc/resolv.conf.\n\n", f);
 
         if (ordered_set_isempty(dns))
                 fputs("# No DNS servers known.\n", f);
@@ -227,29 +238,31 @@ int manager_write_resolv_conf(Manager *m) {
         assert(m);
 
         /* Read the system /etc/resolv.conf first */
-        manager_read_resolv_conf(m);
+        (void) manager_read_resolv_conf(m);
 
         /* Add the full list to a set, to filter out duplicates */
         r = manager_compile_dns_servers(m, &dns);
         if (r < 0)
-                return r;
+                return log_warning_errno(r, "Failed to compile list of DNS servers: %m");
 
-        r = manager_compile_search_domains(m, &domains);
+        r = manager_compile_search_domains(m, &domains, false);
         if (r < 0)
-                return r;
+                return log_warning_errno(r, "Failed to compile list of search domains: %m");
 
         r = fopen_temporary_label(PRIVATE_RESOLV_CONF, PRIVATE_RESOLV_CONF, &f, &temp_path);
         if (r < 0)
-                return r;
+                return log_warning_errno(r, "Failed to open private resolv.conf file for writing: %m");
 
-        fchmod(fileno(f), 0644);
+        (void) fchmod(fileno(f), 0644);
 
         r = write_resolv_conf_contents(f, dns, domains);
-        if (r < 0)
+        if (r < 0) {
+                log_error_errno(r, "Failed to write private resolv.conf contents: %m");
                 goto fail;
+        }
 
         if (rename(temp_path, PRIVATE_RESOLV_CONF) < 0) {
-                r = -errno;
+                r = log_error_errno(errno, "Failed to move private resolv.conf file into place: %m");
                 goto fail;
         }
 
@@ -258,5 +271,6 @@ int manager_write_resolv_conf(Manager *m) {
 fail:
         (void) unlink(PRIVATE_RESOLV_CONF);
         (void) unlink(temp_path);
+
         return r;
 }

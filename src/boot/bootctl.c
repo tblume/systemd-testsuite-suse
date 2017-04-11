@@ -26,6 +26,7 @@
 #include <ftw.h>
 #include <getopt.h>
 #include <limits.h>
+#include <linux/magic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,27 +38,60 @@
 
 #include "alloc-util.h"
 #include "blkid-util.h"
+#include "copy.h"
 #include "dirent-util.h"
 #include "efivars.h"
 #include "fd-util.h"
 #include "fileio.h"
+#include "fs-util.h"
 #include "locale-util.h"
+#include "parse-util.h"
 #include "rm-rf.h"
+#include "stat-util.h"
 #include "string-util.h"
+#include "strv.h"
+#include "umask-util.h"
 #include "util.h"
+#include "verbs.h"
+#include "virt.h"
 
-static int verify_esp(const char *p, uint32_t *part, uint64_t *pstart, uint64_t *psize, sd_id128_t *uuid) {
-        struct statfs sfs;
-        struct stat st, st2;
-        _cleanup_free_ char *t = NULL;
+static char *arg_path = NULL;
+static bool arg_touch_variables = true;
+
+static int verify_esp(
+                bool searching,
+                const char *p,
+                uint32_t *ret_part,
+                uint64_t *ret_pstart,
+                uint64_t *ret_psize,
+                sd_id128_t *ret_uuid) {
+
         _cleanup_blkid_free_probe_ blkid_probe b = NULL;
-        int r;
+        _cleanup_free_ char *t = NULL;
+        uint64_t pstart = 0, psize = 0;
+        struct stat st, st2;
         const char *v, *t2;
+        struct statfs sfs;
+        sd_id128_t uuid = SD_ID128_NULL;
+        uint32_t part = 0;
+        int r;
 
-        if (statfs(p, &sfs) < 0)
+        assert(p);
+
+        if (statfs(p, &sfs) < 0) {
+
+                /* If we are searching for the mount point, don't generate a log message if we can't find the path */
+                if (errno == ENOENT && searching)
+                        return -ENOENT;
+
                 return log_error_errno(errno, "Failed to check file system type of \"%s\": %m", p);
+        }
 
-        if (sfs.f_type != 0x4d44) {
+        if (!F_TYPE_EQUAL(sfs.f_type, MSDOS_SUPER_MAGIC)) {
+
+                if (searching)
+                        return -EADDRNOTAVAIL;
+
                 log_error("File system \"%s\" is not a FAT EFI System Partition (ESP) file system.", p);
                 return -ENODEV;
         }
@@ -80,18 +114,19 @@ static int verify_esp(const char *p, uint32_t *part, uint64_t *pstart, uint64_t 
                 return -ENODEV;
         }
 
+        /* In a container we don't have access to block devices, skip this part of the verification, we trust the
+         * container manager set everything up correctly on its own. */
+        if (detect_container() > 0)
+                goto finish;
+
         r = asprintf(&t, "/dev/block/%u:%u", major(st.st_dev), minor(st.st_dev));
         if (r < 0)
                 return log_oom();
 
         errno = 0;
         b = blkid_new_probe_from_filename(t);
-        if (!b) {
-                if (errno == 0)
-                        return log_oom();
-
-                return log_error_errno(errno, "Failed to open file system \"%s\": %m", p);
-        }
+        if (!b)
+                return log_error_errno(errno ?: ENOMEM, "Failed to open file system \"%s\": %m", p);
 
         blkid_probe_enable_superblocks(b, 1);
         blkid_probe_set_superblocks_flags(b, BLKID_SUBLKS_TYPE);
@@ -101,23 +136,18 @@ static int verify_esp(const char *p, uint32_t *part, uint64_t *pstart, uint64_t 
         errno = 0;
         r = blkid_do_safeprobe(b);
         if (r == -2) {
-                log_error("File system \"%s\" is ambigious.", p);
+                log_error("File system \"%s\" is ambiguous.", p);
                 return -ENODEV;
         } else if (r == 1) {
                 log_error("File system \"%s\" does not contain a label.", p);
                 return -ENODEV;
-        } else if (r != 0) {
-                r = errno ? -errno : -EIO;
-                return log_error_errno(r, "Failed to probe file system \"%s\": %m", p);
-        }
+        } else if (r != 0)
+                return log_error_errno(errno ?: EIO, "Failed to probe file system \"%s\": %m", p);
 
         errno = 0;
         r = blkid_probe_lookup_value(b, "TYPE", &v, NULL);
-        if (r != 0) {
-                r = errno ? -errno : -EIO;
-                return log_error_errno(r, "Failed to probe file system type \"%s\": %m", p);
-        }
-
+        if (r != 0)
+                return log_error_errno(errno ?: EIO, "Failed to probe file system type \"%s\": %m", p);
         if (!streq(v, "vfat")) {
                 log_error("File system \"%s\" is not FAT.", p);
                 return -ENODEV;
@@ -125,11 +155,8 @@ static int verify_esp(const char *p, uint32_t *part, uint64_t *pstart, uint64_t 
 
         errno = 0;
         r = blkid_probe_lookup_value(b, "PART_ENTRY_SCHEME", &v, NULL);
-        if (r != 0) {
-                r = errno ? -errno : -EIO;
-                return log_error_errno(r, "Failed to probe partition scheme \"%s\": %m", p);
-        }
-
+        if (r != 0)
+                return log_error_errno(errno ?: EIO, "Failed to probe partition scheme \"%s\": %m", p);
         if (!streq(v, "gpt")) {
                 log_error("File system \"%s\" is not on a GPT partition table.", p);
                 return -ENODEV;
@@ -137,11 +164,8 @@ static int verify_esp(const char *p, uint32_t *part, uint64_t *pstart, uint64_t 
 
         errno = 0;
         r = blkid_probe_lookup_value(b, "PART_ENTRY_TYPE", &v, NULL);
-        if (r != 0) {
-                r = errno ? -errno : -EIO;
-                return log_error_errno(r, "Failed to probe partition type UUID \"%s\": %m", p);
-        }
-
+        if (r != 0)
+                return log_error_errno(errno ?: EIO, "Failed to probe partition type UUID \"%s\": %m", p);
         if (!streq(v, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b")) {
                 log_error("File system \"%s\" has wrong type for an EFI System Partition (ESP).", p);
                 return -ENODEV;
@@ -149,12 +173,9 @@ static int verify_esp(const char *p, uint32_t *part, uint64_t *pstart, uint64_t 
 
         errno = 0;
         r = blkid_probe_lookup_value(b, "PART_ENTRY_UUID", &v, NULL);
-        if (r != 0) {
-                r = errno ? -errno : -EIO;
-                return log_error_errno(r, "Failed to probe partition entry UUID \"%s\": %m", p);
-        }
-
-        r = sd_id128_from_string(v, uuid);
+        if (r != 0)
+                return log_error_errno(errno ?: EIO, "Failed to probe partition entry UUID \"%s\": %m", p);
+        r = sd_id128_from_string(v, &uuid);
         if (r < 0) {
                 log_error("Partition \"%s\" has invalid UUID \"%s\".", p, v);
                 return -EIO;
@@ -162,29 +183,66 @@ static int verify_esp(const char *p, uint32_t *part, uint64_t *pstart, uint64_t 
 
         errno = 0;
         r = blkid_probe_lookup_value(b, "PART_ENTRY_NUMBER", &v, NULL);
-        if (r != 0) {
-                r = errno ? -errno : -EIO;
-                return log_error_errno(r, "Failed to probe partition number \"%s\": m", p);
-        }
-        *part = strtoul(v, NULL, 10);
+        if (r != 0)
+                return log_error_errno(errno ?: EIO, "Failed to probe partition number \"%s\": m", p);
+        r = safe_atou32(v, &part);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse PART_ENTRY_NUMBER field.");
 
         errno = 0;
         r = blkid_probe_lookup_value(b, "PART_ENTRY_OFFSET", &v, NULL);
-        if (r != 0) {
-                r = errno ? -errno : -EIO;
-                return log_error_errno(r, "Failed to probe partition offset \"%s\": %m", p);
-        }
-        *pstart = strtoul(v, NULL, 10);
+        if (r != 0)
+                return log_error_errno(errno ?: EIO, "Failed to probe partition offset \"%s\": %m", p);
+        r = safe_atou64(v, &pstart);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse PART_ENTRY_OFFSET field.");
 
         errno = 0;
         r = blkid_probe_lookup_value(b, "PART_ENTRY_SIZE", &v, NULL);
-        if (r != 0) {
-                r = errno ? -errno : -EIO;
-                return log_error_errno(r, "Failed to probe partition size \"%s\": %m", p);
-        }
-        *psize = strtoul(v, NULL, 10);
+        if (r != 0)
+                return log_error_errno(errno ?: EIO, "Failed to probe partition size \"%s\": %m", p);
+        r = safe_atou64(v, &psize);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse PART_ENTRY_SIZE field.");
+
+finish:
+        if (ret_part)
+                *ret_part = part;
+        if (ret_pstart)
+                *ret_pstart = pstart;
+        if (ret_psize)
+                *ret_psize = psize;
+        if (ret_uuid)
+                *ret_uuid = uuid;
 
         return 0;
+}
+
+static int find_esp(uint32_t *part, uint64_t *pstart, uint64_t *psize, sd_id128_t *uuid) {
+        const char *path;
+        int r;
+
+        if (arg_path)
+                return verify_esp(false, arg_path, part, pstart, psize, uuid);
+
+        FOREACH_STRING(path, "/efi", "/boot", "/boot/efi") {
+
+                r = verify_esp(true, path, part, pstart, psize, uuid);
+                if (IN_SET(r, -ENOENT, -EADDRNOTAVAIL)) /* This one is not it */
+                        continue;
+                if (r < 0)
+                        return r;
+
+                arg_path = strdup(path);
+                if (!arg_path)
+                        return log_oom();
+
+                log_info("Using EFI System Partition at %s.", path);
+                return 0;
+        }
+
+        log_error("Couldn't find EFI system partition. It is recommended to mount it to /boot. Alternatively, use --path= to specify path to mount point.");
+        return -ENOENT;
 }
 
 /* search for "#### LoaderInfo: systemd-boot 218 ####" string inside the binary */
@@ -199,14 +257,16 @@ static int get_file_version(int fd, char **v) {
         assert(v);
 
         if (fstat(fd, &st) < 0)
-                return -errno;
+                return log_error_errno(errno, "Failed to stat EFI binary: %m");
 
-        if (st.st_size < 27)
+        if (st.st_size < 27) {
+                *v = NULL;
                 return 0;
+        }
 
         buf = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
         if (buf == MAP_FAILED)
-                return -errno;
+                return log_error_errno(errno, "Failed to memory map EFI binary: %m");
 
         s = memmem(buf, st.st_size - 8, "#### LoaderInfo: ", 17);
         if (!s)
@@ -228,7 +288,7 @@ static int get_file_version(int fd, char **v) {
         r = 1;
 
 finish:
-        munmap(buf, st.st_size);
+        (void) munmap(buf, st.st_size);
         *v = x;
         return r;
 }
@@ -288,7 +348,7 @@ static int status_binaries(const char *esp_path, sd_id128_t partition) {
         else if (r < 0)
                 return r;
 
-        r = enumerate_binaries(esp_path, "EFI/Boot", "boot");
+        r = enumerate_binaries(esp_path, "EFI/BOOT", "boot");
         if (r == 0)
                 log_error("No default/fallback boot loader installed in ESP.");
         else if (r < 0)
@@ -311,7 +371,7 @@ static int print_efi_option(uint16_t id, bool in_order) {
                 return r;
 
         /* print only configured entries with partition information */
-        if (!path || sd_id128_equal(partition, SD_ID128_NULL))
+        if (!path || sd_id128_is_null(partition))
                 return 0;
 
         efi_tilt_backslashes(path);
@@ -338,9 +398,10 @@ static int status_variables(void) {
 
         n_options = efi_get_boot_options(&options);
         if (n_options == -ENOENT)
-                return log_error_errno(ENOENT, "Failed to access EFI variables, efivarfs"
+                return log_error_errno(n_options,
+                                       "Failed to access EFI variables, efivarfs"
                                        " needs to be available at /sys/firmware/efi/efivars/.");
-        else if (n_options < 0)
+        if (n_options < 0)
                 return log_error_errno(n_options, "Failed to read EFI boot entries: %m");
 
         n_order = efi_get_boot_order(&order);
@@ -360,10 +421,11 @@ static int status_variables(void) {
 
                 for (j = 0; j < n_order; j++)
                         if (options[i] == order[j])
-                                goto next;
+                                goto next_option;
 
                 print_efi_option(options[i], false);
-        next:
+
+        next_option:
                 continue;
         }
 
@@ -396,16 +458,16 @@ static int compare_version(const char *a, const char *b) {
         return strverscmp(a, b);
 }
 
-static int version_check(int fd, const char *from, const char *to) {
+static int version_check(int fd_from, const char *from, int fd_to, const char *to) {
         _cleanup_free_ char *a = NULL, *b = NULL;
-        _cleanup_close_ int fd2 = -1;
         int r;
 
-        assert(fd >= 0);
+        assert(fd_from >= 0);
         assert(from);
+        assert(fd_to >= 0);
         assert(to);
 
-        r = get_file_version(fd, &a);
+        r = get_file_version(fd_from, &a);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -413,15 +475,7 @@ static int version_check(int fd, const char *from, const char *to) {
                 return -EINVAL;
         }
 
-        fd2 = open(to, O_RDONLY|O_CLOEXEC);
-        if (fd2 < 0) {
-                if (errno == ENOENT)
-                        return 0;
-
-                return log_error_errno(errno, "Failed to open \"%s\" for reading: %m", to);
-        }
-
-        r = get_file_version(fd2, &b);
+        r = get_file_version(fd_to, &b);
         if (r < 0)
                 return r;
         if (r == 0 || compare_product(a, b) != 0) {
@@ -437,99 +491,59 @@ static int version_check(int fd, const char *from, const char *to) {
         return 0;
 }
 
-static int copy_file(const char *from, const char *to, bool force) {
-        _cleanup_fclose_ FILE *f = NULL, *g = NULL;
-        char *p;
+static int copy_file_with_version_check(const char *from, const char *to, bool force) {
+        _cleanup_close_ int fd_from = -1, fd_to = -1;
+        _cleanup_free_ char *t = NULL;
         int r;
-        struct timespec t[2];
-        struct stat st;
 
-        assert(from);
-        assert(to);
-
-        f = fopen(from, "re");
-        if (!f)
+        fd_from = open(from, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+        if (fd_from < 0)
                 return log_error_errno(errno, "Failed to open \"%s\" for reading: %m", from);
 
         if (!force) {
-                /* If this is an update, then let's compare versions first */
-                r = version_check(fileno(f), from, to);
-                if (r < 0)
-                        return r;
-        }
+                fd_to = open(to, O_RDONLY|O_CLOEXEC|O_NOCTTY);
+                if (fd_to < 0) {
+                        if (errno != -ENOENT)
+                                return log_error_errno(errno, "Failed to open \"%s\" for reading: %m", to);
+                } else {
+                        r = version_check(fd_from, from, fd_to, to);
+                        if (r < 0)
+                                return r;
 
-        p = strjoina(to, "~");
-        g = fopen(p, "wxe");
-        if (!g) {
-                /* Directory doesn't exist yet? Then let's skip this... */
-                if (!force && errno == ENOENT)
-                        return 0;
+                        if (lseek(fd_from, 0, SEEK_SET) == (off_t) -1)
+                                return log_error_errno(errno, "Failed to seek in \%s\": %m", from);
 
-                return log_error_errno(errno, "Failed to open \"%s\" for writing: %m", to);
-        }
-
-        rewind(f);
-        do {
-                size_t k;
-                uint8_t buf[32*1024];
-
-                k = fread(buf, 1, sizeof(buf), f);
-                if (ferror(f)) {
-                        r = log_error_errno(EIO, "Failed to read \"%s\": %m", from);
-                        goto error;
+                        fd_to = safe_close(fd_to);
                 }
-
-                if (k == 0)
-                        break;
-
-                fwrite(buf, 1, k, g);
-                if (ferror(g)) {
-                        r = log_error_errno(EIO, "Failed to write \"%s\": %m", to);
-                        goto error;
-                }
-        } while (!feof(f));
-
-        r = fflush_and_check(g);
-        if (r < 0) {
-                log_error_errno(r, "Failed to write \"%s\": %m", to);
-                goto error;
         }
 
-        r = fstat(fileno(f), &st);
-        if (r < 0) {
-                r = log_error_errno(errno, "Failed to get file timestamps of \"%s\": %m", from);
-                goto error;
+        r = tempfn_random(to, NULL, &t);
+        if (r < 0)
+                return log_oom();
+
+        RUN_WITH_UMASK(0000) {
+                fd_to = open(t, O_WRONLY|O_CREAT|O_CLOEXEC|O_EXCL|O_NOFOLLOW, 0644);
+                if (fd_to < 0)
+                        return log_error_errno(errno, "Failed to open \"%s\" for writing: %m", t);
         }
 
-        t[0] = st.st_atim;
-        t[1] = st.st_mtim;
-
-        r = futimens(fileno(g), t);
+        r = copy_bytes(fd_from, fd_to, (uint64_t) -1, COPY_REFLINK);
         if (r < 0) {
-                r = log_error_errno(errno, "Failed to set file timestamps on \"%s\": %m", p);
-                goto error;
+                unlink(t);
+                return log_error_errno(errno, "Failed to copy data from \"%s\" to \"%s\": %m", from, t);
         }
 
-        if (rename(p, to) < 0) {
-                r = log_error_errno(errno, "Failed to rename \"%s\" to \"%s\": %m", p, to);
-                goto error;
+        (void) copy_times(fd_from, fd_to);
+
+        r = renameat(AT_FDCWD, t, AT_FDCWD, to);
+        if (r < 0) {
+                (void) unlink_noerrno(t);
+                return log_error_errno(errno, "Failed to rename \"%s\" to \"%s\": %m", t, to);
         }
 
         log_info("Copied \"%s\" to \"%s\".", from, to);
+
         return 0;
-
-error:
-        (void) unlink(p);
-        return r;
-}
-
-static char* strupper(char *s) {
-        char *p;
-
-        for (p = s; *p; p++)
-                *p = toupper(*p);
-
-        return s;
 }
 
 static int mkdir_one(const char *prefix, const char *suffix) {
@@ -548,17 +562,18 @@ static int mkdir_one(const char *prefix, const char *suffix) {
 static const char *efi_subdirs[] = {
         "EFI",
         "EFI/systemd",
-        "EFI/Boot",
+        "EFI/BOOT",
         "loader",
-        "loader/entries"
+        "loader/entries",
+        NULL
 };
 
 static int create_dirs(const char *esp_path) {
+        const char **i;
         int r;
-        unsigned i;
 
-        for (i = 0; i < ELEMENTSOF(efi_subdirs); i++) {
-                r = mkdir_one(esp_path, efi_subdirs[i]);
+        STRV_FOREACH(i, efi_subdirs) {
+                r = mkdir_one(esp_path, *i);
                 if (r < 0)
                         return r;
         }
@@ -572,17 +587,17 @@ static int copy_one_file(const char *esp_path, const char *name, bool force) {
 
         p = strjoina(BOOTLIBDIR "/", name);
         q = strjoina(esp_path, "/EFI/systemd/", name);
-        r = copy_file(p, q, force);
+        r = copy_file_with_version_check(p, q, force);
 
         if (startswith(name, "systemd-boot")) {
                 int k;
                 char *v;
 
                 /* Create the EFI default boot loader name (specified for removable devices) */
-                v = strjoina(esp_path, "/EFI/Boot/BOOT", name + strlen("systemd-boot"));
-                strupper(strrchr(v, '/') + 1);
+                v = strjoina(esp_path, "/EFI/BOOT/BOOT", name + strlen("systemd-boot"));
+                ascii_strupper(strrchr(v, '/') + 1);
 
-                k = copy_file(p, v, force);
+                k = copy_file_with_version_check(p, v, force);
                 if (k < 0 && r == 0)
                         r = k;
         }
@@ -751,8 +766,8 @@ static int install_variables(const char *esp_path,
         if (access(p, F_OK) < 0) {
                 if (errno == ENOENT)
                         return 0;
-                else
-                        return log_error_errno(errno, "Cannot access \"%s\": %m", p);
+
+                return log_error_errno(errno, "Cannot access \"%s\": %m", p);
         }
 
         r = find_slot(uuid, path, &slot);
@@ -762,7 +777,7 @@ static int install_variables(const char *esp_path,
                                        "Failed to access EFI variables. Is the \"efivarfs\" filesystem mounted?" :
                                        "Failed to determine current boot order: %m");
 
-        if (first || r == false) {
+        if (first || r == 0) {
                 r = efi_add_boot_option(slot, "Linux Boot Manager",
                                         part, pstart, psize,
                                         uuid, path);
@@ -781,7 +796,7 @@ static int remove_boot_efi(const char *esp_path) {
         struct dirent *de;
         int r, c = 0;
 
-        p = strjoina(esp_path, "/EFI/Boot");
+        p = strjoina(esp_path, "/EFI/BOOT");
         d = opendir(p);
         if (!d) {
                 if (errno == ENOENT)
@@ -797,7 +812,7 @@ static int remove_boot_efi(const char *esp_path) {
                 if (!endswith_no_case(de->d_name, ".efi"))
                         continue;
 
-                if (!startswith_no_case(de->d_name, "Boot"))
+                if (!startswith_no_case(de->d_name, "boot"))
                         continue;
 
                 fd = openat(dirfd(d), de->d_name, O_RDONLY|O_CLOEXEC);
@@ -846,7 +861,7 @@ static int remove_binaries(const char *esp_path) {
         if (q < 0 && r == 0)
                 r = q;
 
-        for (i = ELEMENTSOF(efi_subdirs); i > 0; i--) {
+        for (i = ELEMENTSOF(efi_subdirs)-1; i > 0; i--) {
                 q = rmdir_one(esp_path, efi_subdirs[i-1]);
                 if (q < 0 && r == 0)
                         r = q;
@@ -872,46 +887,58 @@ static int remove_variables(sd_id128_t uuid, const char *path, bool in_order) {
 
         if (in_order)
                 return remove_from_order(slot);
-        else
-                return 0;
-}
-
-static int install_loader_config(const char *esp_path) {
-        char *p;
-        char line[64];
-        char *machine = NULL;
-        _cleanup_fclose_ FILE *f = NULL, *g = NULL;
-
-        f = fopen("/etc/machine-id", "re");
-        if (!f)
-                return errno == ENOENT ? 0 : -errno;
-
-        if (fgets(line, sizeof(line), f) != NULL) {
-                char *s;
-
-                s = strchr(line, '\n');
-                if (s)
-                        s[0] = '\0';
-                if (strlen(line) == 32)
-                        machine = line;
-        }
-
-        if (!machine)
-                return -ESRCH;
-
-        p = strjoina(esp_path, "/loader/loader.conf");
-        g = fopen(p, "wxe");
-        if (g) {
-                fprintf(g, "#timeout 3\n");
-                fprintf(g, "default %s-*\n", machine);
-                if (ferror(g))
-                        return log_error_errno(EIO, "Failed to write \"%s\": %m", p);
-        }
 
         return 0;
 }
 
-static int help(void) {
+static int install_loader_config(const char *esp_path) {
+
+        char machine_string[SD_ID128_STRING_MAX];
+        _cleanup_(unlink_and_freep) char *t = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
+        sd_id128_t machine_id;
+        const char *p;
+        int r, fd;
+
+        r = sd_id128_get_machine(&machine_id);
+        if (r < 0)
+                return log_error_errno(r, "Failed to get machine did: %m");
+
+        p = strjoina(esp_path, "/loader/loader.conf");
+
+        if (access(p, F_OK) >= 0) /* Silently skip creation if the file already exists (early check) */
+                return 0;
+
+        fd = open_tmpfile_linkable(p, O_WRONLY|O_CLOEXEC, &t);
+        if (fd < 0)
+                return log_error_errno(fd, "Failed to open \"%s\" for writing: %m", p);
+
+        f = fdopen(fd, "we");
+        if (!f) {
+                safe_close(fd);
+                return log_oom();
+        }
+
+        fprintf(f, "#timeout 3\n");
+        fprintf(f, "default %s-*\n", sd_id128_to_string(machine_id, machine_string));
+
+        r = fflush_and_check(f);
+        if (r < 0)
+                return log_error_errno(r, "Failed to write \"%s\": %m", p);
+
+        r = link_tmpfile(fd, t, p);
+        if (r == -EEXIST)
+                return 0; /* Silently skip creation if the file exists now (recheck) */
+        if (r < 0)
+                return log_error_errno(r, "Failed to move \"%s\" into place: %m", p);
+
+        t = mfree(t);
+
+        return 1;
+}
+
+static int help(int argc, char *argv[], void *userdata) {
+
         printf("%s [COMMAND] [OPTIONS...]\n"
                "\n"
                "Install, update or remove the systemd-boot EFI boot manager.\n\n"
@@ -930,9 +957,6 @@ static int help(void) {
         return 0;
 }
 
-static const char *arg_path = "/boot";
-static bool arg_touch_variables = true;
-
 static int parse_argv(int argc, char *argv[]) {
         enum {
                 ARG_PATH = 0x100,
@@ -948,7 +972,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { NULL,           0,                 NULL, 0                }
         };
 
-        int c;
+        int c, r;
 
         assert(argc >= 0);
         assert(argv);
@@ -957,14 +981,16 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
+                        help(0, NULL, NULL);
                         return 0;
 
                 case ARG_VERSION:
                         return version();
 
                 case ARG_PATH:
-                        arg_path = optarg;
+                        r = free_and_strdup(&arg_path, optarg);
+                        if (r < 0)
+                                return log_oom();
                         break;
 
                 case ARG_NO_VARIABLES:
@@ -989,141 +1015,158 @@ static void read_loader_efi_var(const char *name, char **var) {
                 log_warning_errno(r, "Failed to read EFI variable %s: %m", name);
 }
 
-static int bootctl_main(int argc, char*argv[]) {
-        enum action {
-                ACTION_STATUS,
-                ACTION_INSTALL,
-                ACTION_UPDATE,
-                ACTION_REMOVE
-        } arg_action = ACTION_STATUS;
-        static const struct {
-                const char* verb;
-                enum action action;
-        } verbs[] = {
-                { "status",  ACTION_STATUS },
-                { "install", ACTION_INSTALL },
-                { "update",  ACTION_UPDATE },
-                { "remove",  ACTION_REMOVE },
-        };
+static int must_be_root(void) {
 
-        sd_id128_t uuid = {};
-        uint32_t part = 0;
-        uint64_t pstart = 0, psize = 0;
-        int r, q;
+        if (geteuid() == 0)
+                return 0;
 
-        if (argv[optind]) {
-                unsigned i;
+        log_error("Need to be root.");
+        return -EPERM;
+}
 
-                for (i = 0; i < ELEMENTSOF(verbs); i++) {
-                        if (!streq(argv[optind], verbs[i].verb))
-                                continue;
-                        arg_action = verbs[i].action;
-                        break;
-                }
-                if (i >= ELEMENTSOF(verbs)) {
-                        log_error("Unknown operation \"%s\"", argv[optind]);
-                        return -EINVAL;
-                }
-        }
+static int verb_status(int argc, char *argv[], void *userdata) {
 
-        if (geteuid() != 0)
-                return log_error_errno(EPERM, "Need to be root.");
+        sd_id128_t uuid = SD_ID128_NULL;
+        int r;
 
-        r = verify_esp(arg_path, &part, &pstart, &psize, &uuid);
-        if (r == -ENODEV && !arg_path)
-                log_notice("You might want to use --path= to indicate the path to your ESP, in case it is not mounted on /boot.");
+        r = must_be_root();
         if (r < 0)
                 return r;
 
-        switch (arg_action) {
-        case ACTION_STATUS: {
-                _cleanup_free_ char *fw_type = NULL;
-                _cleanup_free_ char *fw_info = NULL;
-                _cleanup_free_ char *loader = NULL;
-                _cleanup_free_ char *loader_path = NULL;
-                sd_id128_t loader_part_uuid = {};
+        r = find_esp(NULL, NULL, NULL, &uuid);
+        if (r < 0)
+                return r;
 
-                if (is_efi_boot()) {
-                        read_loader_efi_var("LoaderFirmwareType", &fw_type);
-                        read_loader_efi_var("LoaderFirmwareInfo", &fw_info);
-                        read_loader_efi_var("LoaderInfo", &loader);
-                        read_loader_efi_var("LoaderImageIdentifier", &loader_path);
-                        if (loader_path)
-                                efi_tilt_backslashes(loader_path);
-                        r = efi_loader_get_device_part_uuid(&loader_part_uuid);
-                        if (r < 0 && r == -ENOENT)
-                                log_warning_errno(r, "Failed to read EFI variable LoaderDevicePartUUID: %m");
+        if (is_efi_boot()) {
+                _cleanup_free_ char *fw_type = NULL, *fw_info = NULL, *loader = NULL, *loader_path = NULL;
+                sd_id128_t loader_part_uuid = SD_ID128_NULL;
 
-                        printf("System:\n");
-                        printf("     Firmware: %s (%s)\n", strna(fw_type), strna(fw_info));
+                read_loader_efi_var("LoaderFirmwareType", &fw_type);
+                read_loader_efi_var("LoaderFirmwareInfo", &fw_info);
+                read_loader_efi_var("LoaderInfo", &loader);
+                read_loader_efi_var("LoaderImageIdentifier", &loader_path);
 
-                        r = is_efi_secure_boot();
-                        if (r < 0)
-                                log_warning_errno(r, "Failed to query secure boot status: %m");
-                        else
-                                printf("  Secure Boot: %s\n", r ? "enabled" : "disabled");
+                if (loader_path)
+                        efi_tilt_backslashes(loader_path);
 
-                        r = is_efi_secure_boot_setup_mode();
-                        if (r < 0)
-                                log_warning_errno(r, "Failed to query secure boot mode: %m");
-                        else
-                                printf("   Setup Mode: %s\n", r ? "setup" : "user");
-                        printf("\n");
+                r = efi_loader_get_device_part_uuid(&loader_part_uuid);
+                if (r < 0 && r != -ENOENT)
+                        log_warning_errno(r, "Failed to read EFI variable LoaderDevicePartUUID: %m");
 
-                        printf("Loader:\n");
-                        printf("      Product: %s\n", strna(loader));
-                        if (!sd_id128_equal(loader_part_uuid, SD_ID128_NULL))
-                                printf("    Partition: /dev/disk/by-partuuid/%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
-                                       SD_ID128_FORMAT_VAL(loader_part_uuid));
-                        else
-                                printf("    Partition: n/a\n");
-                        printf("         File: %s%s\n", special_glyph(TREE_RIGHT), strna(loader_path));
-                        printf("\n");
-                } else
-                        printf("System:\n    Not booted with EFI\n");
+                printf("System:\n");
+                printf("     Firmware: %s (%s)\n", strna(fw_type), strna(fw_info));
 
-                r = status_binaries(arg_path, uuid);
+                r = is_efi_secure_boot();
+                if (r < 0)
+                        log_warning_errno(r, "Failed to query secure boot status: %m");
+                else
+                        printf("  Secure Boot: %sd\n", enable_disable(r));
+
+                r = is_efi_secure_boot_setup_mode();
+                if (r < 0)
+                        log_warning_errno(r, "Failed to query secure boot mode: %m");
+                else
+                        printf("   Setup Mode: %s\n", r ? "setup" : "user");
+                printf("\n");
+
+                printf("Loader:\n");
+                printf("      Product: %s\n", strna(loader));
+                if (!sd_id128_is_null(loader_part_uuid))
+                        printf("    Partition: /dev/disk/by-partuuid/%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+                               SD_ID128_FORMAT_VAL(loader_part_uuid));
+                else
+                        printf("    Partition: n/a\n");
+                printf("         File: %s%s\n", special_glyph(TREE_RIGHT), strna(loader_path));
+                printf("\n");
+        } else
+                printf("System:\n    Not booted with EFI\n");
+
+        r = status_binaries(arg_path, uuid);
+        if (r < 0)
+                return r;
+
+        if (arg_touch_variables)
+                r = status_variables();
+
+        return r;
+}
+
+static int verb_install(int argc, char *argv[], void *userdata) {
+
+        sd_id128_t uuid = SD_ID128_NULL;
+        uint64_t pstart = 0, psize = 0;
+        uint32_t part = 0;
+        bool install;
+        int r;
+
+        r = must_be_root();
+        if (r < 0)
+                return r;
+
+        r = find_esp(&part, &pstart, &psize, &uuid);
+        if (r < 0)
+                return r;
+
+        install = streq(argv[0], "install");
+
+        RUN_WITH_UMASK(0002) {
+                r = install_binaries(arg_path, install);
                 if (r < 0)
                         return r;
 
-                if (arg_touch_variables)
-                        r = status_variables();
-                break;
-        }
-
-        case ACTION_INSTALL:
-        case ACTION_UPDATE:
-                umask(0002);
-
-                r = install_binaries(arg_path, arg_action == ACTION_INSTALL);
-                if (r < 0)
-                        return r;
-
-                if (arg_action == ACTION_INSTALL) {
+                if (install) {
                         r = install_loader_config(arg_path);
                         if (r < 0)
                                 return r;
                 }
+        }
 
-                if (arg_touch_variables)
-                        r = install_variables(arg_path,
-                                              part, pstart, psize, uuid,
-                                              "/EFI/systemd/systemd-boot" EFI_MACHINE_TYPE_NAME ".efi",
-                                              arg_action == ACTION_INSTALL);
-                break;
+        if (arg_touch_variables)
+                r = install_variables(arg_path,
+                                      part, pstart, psize, uuid,
+                                      "/EFI/systemd/systemd-boot" EFI_MACHINE_TYPE_NAME ".efi",
+                                      install);
 
-        case ACTION_REMOVE:
-                r = remove_binaries(arg_path);
+        return r;
+}
 
-                if (arg_touch_variables) {
-                        q = remove_variables(uuid, "/EFI/systemd/systemd-boot" EFI_MACHINE_TYPE_NAME ".efi", true);
-                        if (q < 0 && r == 0)
-                                r = q;
-                }
-                break;
+static int verb_remove(int argc, char *argv[], void *userdata) {
+        sd_id128_t uuid = SD_ID128_NULL;
+        int r;
+
+        r = must_be_root();
+        if (r < 0)
+                return r;
+
+        r = find_esp(NULL, NULL, NULL, &uuid);
+        if (r < 0)
+                return r;
+
+        r = remove_binaries(arg_path);
+
+        if (arg_touch_variables) {
+                int q;
+
+                q = remove_variables(uuid, "/EFI/systemd/systemd-boot" EFI_MACHINE_TYPE_NAME ".efi", true);
+                if (q < 0 && r == 0)
+                        r = q;
         }
 
         return r;
+}
+
+static int bootctl_main(int argc, char *argv[]) {
+
+        static const Verb verbs[] = {
+                { "help",            VERB_ANY, VERB_ANY, 0,            help         },
+                { "status",          VERB_ANY, 1,        VERB_DEFAULT, verb_status  },
+                { "install",         VERB_ANY, 1,        0,            verb_install },
+                { "update",          VERB_ANY, 1,        0,            verb_install },
+                { "remove",          VERB_ANY, 1,        0,            verb_remove  },
+                {}
+        };
+
+        return dispatch_verb(argc, argv, verbs, NULL);
 }
 
 int main(int argc, char *argv[]) {
@@ -1132,6 +1175,10 @@ int main(int argc, char *argv[]) {
         log_parse_environment();
         log_open();
 
+        /* If we run in a container, automatically turn of EFI file system access */
+        if (detect_container() > 0)
+                arg_touch_variables = false;
+
         r = parse_argv(argc, argv);
         if (r <= 0)
                 goto finish;
@@ -1139,5 +1186,6 @@ int main(int argc, char *argv[]) {
         r = bootctl_main(argc, argv);
 
  finish:
+        free(arg_path);
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

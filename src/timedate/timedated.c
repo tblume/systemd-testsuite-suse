@@ -413,7 +413,7 @@ static int method_set_timezone(sd_bus_message *m, void *userdata, sd_bus_error *
         }
 
         log_struct(LOG_INFO,
-                   LOG_MESSAGE_ID(SD_MESSAGE_TIMEZONE_CHANGE),
+                   "MESSAGE_ID=" SD_MESSAGE_TIMEZONE_CHANGE_STR,
                    "TIMEZONE=%s", c->zone,
                    LOG_MESSAGE("Changed time zone to '%s'.", c->zone),
                    NULL);
@@ -591,7 +591,7 @@ static int method_set_time(sd_bus_message *m, void *userdata, sd_bus_error *erro
         clock_set_hwclock(tm);
 
         log_struct(LOG_INFO,
-                   LOG_MESSAGE_ID(SD_MESSAGE_TIME_CHANGE),
+                   "MESSAGE_ID=" SD_MESSAGE_TIME_CHANGE_STR,
                    "REALTIME="USEC_FMT, timespec_load(&ts),
                    LOG_MESSAGE("Changed local time to %s", ctime(&ts.tv_sec)),
                    NULL);
@@ -637,7 +637,7 @@ static int method_set_ntp(sd_bus_message *m, void *userdata, sd_bus_error *error
                 return r;
 
         c->use_ntp = enabled;
-        log_info("Set NTP to %s", enabled ? "enabled" : "disabled");
+        log_info("Set NTP to %sd", enable_disable(enabled));
 
         (void) sd_bus_emit_properties_changed(sd_bus_message_get_bus(m), "/org/freedesktop/timedate1", "org.freedesktop.timedate1", "NTP", NULL);
 

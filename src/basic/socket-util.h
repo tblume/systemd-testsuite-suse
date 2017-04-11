@@ -30,6 +30,7 @@
 #include <linux/if_packet.h>
 
 #include "macro.h"
+#include "missing.h"
 #include "util.h"
 
 union sockaddr_union {
@@ -40,6 +41,7 @@ union sockaddr_union {
         struct sockaddr_nl nl;
         struct sockaddr_storage storage;
         struct sockaddr_ll ll;
+        struct sockaddr_vm vm;
 };
 
 typedef struct SocketAddress {
@@ -100,7 +102,7 @@ const char* socket_address_get_path(const SocketAddress *a);
 
 bool socket_ipv6_is_supported(void);
 
-int sockaddr_port(const struct sockaddr *_sa) _pure_;
+int sockaddr_port(const struct sockaddr *_sa, unsigned *port);
 
 int sockaddr_pretty(const struct sockaddr *_sa, socklen_t salen, bool translate_ipv6, bool include_port, char **ret);
 int getpeername_pretty(int fd, bool include_port, char **ret);
@@ -124,6 +126,7 @@ int ip_tos_to_string_alloc(int i, char **s);
 int ip_tos_from_string(const char *s);
 
 bool ifname_valid(const char *p);
+bool address_label_valid(const char *p);
 
 int getpeercred(int fd, struct ucred *ucred);
 int getpeersec(int fd, char **ret);
@@ -142,6 +145,8 @@ int flush_accept(int fd);
 #define CMSG_FOREACH(cmsg, mh)                                          \
         for ((cmsg) = CMSG_FIRSTHDR(mh); (cmsg); (cmsg) = CMSG_NXTHDR((mh), (cmsg)))
 
+struct cmsghdr* cmsg_find(struct msghdr *mh, int level, int type, socklen_t length);
+
 /* Covers only file system and abstract AF_UNIX socket addresses, but not unnamed socket addresses. */
 #define SOCKADDR_UN_LEN(sa)                                             \
         ({                                                              \
@@ -152,3 +157,5 @@ int flush_accept(int fd);
                          1 + strnlen(_sa->sun_path+1, sizeof(_sa->sun_path)-1) : \
                          strnlen(_sa->sun_path, sizeof(_sa->sun_path))); \
         })
+
+int socket_ioctl_fd(void);

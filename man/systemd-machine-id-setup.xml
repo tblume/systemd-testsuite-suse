@@ -82,7 +82,7 @@
       <filename>/etc/machine-id</filename>.</para></listitem>
 
       <listitem><para>If run inside a KVM virtual machine and a UUID
-      is was configured (via the <option>-uuid</option>
+      is configured (via the <option>-uuid</option>
       option), this UUID is used to initialize the machine ID. The
       caller must ensure that the UUID passed is sufficiently unique
       and is different for every booted instance of the
@@ -92,7 +92,7 @@
       environment and a UUID is configured for the container, this is
       used to initialize the machine ID. For details, see the
       documentation of the <ulink
-      url="http://www.freedesktop.org/wiki/Software/systemd/ContainerInterface">Container
+      url="https://www.freedesktop.org/wiki/Software/systemd/ContainerInterface">Container
       Interface</ulink>.</para></listitem>
 
       <listitem><para>Otherwise, a new ID is randomly
@@ -149,6 +149,12 @@
         <para>This command is primarily used by the
         <citerefentry><refentrytitle>systemd-machine-id-commit.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
         early boot service.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--print</option></term>
+
+        <listitem><para>Print the machine ID generated or committed after the operation is complete.</para></listitem>
       </varlistentry>
 
       <xi:include href="standard-options.xml" xpointer="help" />

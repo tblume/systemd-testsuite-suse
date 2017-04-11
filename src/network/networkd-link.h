@@ -68,6 +68,7 @@ typedef struct Link {
 
         int ifindex;
         char *ifname;
+        char *kind;
         unsigned short iftype;
         char *state_file;
         struct ether_addr mac;
@@ -158,8 +159,6 @@ bool link_has_carrier(Link *link);
 int link_ipv6ll_gained(Link *link, const struct in6_addr *address);
 
 int link_set_mtu(Link *link, uint32_t mtu);
-int link_set_hostname(Link *link, const char *hostname);
-int link_set_timezone(Link *link, const char *timezone);
 
 int ipv4ll_configure(Link *link);
 int dhcp4_configure(Link *link);
@@ -185,8 +184,8 @@ DEFINE_TRIVIAL_CLEANUP_FUNC(Link*, link_unref);
 
 #define log_link_full(link, level, error, ...)                          \
         ({                                                              \
-                Link *_l = (link);                                      \
-                _l ? log_object_internal(level, error, __FILE__, __LINE__, __func__, "INTERFACE=", _l->ifname, ##__VA_ARGS__) : \
+                const Link *_l = (link);                                \
+                _l ? log_object_internal(level, error, __FILE__, __LINE__, __func__, "INTERFACE=", _l->ifname, NULL, NULL, ##__VA_ARGS__) : \
                         log_internal(level, error, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
         })                                                              \
 

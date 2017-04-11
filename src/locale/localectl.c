@@ -166,6 +166,8 @@ static int show_status(sd_bus *bus, char **args, unsigned n) {
                 { "Locale",               "as", NULL, offsetof(StatusInfo, locale) },
                 {}
         };
+
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
         assert(bus);
@@ -174,9 +176,10 @@ static int show_status(sd_bus *bus, char **args, unsigned n) {
                                    "org.freedesktop.locale1",
                                    "/org/freedesktop/locale1",
                                    map,
+                                   &error,
                                    &info);
         if (r < 0)
-                return log_error_errno(r, "Could not get properties: %m");
+                return log_error_errno(r, "Could not get properties: %s", bus_error_message(&error, r));
 
         print_overridden_variables();
         print_status_info(&info);
@@ -656,7 +659,7 @@ static int localectl_main(sd_bus *bus, int argc, char *argv[]) {
 }
 
 int main(int argc, char*argv[]) {
-        _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
+        sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");
@@ -676,6 +679,7 @@ int main(int argc, char*argv[]) {
         r = localectl_main(bus, argc, argv);
 
 finish:
+        sd_bus_flush_close_unref(bus);
         pager_close();
 
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;

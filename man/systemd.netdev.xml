@@ -58,31 +58,38 @@
     <citerefentry><refentrytitle>systemd-networkd</refentrytitle><manvolnum>8</manvolnum></citerefentry>.
     </para>
 
-    <para>Virtual Network Device files must have the extension
-    <filename>.netdev</filename>; other extensions are ignored.
-    Virtual network devices are created as soon as networkd is
-    started. If a netdev with the specified name already exists,
-    networkd will use that as-is rather than create its own. Note that
-    the settings of the pre-existing netdev will not be changed by
+    <para>The main Virtual Network Device file must have the extension <filename>.netdev</filename>;
+    other extensions are ignored. Virtual network devices are created as soon as networkd is
+    started. If a netdev with the specified name already exists, networkd will use that as-is rather
+    than create its own. Note that the settings of the pre-existing netdev will not be changed by
     networkd.</para>
 
-    <para>The <filename>.netdev</filename> files are read from the
-    files located in the system network directory
-    <filename>/usr/lib/systemd/network</filename>, the volatile
-    runtime network directory
-    <filename>/run/systemd/network</filename> and the local
-    administration network directory
-    <filename>/etc/systemd/network</filename>. All configuration files
-    are collectively sorted and processed in lexical order, regardless
-    of the directories in which they live. However, files with
-    identical filenames replace each other. Files in
-    <filename>/etc</filename> have the highest priority, files in
-    <filename>/run</filename> take precedence over files with the same
-    name in <filename>/usr/lib</filename>. This can be used to
-    override a system-supplied configuration file with a local file if
-    needed. As a special case, an empty file (file size 0) or symlink
-    with the same name pointing to <filename>/dev/null</filename>
-    disables the configuration file entirely (it is "masked").</para>
+    <para>The <filename>.netdev</filename> files are read from the files located in the system
+    network directory <filename>/usr/lib/systemd/network</filename>, the volatile runtime network
+    directory <filename>/run/systemd/network</filename> and the local administration network
+    directory <filename>/etc/systemd/network</filename>. All configuration files are collectively
+    sorted and processed in lexical order, regardless of the directories in which they live.
+    However, files with identical filenames replace each other. Files in <filename>/etc</filename>
+    have the highest priority, files in <filename>/run</filename> take precedence over files with
+    the same name in <filename>/usr/lib</filename>. This can be used to override a system-supplied
+    configuration file with a local file if needed. As a special case, an empty file (file size 0)
+    or symlink with the same name pointing to <filename>/dev/null</filename> disables the
+    configuration file entirely (it is "masked").</para>
+
+    <para>Along with the netdev file <filename>foo.netdev</filename>, a "drop-in" directory
+    <filename>foo.netdev.d/</filename> may exist. All files with the suffix <literal>.conf</literal>
+    from this directory will be parsed after the file itself is parsed. This is useful to alter or
+    add configuration settings, without having to modify the main configuration file. Each drop-in
+    file must have appropriate section headers.</para>
+
+    <para>In addition to <filename>/etc/systemd/network</filename>, drop-in <literal>.d</literal>
+    directories can be placed in <filename>/usr/lib/systemd/network</filename> or
+    <filename>/run/systemd/network</filename> directories. Drop-in files in
+    <filename>/etc</filename> take precedence over those in <filename>/run</filename> which in turn
+    take precedence over those in <filename>/usr/lib</filename>. Drop-in files under any of these
+    directories take precedence over the main netdev file wherever located. (Of course, since
+    <filename>/run</filename> is temporary and <filename>/usr/lib</filename> is for vendors, it is
+    unlikely drop-ins should be used in either of those places.)</para>
   </refsect1>
 
   <refsect1>
@@ -124,7 +131,7 @@
           <entry>An IPv4 or IPv6 tunnel over IPv6</entry></row>
 
           <row><entry><varname>ip6gretap</varname></entry>
-          <entry>An Level 2 GRE tunnel over IPv6.</entry></row>
+          <entry>A Level 2 GRE tunnel over IPv6.</entry></row>
 
           <row><entry><varname>ipip</varname></entry>
           <entry>An IPv4 over IPv4 tunnel.</entry></row>
@@ -161,6 +168,13 @@
 
           <row><entry><varname>vxlan</varname></entry>
           <entry>A virtual extensible LAN (vxlan), for connecting Cloud computing deployments.</entry></row>
+
+          <row><entry><varname>vrf</varname></entry>
+          <entry>A Virtual Routing and Forwarding (<ulink url="https://www.kernel.org/doc/Documentation/networking/vrf.txt">VRF</ulink>) interface to create separate routing and forwarding domains.</entry></row>
+
+          <row><entry><varname>vcan</varname></entry>
+          <entry>The virtual CAN driver (vcan). Similar to the network loopback devices, vcan offers a virtual local CAN interface.</entry></row>
+
         </tbody>
       </tgroup>
     </table>
@@ -311,6 +325,26 @@
           </listitem>
         </varlistentry>
         <varlistentry>
+          <term><varname>AgeingTimeSec=</varname></term>
+          <listitem>
+            <para>This specifies the number of seconds a MAC Address will be kept in
+            the forwarding database after having a packet received from this MAC Address.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>Priority=</varname></term>
+          <listitem>
+            <para>The priority of the bridge. An integer between 0 and 65535. A lower value
+            means higher priority. The bridge having the lowest priority will be elected as root bridge.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><varname>DefaultPVID=</varname></term>
+          <listitem>
+            <para>This specifies the default port VLAN ID of a newly attached bridge port.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
           <term><varname>MulticastQuerier=</varname></term>
           <listitem>
             <para>A boolean. This setting controls the IFLA_BR_MCAST_QUERIER option in the kernel.
@@ -339,8 +373,15 @@
             </para>
           </listitem>
         </varlistentry>
+          <varlistentry>
+          <term><varname>STP=</varname></term>
+          <listitem>
+            <para>A boolean. This enables the bridge's Spanning Tree Protocol (STP). When unset,
+            the kernel's default setting applies.
+            </para>
+          </listitem>
+        </varlistentry>
       </variablelist>
-
   </refsect1>
 
   <refsect1>
@@ -428,12 +469,18 @@
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term><varname>Group=</varname></term>
+        <term><varname>Remote=</varname></term>
         <listitem>
-          <para>An assigned multicast group IP address.</para>
+          <para>Configures destination multicast group IP address.</para>
         </listitem>
       </varlistentry>
       <varlistentry>
+        <term><varname>Local=</varname></term>
+        <listitem>
+          <para>Configures local IP address.</para>
+        </listitem>
+      </varlistentry>
+        <varlistentry>
         <term><varname>TOS=</varname></term>
         <listitem>
           <para>The Type Of Service byte value for a vxlan interface.</para>
@@ -469,9 +516,13 @@
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term><varname>ARPProxy=</varname></term>
+        <term><varname>ReduceARPProxy=</varname></term>
         <listitem>
-          <para>A boolean. When true, enables ARP proxying.</para>
+          <para>A boolean. When true, bridge-connected VXLAN tunnel
+          endpoint answers ARP requests from the local bridge on behalf
+          of remote Distributed Overlay Virtual Ethernet
+          <ulink url="https://en.wikipedia.org/wiki/Distributed_Overlay_Virtual_Ethernet">
+          (DVOE)</ulink> clients. Defaults to false.</para>
         </listitem>
       </varlistentry>
       <varlistentry>
@@ -496,7 +547,7 @@
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term><varname>UDPCheckSum=</varname></term>
+        <term><varname>UDPChecksum=</varname></term>
         <listitem>
           <para>A boolean. When true, transmitting UDP checksums when doing VXLAN/IPv4 is turned on.</para>
         </listitem>
@@ -508,9 +559,21 @@
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term><varname>UDP6ZeroCheckSumRx=</varname></term>
+        <term><varname>UDP6ZeroChecksumRx=</varname></term>
         <listitem>
           <para>A boolean. When true, receiving zero checksums in VXLAN/IPv6 is turned on.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>RemoteChecksumTx=</varname></term>
+        <listitem>
+          <para>A boolean. When true, remote transmit checksum offload of VXLAN is turned on.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>RemoteChecksumRx=</varname></term>
+        <listitem>
+          <para>A boolean. When true, remote receive checksum offload in VXLAN is turned on.</para>
         </listitem>
       </varlistentry>
     <varlistentry>
@@ -636,6 +699,33 @@
           (see <ulink url="https://tools.ietf.org/html/rfc2473#section-4.1.1"> RFC 2473</ulink>).
           The valid range is 0–255 and <literal>none</literal>. Defaults to 4.
         </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>Key=</varname></term>
+        <listitem>
+          <para>The <varname>Key=</varname> parameter specifies the same key to use in
+          both directions (<varname>InputKey=</varname> and <varname>OutputKey=</varname>).
+          The <varname>Key=</varname> is either a number or an IPv4 address-like dotted quad.
+          It is used as mark-configured SAD/SPD entry as part of the lookup key (both in data
+          and control path) in ip xfrm (framework used to implement IPsec protocol).
+          See <ulink url="http://man7.org/linux/man-pages/man8/ip-xfrm.8.html">
+          ip-xfrm — transform configuration</ulink> for details. It is only used for VTI/VTI6
+          tunnels.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>InputKey=</varname></term>
+        <listitem>
+          <para>The <varname>InputKey=</varname> parameter specifies the key to use for input.
+          The format is same as <varname>Key=</varname>. It is only used for VTI/VTI6 tunnels.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><varname>OutputKey=</varname></term>
+        <listitem>
+          <para>The <varname>OutputKey=</varname> parameter specifies the key to use for output.
+          The format is same as <varname>Key=</varname>. It is only used for VTI/VTI6 tunnels.</para>
         </listitem>
       </varlistentry>
       <varlistentry>
@@ -777,8 +867,7 @@
           <literal>layer2</literal>,
           <literal>layer3+4</literal>,
           <literal>layer2+3</literal>,
-          <literal>encap2+3</literal>,
-          <literal>802.3ad</literal>, and
+          <literal>encap2+3</literal>, and
           <literal>encap3+4</literal>.
           </para>
         </listitem>
@@ -989,6 +1078,33 @@
         </listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term><varname>ActiveSlave=</varname></term>
+        <listitem>
+          <para>A boolean. Specifies the new active slave. The <literal>ActiveSlave=</literal>
+          option is only valid for following modes:
+          <literal>active-backup</literal>,
+          <literal>balance-alb</literal> and
+          <literal>balance-tlb</literal>. Defaults to false.
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>PrimarySlave=</varname></term>
+        <listitem>
+          <para>A boolean. Specifies which slave is the primary device. The specified
+          device will always be the active slave while it is available. Only when the
+          primary is off-line will alternate devices be used.  This is useful when
+          one slave is preferred over another, e.g. when one slave has higher throughput
+          than another. The <literal>PrimarySlave=</literal> option is only valid for
+          following modes:
+          <literal>active-backup</literal>,
+          <literal>balance-alb</literal> and
+          <literal>balance-tlb</literal>. Defaults to false.
+          </para>
+        </listitem>
+      </varlistentry>
     </variablelist>
 
     <para>For more detail information see
@@ -1110,7 +1226,25 @@ Name=dummy-test
 Kind=dummy
 MACAddress=12:34:56:78:9a:bc</programlisting>
     </example>
+    <example>
+      <title>/etc/systemd/network/25-vrf.netdev</title>
+      <para>Create a VRF interface with table 42.</para>
+      <programlisting>[NetDev]
+Name=vrf-test
+Kind=vrf
 
+[VRF]
+TableId=42</programlisting>
+    </example>
+
+    <example>
+      <title>/etc/systemd/network/25-macvtap.netdev</title>
+      <para>Create a MacVTap device.</para>
+      <programlisting>[NetDev]
+Name=macvtap-test
+Kind=macvtap
+      </programlisting>
+    </example>
   </refsect1>
   <refsect1>
     <title>See Also</title>

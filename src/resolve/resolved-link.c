@@ -22,7 +22,10 @@
 #include "sd-network.h"
 
 #include "alloc-util.h"
+#include "fd-util.h"
+#include "fileio.h"
 #include "missing.h"
+#include "mkdir.h"
 #include "parse-util.h"
 #include "resolved-link.h"
 #include "string-util.h"
@@ -48,6 +51,9 @@ int link_new(Manager *m, Link **ret, int ifindex) {
         l->mdns_support = RESOLVE_SUPPORT_NO;
         l->dnssec_mode = _DNSSEC_MODE_INVALID;
         l->operstate = IF_OPER_UNKNOWN;
+
+        if (asprintf(&l->state_file, "/run/systemd/resolve/netif/%i", ifindex) < 0)
+                return -ENOMEM;
 
         r = hashmap_put(m->links, INT_TO_PTR(ifindex), l);
         if (r < 0)
@@ -79,6 +85,10 @@ Link *link_free(Link *l) {
         if (!l)
                 return NULL;
 
+        /* Send goodbye messages. */
+        dns_scope_announce(l->mdns_ipv4_scope, true);
+        dns_scope_announce(l->mdns_ipv6_scope, true);
+
         link_flush_settings(l);
 
         while (l->addresses)
@@ -93,8 +103,9 @@ Link *link_free(Link *l) {
         dns_scope_free(l->mdns_ipv4_scope);
         dns_scope_free(l->mdns_ipv6_scope);
 
-        free(l);
-        return NULL;
+        free(l->state_file);
+
+        return mfree(l);
 }
 
 void link_allocate_scopes(Link *l) {
@@ -165,7 +176,7 @@ void link_add_rrs(Link *l, bool force_remove) {
                 link_address_add_rrs(a, force_remove);
 }
 
-int link_update_rtnl(Link *l, sd_netlink_message *m) {
+int link_process_rtnl(Link *l, sd_netlink_message *m) {
         const char *n = NULL;
         int r;
 
@@ -190,6 +201,27 @@ int link_update_rtnl(Link *l, sd_netlink_message *m) {
         return 0;
 }
 
+static int link_update_dns_server_one(Link *l, const char *name) {
+        union in_addr_union a;
+        DnsServer *s;
+        int family, r;
+
+        assert(l);
+        assert(name);
+
+        r = in_addr_from_string_auto(name, &family, &a);
+        if (r < 0)
+                return r;
+
+        s = dns_server_find(l->dns_servers, family, &a, 0);
+        if (s) {
+                dns_server_move_back_and_unmark(s);
+                return 0;
+        }
+
+        return dns_server_new(l->manager, NULL, DNS_SERVER_LINK, l, family, &a, 0);
+}
+
 static int link_update_dns_servers(Link *l) {
         _cleanup_strv_free_ char **nameservers = NULL;
         char **nameserver;
@@ -208,22 +240,9 @@ static int link_update_dns_servers(Link *l) {
         dns_server_mark_all(l->dns_servers);
 
         STRV_FOREACH(nameserver, nameservers) {
-                union in_addr_union a;
-                DnsServer *s;
-                int family;
-
-                r = in_addr_from_string_auto(*nameserver, &family, &a);
+                r = link_update_dns_server_one(l, *nameserver);
                 if (r < 0)
                         goto clear;
-
-                s = dns_server_find(l->dns_servers, family, &a);
-                if (s)
-                        dns_server_move_back_and_unmark(s);
-                else {
-                        r = dns_server_new(l->manager, NULL, DNS_SERVER_LINK, l, family, &a);
-                        if (r < 0)
-                                goto clear;
-                }
         }
 
         dns_server_unlink_marked(l->dns_servers);
@@ -341,7 +360,6 @@ clear:
 static int link_update_dnssec_negative_trust_anchors(Link *l) {
         _cleanup_strv_free_ char **ntas = NULL;
         _cleanup_set_free_free_ Set *ns = NULL;
-        char **i;
         int r;
 
         assert(l);
@@ -358,11 +376,9 @@ static int link_update_dnssec_negative_trust_anchors(Link *l) {
         if (!ns)
                 return -ENOMEM;
 
-        STRV_FOREACH(i, ntas) {
-                r = set_put_strdup(ns, *i);
-                if (r < 0)
-                        return r;
-        }
+        r = set_put_strdupv(ns, ntas);
+        if (r < 0)
+                return r;
 
         set_free_free(l->dnssec_negative_trust_anchors);
         l->dnssec_negative_trust_anchors = ns;
@@ -378,6 +394,9 @@ clear:
 static int link_update_search_domain_one(Link *l, const char *name, bool route_only) {
         DnsSearchDomain *d;
         int r;
+
+        assert(l);
+        assert(name);
 
         r = dns_search_domain_find(l->search_domains, name, &d);
         if (r < 0)
@@ -439,7 +458,7 @@ clear:
         return r;
 }
 
-static int link_is_unmanaged(Link *l) {
+static int link_is_managed(Link *l) {
         _cleanup_free_ char *state = NULL;
         int r;
 
@@ -447,11 +466,11 @@ static int link_is_unmanaged(Link *l) {
 
         r = sd_network_link_get_setup_state(l->ifindex, &state);
         if (r == -ENODATA)
-                return 1;
+                return 0;
         if (r < 0)
                 return r;
 
-        return STR_IN_SET(state, "pending", "unmanaged");
+        return !STR_IN_SET(state, "pending", "unmanaged");
 }
 
 static void link_read_settings(Link *l) {
@@ -461,12 +480,12 @@ static void link_read_settings(Link *l) {
 
         /* Read settings from networkd, except when networkd is not managing this interface. */
 
-        r = link_is_unmanaged(l);
+        r = link_is_managed(l);
         if (r < 0) {
                 log_warning_errno(r, "Failed to determine whether interface %s is managed: %m", l->name);
                 return;
         }
-        if (r > 0) {
+        if (r == 0) {
 
                 /* If this link used to be managed, but is now unmanaged, flush all our settings — but only once. */
                 if (l->is_managed)
@@ -503,10 +522,11 @@ static void link_read_settings(Link *l) {
                 log_warning_errno(r, "Failed to read search domains for interface %s, ignoring: %m", l->name);
 }
 
-int link_update_monitor(Link *l) {
+int link_update(Link *l) {
         assert(l);
 
         link_read_settings(l);
+        link_load_user(l);
         link_allocate_scopes(l);
         link_add_rrs(l, false);
 
@@ -523,7 +543,7 @@ bool link_relevant(Link *l, int family, bool local_multicast) {
          * beat, can do multicast and has at least one link-local (or better) IP address.
          *
          * A link is relevant for non-multicast traffic if it isn't a loopback device, has a link beat, and has at
-         * least one routable address.*/
+         * least one routable address. */
 
         if (l->flags & (IFF_LOOPBACK|IFF_DORMANT))
                 return false;
@@ -649,6 +669,7 @@ int link_address_new(Link *l, LinkAddress **ret, int family, const union in_addr
 
         a->link = l;
         LIST_PREPEND(addresses, l->addresses, a);
+        l->n_addresses++;
 
         if (ret)
                 *ret = a;
@@ -663,6 +684,9 @@ LinkAddress *link_address_free(LinkAddress *a) {
         if (a->link) {
                 LIST_REMOVE(addresses, a->link->addresses, a);
 
+                assert(a->link->n_addresses > 0);
+                a->link->n_addresses--;
+
                 if (a->llmnr_address_rr) {
                         if (a->family == AF_INET && a->link->llmnr_ipv4_scope)
                                 dns_zone_remove_rr(&a->link->llmnr_ipv4_scope->zone, a->llmnr_address_rr);
@@ -676,13 +700,28 @@ LinkAddress *link_address_free(LinkAddress *a) {
                         else if (a->family == AF_INET6 && a->link->llmnr_ipv6_scope)
                                 dns_zone_remove_rr(&a->link->llmnr_ipv6_scope->zone, a->llmnr_ptr_rr);
                 }
+
+                if (a->mdns_address_rr) {
+                        if (a->family == AF_INET && a->link->mdns_ipv4_scope)
+                                dns_zone_remove_rr(&a->link->mdns_ipv4_scope->zone, a->mdns_address_rr);
+                        else if (a->family == AF_INET6 && a->link->mdns_ipv6_scope)
+                                dns_zone_remove_rr(&a->link->mdns_ipv6_scope->zone, a->mdns_address_rr);
+                }
+
+                if (a->mdns_ptr_rr) {
+                        if (a->family == AF_INET && a->link->mdns_ipv4_scope)
+                                dns_zone_remove_rr(&a->link->mdns_ipv4_scope->zone, a->mdns_ptr_rr);
+                        else if (a->family == AF_INET6 && a->link->mdns_ipv6_scope)
+                                dns_zone_remove_rr(&a->link->mdns_ipv6_scope->zone, a->mdns_ptr_rr);
+                }
         }
 
         dns_resource_record_unref(a->llmnr_address_rr);
         dns_resource_record_unref(a->llmnr_ptr_rr);
+        dns_resource_record_unref(a->mdns_address_rr);
+        dns_resource_record_unref(a->mdns_ptr_rr);
 
-        free(a);
-        return NULL;
+        return mfree(a);
 }
 
 void link_address_add_rrs(LinkAddress *a, bool force_remove) {
@@ -731,7 +770,7 @@ void link_address_add_rrs(LinkAddress *a, bool force_remove) {
 
                         r = dns_zone_put(&a->link->llmnr_ipv4_scope->zone, a->link->llmnr_ipv4_scope, a->llmnr_ptr_rr, false);
                         if (r < 0)
-                                log_warning_errno(r, "Failed to add IPv6 PTR record to LLMNR zone: %m");
+                                log_warning_errno(r, "Failed to add IPv4 PTR record to LLMNR zone: %m");
                 } else {
                         if (a->llmnr_address_rr) {
                                 if (a->link->llmnr_ipv4_scope)
@@ -743,6 +782,59 @@ void link_address_add_rrs(LinkAddress *a, bool force_remove) {
                                 if (a->link->llmnr_ipv4_scope)
                                         dns_zone_remove_rr(&a->link->llmnr_ipv4_scope->zone, a->llmnr_ptr_rr);
                                 a->llmnr_ptr_rr = dns_resource_record_unref(a->llmnr_ptr_rr);
+                        }
+                }
+
+                if (!force_remove &&
+                    link_address_relevant(a, true) &&
+                    a->link->mdns_ipv4_scope &&
+                    a->link->mdns_support == RESOLVE_SUPPORT_YES &&
+                    a->link->manager->mdns_support == RESOLVE_SUPPORT_YES) {
+                        if (!a->link->manager->mdns_host_ipv4_key) {
+                                a->link->manager->mdns_host_ipv4_key = dns_resource_key_new(DNS_CLASS_IN, DNS_TYPE_A, a->link->manager->mdns_hostname);
+                                if (!a->link->manager->mdns_host_ipv4_key) {
+                                        r = -ENOMEM;
+                                        goto fail;
+                                }
+                        }
+
+                        if (!a->mdns_address_rr) {
+                                a->mdns_address_rr = dns_resource_record_new(a->link->manager->mdns_host_ipv4_key);
+                                if (!a->mdns_address_rr) {
+                                        r = -ENOMEM;
+                                        goto fail;
+                                }
+
+                                a->mdns_address_rr->a.in_addr = a->in_addr.in;
+                                a->mdns_address_rr->ttl = MDNS_DEFAULT_TTL;
+                        }
+
+                        if (!a->mdns_ptr_rr) {
+                                r = dns_resource_record_new_reverse(&a->mdns_ptr_rr, a->family, &a->in_addr, a->link->manager->mdns_hostname);
+                                if (r < 0)
+                                        goto fail;
+
+                                a->mdns_ptr_rr->ttl = MDNS_DEFAULT_TTL;
+                        }
+
+                        r = dns_zone_put(&a->link->mdns_ipv4_scope->zone, a->link->mdns_ipv4_scope, a->mdns_address_rr, true);
+                        if (r < 0)
+                                log_warning_errno(r, "Failed to add A record to MDNS zone: %m");
+
+                        r = dns_zone_put(&a->link->mdns_ipv4_scope->zone, a->link->mdns_ipv4_scope, a->mdns_ptr_rr, false);
+                        if (r < 0)
+                                log_warning_errno(r, "Failed to add IPv4 PTR record to MDNS zone: %m");
+                } else {
+                        if (a->mdns_address_rr) {
+                                if (a->link->mdns_ipv4_scope)
+                                        dns_zone_remove_rr(&a->link->mdns_ipv4_scope->zone, a->mdns_address_rr);
+                                a->mdns_address_rr = dns_resource_record_unref(a->mdns_address_rr);
+                        }
+
+                        if (a->mdns_ptr_rr) {
+                                if (a->link->mdns_ipv4_scope)
+                                        dns_zone_remove_rr(&a->link->mdns_ipv4_scope->zone, a->mdns_ptr_rr);
+                                a->mdns_ptr_rr = dns_resource_record_unref(a->mdns_ptr_rr);
                         }
                 }
         }
@@ -802,6 +894,60 @@ void link_address_add_rrs(LinkAddress *a, bool force_remove) {
                                 a->llmnr_ptr_rr = dns_resource_record_unref(a->llmnr_ptr_rr);
                         }
                 }
+
+                if (!force_remove &&
+                    link_address_relevant(a, true) &&
+                    a->link->mdns_ipv6_scope &&
+                    a->link->mdns_support == RESOLVE_SUPPORT_YES &&
+                    a->link->manager->mdns_support == RESOLVE_SUPPORT_YES) {
+
+                        if (!a->link->manager->mdns_host_ipv6_key) {
+                                a->link->manager->mdns_host_ipv6_key = dns_resource_key_new(DNS_CLASS_IN, DNS_TYPE_AAAA, a->link->manager->mdns_hostname);
+                                if (!a->link->manager->mdns_host_ipv6_key) {
+                                        r = -ENOMEM;
+                                        goto fail;
+                                }
+                        }
+
+                        if (!a->mdns_address_rr) {
+                                a->mdns_address_rr = dns_resource_record_new(a->link->manager->mdns_host_ipv6_key);
+                                if (!a->mdns_address_rr) {
+                                        r = -ENOMEM;
+                                        goto fail;
+                                }
+
+                                a->mdns_address_rr->aaaa.in6_addr = a->in_addr.in6;
+                                a->mdns_address_rr->ttl = MDNS_DEFAULT_TTL;
+                        }
+
+                        if (!a->mdns_ptr_rr) {
+                                r = dns_resource_record_new_reverse(&a->mdns_ptr_rr, a->family, &a->in_addr, a->link->manager->mdns_hostname);
+                                if (r < 0)
+                                        goto fail;
+
+                                a->mdns_ptr_rr->ttl = MDNS_DEFAULT_TTL;
+                        }
+
+                        r = dns_zone_put(&a->link->mdns_ipv6_scope->zone, a->link->mdns_ipv6_scope, a->mdns_address_rr, true);
+                        if (r < 0)
+                                log_warning_errno(r, "Failed to add AAAA record to MDNS zone: %m");
+
+                        r = dns_zone_put(&a->link->mdns_ipv6_scope->zone, a->link->mdns_ipv6_scope, a->mdns_ptr_rr, false);
+                        if (r < 0)
+                                log_warning_errno(r, "Failed to add IPv6 PTR record to MDNS zone: %m");
+                } else {
+                        if (a->mdns_address_rr) {
+                                if (a->link->mdns_ipv6_scope)
+                                        dns_zone_remove_rr(&a->link->mdns_ipv6_scope->zone, a->mdns_address_rr);
+                                a->mdns_address_rr = dns_resource_record_unref(a->mdns_address_rr);
+                        }
+
+                        if (a->mdns_ptr_rr) {
+                                if (a->link->mdns_ipv6_scope)
+                                        dns_zone_remove_rr(&a->link->mdns_ipv6_scope->zone, a->mdns_ptr_rr);
+                                a->mdns_ptr_rr = dns_resource_record_unref(a->mdns_ptr_rr);
+                        }
+                }
         }
 
         return;
@@ -837,4 +983,255 @@ bool link_address_relevant(LinkAddress *a, bool local_multicast) {
                 return false;
 
         return true;
+}
+
+static bool link_needs_save(Link *l) {
+        assert(l);
+
+        /* Returns true if any of the settings where set different from the default */
+
+        if (l->is_managed)
+                return false;
+
+        if (l->llmnr_support != RESOLVE_SUPPORT_YES ||
+            l->mdns_support != RESOLVE_SUPPORT_NO ||
+            l->dnssec_mode != _DNSSEC_MODE_INVALID)
+                return true;
+
+        if (l->dns_servers ||
+            l->search_domains)
+                return true;
+
+        if (!set_isempty(l->dnssec_negative_trust_anchors))
+                return true;
+
+        return false;
+}
+
+int link_save_user(Link *l) {
+        _cleanup_free_ char *temp_path = NULL;
+        _cleanup_fclose_ FILE *f = NULL;
+        const char *v;
+        int r;
+
+        assert(l);
+        assert(l->state_file);
+
+        if (!link_needs_save(l)) {
+                (void) unlink(l->state_file);
+                return 0;
+        }
+
+        r = mkdir_parents(l->state_file, 0700);
+        if (r < 0)
+                goto fail;
+
+        r = fopen_temporary(l->state_file, &f, &temp_path);
+        if (r < 0)
+                goto fail;
+
+        fputs("# This is private data. Do not parse.\n", f);
+
+        v = resolve_support_to_string(l->llmnr_support);
+        if (v)
+                fprintf(f, "LLMNR=%s\n", v);
+
+        v = resolve_support_to_string(l->mdns_support);
+        if (v)
+                fprintf(f, "MDNS=%s\n", v);
+
+        v = dnssec_mode_to_string(l->dnssec_mode);
+        if (v)
+                fprintf(f, "DNSSEC=%s\n", v);
+
+        if (l->dns_servers) {
+                DnsServer *server;
+
+                fputs("SERVERS=", f);
+                LIST_FOREACH(servers, server, l->dns_servers) {
+
+                        if (server != l->dns_servers)
+                                fputc(' ', f);
+
+                        v = dns_server_string(server);
+                        if (!v) {
+                                r = -ENOMEM;
+                                goto fail;
+                        }
+
+                        fputs(v, f);
+                }
+                fputc('\n', f);
+        }
+
+        if (l->search_domains) {
+                DnsSearchDomain *domain;
+
+                fputs("DOMAINS=", f);
+                LIST_FOREACH(domains, domain, l->search_domains) {
+
+                        if (domain != l->search_domains)
+                                fputc(' ', f);
+
+                        if (domain->route_only)
+                                fputc('~', f);
+
+                        fputs(DNS_SEARCH_DOMAIN_NAME(domain), f);
+                }
+                fputc('\n', f);
+        }
+
+        if (!set_isempty(l->dnssec_negative_trust_anchors)) {
+                bool space = false;
+                Iterator i;
+                char *nta;
+
+                fputs("NTAS=", f);
+                SET_FOREACH(nta, l->dnssec_negative_trust_anchors, i) {
+
+                        if (space)
+                                fputc(' ', f);
+
+                        fputs(nta, f);
+                        space = true;
+                }
+                fputc('\n', f);
+        }
+
+        r = fflush_and_check(f);
+        if (r < 0)
+                goto fail;
+
+        if (rename(temp_path, l->state_file) < 0) {
+                r = -errno;
+                goto fail;
+        }
+
+        return 0;
+
+fail:
+        (void) unlink(l->state_file);
+
+        if (temp_path)
+                (void) unlink(temp_path);
+
+        return log_error_errno(r, "Failed to save link data %s: %m", l->state_file);
+}
+
+int link_load_user(Link *l) {
+        _cleanup_free_ char
+                *llmnr = NULL,
+                *mdns = NULL,
+                *dnssec = NULL,
+                *servers = NULL,
+                *domains = NULL,
+                *ntas = NULL;
+
+        ResolveSupport s;
+        const char *p;
+        int r;
+
+        assert(l);
+        assert(l->state_file);
+
+        /* Try to load only a single time */
+        if (l->loaded)
+                return 0;
+        l->loaded = true;
+
+        if (l->is_managed)
+                return 0; /* if the device is managed, then networkd is our configuration source, not the bus API */
+
+        r = parse_env_file(l->state_file, NEWLINE,
+                           "LLMNR", &llmnr,
+                           "MDNS", &mdns,
+                           "DNSSEC", &dnssec,
+                           "SERVERS", &servers,
+                           "DOMAINS", &domains,
+                           "NTAS", &ntas,
+                           NULL);
+        if (r == -ENOENT)
+                return 0;
+        if (r < 0)
+                goto fail;
+
+        link_flush_settings(l);
+
+        /* If we can't recognize the LLMNR or MDNS setting we don't override the default */
+        s = resolve_support_from_string(llmnr);
+        if (s >= 0)
+                l->llmnr_support = s;
+
+        s = resolve_support_from_string(mdns);
+        if (s >= 0)
+                l->mdns_support = s;
+
+        /* If we can't recognize the DNSSEC setting, then set it to invalid, so that the daemon default is used. */
+        l->dnssec_mode = dnssec_mode_from_string(dnssec);
+
+        for (p = servers;;) {
+                _cleanup_free_ char *word = NULL;
+
+                r = extract_first_word(&p, &word, NULL, 0);
+                if (r < 0)
+                        goto fail;
+                if (r == 0)
+                        break;
+
+                r = link_update_dns_server_one(l, word);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to load DNS server '%s', ignoring: %m", word);
+                        continue;
+                }
+        }
+
+        for (p = domains;;) {
+                _cleanup_free_ char *word = NULL;
+                const char *n;
+                bool is_route;
+
+                r = extract_first_word(&p, &word, NULL, 0);
+                if (r < 0)
+                        goto fail;
+                if (r == 0)
+                        break;
+
+                is_route = word[0] == '~';
+                n = is_route ? word + 1 : word;
+
+                r = link_update_search_domain_one(l, n, is_route);
+                if (r < 0) {
+                        log_debug_errno(r, "Failed to load search domain '%s', ignoring: %m", word);
+                        continue;
+                }
+        }
+
+        if (ntas) {
+                _cleanup_set_free_free_ Set *ns = NULL;
+
+                ns = set_new(&dns_name_hash_ops);
+                if (!ns) {
+                        r = -ENOMEM;
+                        goto fail;
+                }
+
+                r = set_put_strsplit(ns, ntas, NULL, 0);
+                if (r < 0)
+                        goto fail;
+
+                l->dnssec_negative_trust_anchors = ns;
+                ns = NULL;
+        }
+
+        return 0;
+
+fail:
+        return log_error_errno(r, "Failed to load link data %s: %m", l->state_file);
+}
+
+void link_remove_user(Link *l) {
+        assert(l);
+        assert(l->state_file);
+
+        (void) unlink(l->state_file);
 }

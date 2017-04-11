@@ -72,9 +72,12 @@
     in <filename>/usr/lib/kernel/install.d/</filename>. This can be used to override a system-supplied
     executables with a local file if needed; a symbolic link in <filename>/etc/kernel/install.d/</filename>
     with the same name as an executable in <filename>/usr/lib/kernel/install.d/</filename>,
-    pointing to /dev/null, disables the executable entirely. Executables must have the
+    pointing to <filename>/dev/null</filename>, disables the executable entirely. Executables must have the
     extension <literal>.install</literal>; other extensions are ignored.</para>
 
+    <para>An executable should return <constant>0</constant> on success. It may also
+    return <constant>77</constant> to cause the whole operation to terminate
+    (executables later in lexical order will be skipped).</para>
   </refsect1>
 
   <refsect1>
@@ -86,11 +89,12 @@
         <listitem>
           <para><command>kernel-install</command> creates the directory
           <filename>/boot/<replaceable>MACHINE-ID</replaceable>/<replaceable>KERNEL-VERSION</replaceable>/</filename>
-          and calls every executable
+          and calls executables from
           <filename>/usr/lib/kernel/install.d/*.install</filename> and
           <filename>/etc/kernel/install.d/*.install</filename> with
           the arguments
-          <programlisting>add <replaceable>KERNEL-VERSION</replaceable> <filename>/boot/<replaceable>MACHINE-ID</replaceable>/<replaceable>KERNEL-VERSION</replaceable>/</filename></programlisting>
+          <programlisting>add <replaceable>KERNEL-VERSION</replaceable> \
+    <filename>/boot/<replaceable>MACHINE-ID</replaceable>/<replaceable>KERNEL-VERSION</replaceable>/</filename> <replaceable>KERNEL-IMAGE</replaceable></programlisting>
           </para>
 
           <para>The kernel-install plugin <filename>50-depmod.install</filename> runs depmod for the <replaceable>KERNEL-VERSION</replaceable>.</para>
@@ -116,7 +120,7 @@
       <varlistentry>
         <term><command>remove <replaceable>KERNEL-VERSION</replaceable></command></term>
         <listitem>
-          <para>Calls every executable <filename>/usr/lib/kernel/install.d/*.install</filename>
+          <para>Calls executables from <filename>/usr/lib/kernel/install.d/*.install</filename>
           and <filename>/etc/kernel/install.d/*.install</filename> with the arguments
           <programlisting>remove <replaceable>KERNEL-VERSION</replaceable> <filename>/boot/<replaceable>MACHINE-ID</replaceable>/<replaceable>KERNEL-VERSION</replaceable>/</filename></programlisting>
           </para>
@@ -135,7 +139,7 @@
 
   <refsect1>
     <title>Exit status</title>
-    <para>If every executable returns with 0, 0 is returned, a non-zero failure code otherwise.</para>
+    <para>If every executable returns 0 or 77, 0 is returned, and a non-zero failure code otherwise.</para>
   </refsect1>
 
   <refsect1>
@@ -185,7 +189,7 @@
     <para>
       <citerefentry><refentrytitle>machine-id</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>os-release</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-      <ulink url="http://www.freedesktop.org/wiki/Specifications/BootLoaderSpec">Boot loader specification</ulink>
+      <ulink url="https://www.freedesktop.org/wiki/Specifications/BootLoaderSpec">Boot loader specification</ulink>
     </para>
   </refsect1>
 

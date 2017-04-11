@@ -20,12 +20,13 @@
 ***/
 
 typedef struct Route Route;
+typedef struct NetworkConfigSection NetworkConfigSection;
 
 #include "networkd-network.h"
 
 struct Route {
         Network *network;
-        unsigned section;
+        NetworkConfigSection *section;
 
         Link *link;
 
@@ -37,6 +38,7 @@ struct Route {
         unsigned char tos;
         uint32_t priority; /* note that ip(8) calls this 'metric' */
         uint32_t table;
+        uint32_t mtu;
         unsigned char pref;
         unsigned flags;
 
@@ -51,16 +53,16 @@ struct Route {
         LIST_FIELDS(Route, routes);
 };
 
-int route_new_static(Network *network, unsigned section, Route **ret);
+int route_new_static(Network *network, const char *filename, unsigned section_line, Route **ret);
 int route_new(Route **ret);
 void route_free(Route *route);
 int route_configure(Route *route, Link *link, sd_netlink_message_handler_t callback);
 int route_remove(Route *route, Link *link, sd_netlink_message_handler_t callback);
 
-int route_get(Link *link, int family, union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, unsigned char table, Route **ret);
-int route_add(Link *link, int family, union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, unsigned char table, Route **ret);
-int route_add_foreign(Link *link, int family, union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, unsigned char table, Route **ret);
-int route_update(Route *route, union in_addr_union *src, unsigned char src_prefixlen, union in_addr_union *gw, union in_addr_union *prefsrc, unsigned char scope, unsigned char protocol);
+int route_get(Link *link, int family, const union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, unsigned char table, Route **ret);
+int route_add(Link *link, int family, const union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, unsigned char table, Route **ret);
+int route_add_foreign(Link *link, int family, const union in_addr_union *dst, unsigned char dst_prefixlen, unsigned char tos, uint32_t priority, unsigned char table, Route **ret);
+int route_update(Route *route, const union in_addr_union *src, unsigned char src_prefixlen, const union in_addr_union *gw, const union in_addr_union *prefsrc, unsigned char scope, unsigned char protocol);
 
 int route_expire_handler(sd_event_source *s, uint64_t usec, void *userdata);
 

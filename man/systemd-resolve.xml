@@ -114,7 +114,13 @@
     and IPv6 addresses. If the parameters specified are formatted as IPv4 or IPv6 operation the reverse operation is
     done, and a hostname is retrieved for the specified addresses.</para>
 
-    <para>The <option>--type=</option> switch may be used to specify a DNS resource record type (A, AAAA, SOA, MX, ...) in
+    <para>The program's output contains information about the protocol used for the look-up and on which network
+    interface the data was discovered. It also contains information on whether the information could be
+    authenticated. All data for which local DNSSEC validation succeeds is considered authenticated. Moreover all data
+    originating from local, trusted sources is also reported authenticated, including resolution of the local host
+    name, the <literal>localhost</literal> host name or all data from <filename>/etc/hosts</filename>.</para>
+
+    <para>The <option>--type=</option> switch may be used to specify a DNS resource record type (A, AAAA, SOA, MX, …) in
     order to request a specific DNS resource record, instead of the address or reverse address lookups.
     The special value <literal>help</literal> may be used to list known values.</para>
 
@@ -129,7 +135,7 @@
     TXT).</para>
 
     <para>The <option>--openpgp</option> switch may be used to query PGP keys stored as
-    <ulink url="https://tools.ietf.org/html/draft-wouters-dane-openpgp-02">OPENPGPKEY</ulink> resource records.
+    <ulink url="https://tools.ietf.org/html/rfc7929">OPENPGPKEY</ulink> resource records.
     When this option is specified one or more e-mail address must be specified.</para>
 
     <para>The <option>--tlsa</option> switch maybe be used to query TLS public
@@ -176,7 +182,9 @@
         (i.e. classic unicast DNS), <literal>llmnr</literal> (<ulink
         url="https://tools.ietf.org/html/rfc4795">Link-Local Multicast Name Resolution</ulink>),
         <literal>llmnr-ipv4</literal>, <literal>llmnr-ipv6</literal> (LLMNR via the indicated underlying IP
-        protocols). By default the lookup is done via all protocols suitable for the lookup. If used, limits the set of
+        protocols), <literal>mdns</literal> (<ulink url="https://www.ietf.org/rfc/rfc6762.txt">Multicast DNS</ulink>),
+        <literal>mdns-ipv4</literal>, <literal>mdns-ipv6</literal> (MDNS via the indicated underlying IP protocols).
+        By default the lookup is done via all protocols suitable for the lookup. If used, limits the set of
         protocols that may be used. Use this option multiple times to enable resolving via multiple protocols at the
         same time. The setting <literal>llmnr</literal> is identical to specifying this switch once with
         <literal>llmnr-ipv4</literal> and once via <literal>llmnr-ipv6</literal>. Note that this option does not force
@@ -265,7 +273,7 @@
         <literal>payload</literal>, the payload of the packet is exported. If the argument is
         <literal>packet</literal>, the whole packet is dumped in wire format, prefixed by
         length specified as a little-endian 64-bit number. This format allows multiple packets
-        to be dumped and unambigously parsed.</para></listitem>
+        to be dumped and unambiguously parsed.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -288,8 +296,21 @@
         <listitem><para>Resets the statistics counters shown in <option>--statistics</option> to zero.</para></listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term><option>--flush-caches</option></term>
+
+        <listitem><para>Flushes all DNS resource record caches the service maintains locally.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--status</option></term>
+
+        <listitem><para>Shows the global and per-link DNS settings in currently in effect.</para></listitem>
+      </varlistentry>
+
       <xi:include href="standard-options.xml" xpointer="help" />
       <xi:include href="standard-options.xml" xpointer="version" />
+      <xi:include href="standard-options.xml" xpointer="no-pager" />
     </variablelist>
   </refsect1>
 
@@ -320,7 +341,7 @@ www.0pointer.net: 2a01:238:43ed:c300:10c3:bcf3:3266:da74
     </example>
 
     <example>
-      <title>Retrieve the MX record of the <literal>0pointer.net</literal> domain</title>
+      <title>Retrieve the MX record of the <literal>yahoo.com</literal> domain</title>
 
       <programlisting>$ systemd-resolve -t MX yahoo.com --legend=no
 yahoo.com. IN MX    1 mta7.am0.yahoodns.net
@@ -337,7 +358,7 @@ _xmpp-server._tcp/gmail.com: alt1.xmpp-server.l.google.com:5269 [priority=20, we
                              173.194.210.125
                              alt4.xmpp-server.l.google.com:5269 [priority=20, weight=0]
                              173.194.65.125
-                             ...
+                             …
 </programlisting>
     </example>
 
@@ -348,7 +369,7 @@ _xmpp-server._tcp/gmail.com: alt1.xmpp-server.l.google.com:5269 [priority=20, we
 d08ee310438ca124a6149ea5cc21b6313b390dce485576eff96f8722._openpgpkey.fedoraproject.org. IN OPENPGPKEY
         mQINBFBHPMsBEACeInGYJCb+7TurKfb6wGyTottCDtiSJB310i37/6ZYoeIay/5soJjlMyf
         MFQ9T2XNT/0LM6gTa0MpC1st9LnzYTMsT6tzRly1D1UbVI6xw0g0vE5y2Cjk3xUwAynCsSs
-        ...
+        …
 </programlisting>
     </example>
 

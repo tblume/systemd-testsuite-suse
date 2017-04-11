@@ -29,8 +29,10 @@
 typedef uint64_t usec_t;
 typedef uint64_t nsec_t;
 
-#define NSEC_FMT "%" PRIu64
-#define USEC_FMT "%" PRIu64
+#define PRI_NSEC PRIu64
+#define PRI_USEC PRIu64
+#define NSEC_FMT "%" PRI_NSEC
+#define USEC_FMT "%" PRI_USEC
 
 #include "macro.h"
 
@@ -68,7 +70,9 @@ typedef struct triple_timestamp {
 #define USEC_PER_YEAR ((usec_t) (31557600ULL*USEC_PER_SEC))
 #define NSEC_PER_YEAR ((nsec_t) (31557600ULL*NSEC_PER_SEC))
 
-#define FORMAT_TIMESTAMP_MAX ((4*4+1)+11+9+4+1) /* weekdays can be unicode */
+/* We assume a maximum timezone length of 6. TZNAME_MAX is not defined on Linux, but glibc internally initializes this
+ * to 6. Let's rely on that. */
+#define FORMAT_TIMESTAMP_MAX (3+1+10+1+8+1+6+1+6+1)
 #define FORMAT_TIMESTAMP_WIDTH 28 /* when outputting, assume this width */
 #define FORMAT_TIMESTAMP_RELATIVE_MAX 256
 #define FORMAT_TIMESPAN_MAX 64
@@ -109,6 +113,7 @@ static inline bool triple_timestamp_is_set(triple_timestamp *ts) {
 usec_t triple_timestamp_by_clock(triple_timestamp *ts, clockid_t clock);
 
 usec_t timespec_load(const struct timespec *ts) _pure_;
+nsec_t timespec_load_nsec(const struct timespec *ts) _pure_;
 struct timespec *timespec_store(struct timespec *ts, usec_t u);
 
 usec_t timeval_load(const struct timeval *tv) _pure_;
@@ -176,3 +181,14 @@ static inline usec_t usec_sub(usec_t timestamp, int64_t delta) {
 
         return timestamp - delta;
 }
+
+#if SIZEOF_TIME_T == 8
+/* The last second we can format is 31. Dec 9999, 1s before midnight, because otherwise we'd enter 5 digit year
+ * territory. However, since we want to stay away from this in all timezones we take one day off. */
+#define USEC_TIMESTAMP_FORMATTABLE_MAX ((usec_t) 253402214399000000)
+#elif SIZEOF_TIME_T == 4
+/* With a 32bit time_t we can't go beyond 2038... */
+#define USEC_TIMESTAMP_FORMATTABLE_MAX ((usec_t) 2147483647000000)
+#else
+#error "Yuck, time_t is neither 4 not 8 bytes wide?"
+#endif

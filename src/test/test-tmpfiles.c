@@ -25,7 +25,7 @@
 #include "alloc-util.h"
 #include "fd-util.h"
 #include "fileio.h"
-#include "formats-util.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "log.h"
 #include "string-util.h"
@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
         log_debug("link1: %s", ans);
         assert_se(endswith(ans, " (deleted)"));
 
-        fd2 = mkostemp_safe(pattern, O_RDWR|O_CLOEXEC);
+        fd2 = mkostemp_safe(pattern);
         assert_se(fd >= 0);
         assert_se(unlink(pattern) == 0);
 

@@ -87,18 +87,26 @@
       causes all matches before and after to be combined in a
       disjunction (i.e. logical OR).</para>
 
-      <para>As shortcuts for a few types of field/value matches, file
-      paths may be specified. If a file path refers to an executable
-      file, this is equivalent to an <literal>_EXE=</literal> match
-      for the canonicalized binary path. Similarly, if a path refers
-      to a device node then match is added for the kernel name of the
-      device (<literal>_KERNEL_DEVICE=</literal>). Also, matches for the
-      kernel names of all the parent devices are added automatically.
-      Device node paths are not stable across reboots, therefore match
-      for the current boot id (<literal>_BOOT_ID=</literal>) is
-      always added as well. Note that only the log entries for
-      the existing device nodes maybe queried by providing path to
-      the device node.</para>
+      <para>It is also possible to filter the entries by specifying an
+      absolute file path as an argument. The file path may be a file or
+      a symbolic link and the file must exist at the time of the query. If a
+      file path refers to an executable binary, an <literal>_EXE=</literal>
+      match for the canonicalized binary path is added to the query. If a
+      file path refers to an executable script, a <literal>_COMM=</literal>
+      match for the script name is added to the query. If a file path
+      refers to a device node, <literal>_KERNEL_DEVICE=</literal> matches for
+      the kernel name of the device and for each of its ancestor devices is
+      added to the query. Symbolic links are dereferenced, kernel names are
+      synthesized, and parent devices are identified from the environment at
+      the time of the query. In general, a device node is the best proxy for
+      an actual device, as log entries do not usually contain fields that
+      identify an actual device. For the resulting log entries to be correct
+      for the actual device, the relevant parts of the environment at the time
+      the entry was logged, in particular the actual device corresponding to
+      the device node, must have been the same as those at the time of the
+      query. Because device nodes generally change their corresponding devices
+      across reboots, specifying a device node path causes the resulting
+      entries to be restricted to those from the current boot.</para>
 
       <para>Additional constraints may be added using options
       <option>--boot</option>, <option>--unit=</option>, etc., to
@@ -242,6 +250,18 @@
 
             <varlistentry>
               <term>
+                <option>short-full</option>
+              </term>
+              <listitem>
+                <para>is very similar, but shows timestamps in the format the <option>--since=</option> and
+                <option>--until=</option> options accept. Unlike the timestamp information shown in
+                <option>short</option> output mode this mode includes weekday, year and timezone information in the
+                output, and is locale-independent.</para>
+              </listitem>
+            </varlistentry>
+
+            <varlistentry>
+              <term>
                 <option>short-iso</option>
               </term>
               <listitem>
@@ -298,8 +318,10 @@
                 <para>serializes the journal into a binary (but mostly
                 text-based) stream suitable for backups and network
                 transfer (see
-                <ulink url="http://www.freedesktop.org/wiki/Software/systemd/export">Journal Export Format</ulink>
-                for more information).</para>
+                <ulink url="https://www.freedesktop.org/wiki/Software/systemd/export">Journal Export Format</ulink>
+                for more information). To import the binary stream back
+                into native journald format use
+                <citerefentry><refentrytitle>systemd-journal-remote</refentrytitle><manvolnum>8</manvolnum></citerefentry>.</para>
               </listitem>
             </varlistentry>
 
@@ -310,7 +332,7 @@
               <listitem>
                 <para>formats entries as JSON data structures, one per
                 line (see
-                <ulink url="http://www.freedesktop.org/wiki/Software/systemd/json">Journal JSON Format</ulink>
+                <ulink url="https://www.freedesktop.org/wiki/Software/systemd/json">Journal JSON Format</ulink>
                 for more information).</para>
               </listitem>
             </varlistentry>
@@ -379,7 +401,7 @@
         manuals. Note that help texts are not available for all
         messages, but only for selected ones. For more information on
         the message catalog, please refer to the
-        <ulink url="http://www.freedesktop.org/wiki/Software/systemd/catalog">Message Catalog Developer Documentation</ulink>.</para>
+        <ulink url="https://www.freedesktop.org/wiki/Software/systemd/catalog">Message Catalog Developer Documentation</ulink>.</para>
 
         <para>Note: when attaching <command>journalctl</command>
         output to bug reports, please do <emphasis>not</emphasis> use
@@ -392,7 +414,7 @@
         <term><option>--quiet</option></term>
 
         <listitem><para>Suppresses all info messages
-        (i.e. "-- Logs begin at ...", "-- Reboot --"),
+        (i.e. "-- Logs begin at …", "-- Reboot --"),
         any warning messages regarding
         inaccessible system journals when run as a normal
         user.</para></listitem>
@@ -553,7 +575,7 @@
 
         <listitem><para>The cursor is shown after the last entry after
         two dashes:</para>
-        <programlisting>-- cursor: s=0639...</programlisting>
+        <programlisting>-- cursor: s=0639…</programlisting>
         <para>The format of the cursor is private
         and subject to change.</para></listitem>
       </varlistentry>
@@ -564,24 +586,17 @@
         <term><option>-U</option></term>
         <term><option>--until=</option></term>
 
-        <listitem><para>Start showing entries on or newer than the
-        specified date, or on or older than the specified date,
-        respectively. Date specifications should be of the format
-        <literal>2012-10-30 18:17:16</literal>.  If the time part is
-        omitted, <literal>00:00:00</literal> is assumed.  If only the
-        seconds component is omitted, <literal>:00</literal> is
-        assumed. If the date component is omitted, the current day is
-        assumed. Alternatively the strings
-        <literal>yesterday</literal>, <literal>today</literal>,
-        <literal>tomorrow</literal> are understood, which refer to
-        00:00:00 of the day before the current day, the current day,
-        or the day after the current day,
-        respectively. <literal>now</literal> refers to the current
-        time. Finally, relative times may be specified, prefixed with
-        <literal>-</literal> or <literal>+</literal>, referring to
-        times before or after the current time, respectively. For complete
-        time and date specification, see
-        <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry>.
+        <listitem><para>Start showing entries on or newer than the specified date, or on or older than the specified
+        date, respectively. Date specifications should be of the format <literal>2012-10-30 18:17:16</literal>.  If the
+        time part is omitted, <literal>00:00:00</literal> is assumed.  If only the seconds component is omitted,
+        <literal>:00</literal> is assumed. If the date component is omitted, the current day is assumed. Alternatively
+        the strings <literal>yesterday</literal>, <literal>today</literal>, <literal>tomorrow</literal> are understood,
+        which refer to 00:00:00 of the day before the current day, the current day, or the day after the current day,
+        respectively. <literal>now</literal> refers to the current time. Finally, relative times may be specified,
+        prefixed with <literal>-</literal> or <literal>+</literal>, referring to times before or after the current
+        time, respectively. For complete time and date specification, see
+        <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry>. Note that
+        <option>--output=short-full</option> prints timestamps that follow precisely this format.
         </para>
         </listitem>
       </varlistentry>
@@ -646,10 +661,12 @@
         <term><option>--root=<replaceable>ROOT</replaceable></option></term>
 
         <listitem><para>Takes a directory path as an argument. If
-        specified, journalctl will operate on catalog file hierarchy
+        specified, journalctl will operate on journal directories and catalog file hierarchy
         underneath the specified directory instead of the root
         directory (e.g. <option>--update-catalog</option> will create
-        <filename><replaceable>ROOT</replaceable>/var/lib/systemd/catalog/database</filename>).
+        <filename><replaceable>ROOT</replaceable>/var/lib/systemd/catalog/database</filename>,
+        and journal files under <filename><replaceable>ROOT</replaceable>/run/journal</filename>
+        or <filename><replaceable>ROOT</replaceable>/var/log/journal</filename> will be displayed).
         </para></listitem>
       </varlistentry>
 
@@ -660,7 +677,7 @@
         a new 128-bit ID suitable for identifying messages. This is
         intended for usage by developers who need a new identifier for
         a new message they introduce and want to make
-        recognizable. This will print the new ID in three different
+        recognizable. This will print the new ID in four different
         formats which can be copied into source code or similar.
         </para></listitem>
       </varlistentry>
@@ -716,7 +733,7 @@
 
       <varlistentry>
         <term><option>--list-catalog
-        <optional><replaceable>128-bit-ID...</replaceable></optional>
+        <optional><replaceable>128-bit-ID…</replaceable></optional>
         </option></term>
 
         <listitem><para>List the contents of the message catalog as a
@@ -730,7 +747,7 @@
 
       <varlistentry>
         <term><option>--dump-catalog
-        <optional><replaceable>128-bit-ID...</replaceable></optional>
+        <optional><replaceable>128-bit-ID…</replaceable></optional>
         </option></term>
 
         <listitem><para>Show the contents of the message catalog, with
@@ -824,7 +841,7 @@
         flushed from <filename>/run/log/journal</filename> into
         <filename>/var/log/journal</filename> once during system
         runtime, and this command exits cleanly without executing any
-        operation if this has already has happened. This command
+        operation if this has already happened. This command
         effectively guarantees that all data is flushed to
         <filename>/var/log/journal</filename> at the time it
         returns.</para></listitem>
@@ -908,7 +925,9 @@
       <citerefentry><refentrytitle>coredumpctl</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.journal-fields</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>journald.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry>
+      <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>systemd-journal-remote</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
+      <citerefentry><refentrytitle>systemd-journal-upload</refentrytitle><manvolnum>8</manvolnum></citerefentry>
     </para>
   </refsect1>
 </refentry>

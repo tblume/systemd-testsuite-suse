@@ -34,6 +34,7 @@
 #include <net/ethernet.h>
 #include <stdlib.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <uchar.h>
 #include <unistd.h>
@@ -49,6 +50,23 @@
 #ifdef HAVE_LINUX_BTRFS_H
 #include <linux/btrfs.h>
 #endif
+
+#ifdef HAVE_LINUX_VM_SOCKETS_H
+#include <linux/vm_sockets.h>
+#else
+#define VMADDR_CID_ANY -1U
+struct sockaddr_vm {
+        unsigned short svm_family;
+        unsigned short svm_reserved1;
+        unsigned int svm_port;
+        unsigned int svm_cid;
+        unsigned char svm_zero[sizeof(struct sockaddr) -
+                               sizeof(unsigned short) -
+                               sizeof(unsigned short) -
+                               sizeof(unsigned int) -
+                               sizeof(unsigned int)];
+};
+#endif /* !HAVE_LINUX_VM_SOCKETS_H */
 
 #include "macro.h"
 
@@ -141,6 +159,10 @@
 
 #ifndef GRND_RANDOM
 #define GRND_RANDOM 0x0002
+#endif
+
+#ifndef FS_NOCOW_FL
+#define FS_NOCOW_FL 0x00800000
 #endif
 
 #ifndef BTRFS_IOCTL_MAGIC
@@ -445,6 +467,10 @@ struct btrfs_ioctl_quota_ctl_args {
 #define CGROUP2_SUPER_MAGIC 0x63677270
 #endif
 
+#ifndef CLONE_NEWCGROUP
+#define CLONE_NEWCGROUP 0x02000000
+#endif
+
 #ifndef TMPFS_MAGIC
 #define TMPFS_MAGIC 0x01021994
 #endif
@@ -469,24 +495,44 @@ struct btrfs_ioctl_quota_ctl_args {
 #define MS_MOVE 8192
 #endif
 
-#ifndef MS_PRIVATE
-#define MS_PRIVATE  (1 << 18)
-#endif
-
-#ifndef SCM_SECURITY
-#define SCM_SECURITY 0x03
-#endif
-
-#ifndef MS_STRICTATIME
-#define MS_STRICTATIME (1<<24)
-#endif
-
 #ifndef MS_REC
 #define MS_REC 16384
 #endif
 
+#ifndef MS_PRIVATE
+#define MS_PRIVATE      (1<<18)
+#endif
+
+#ifndef MS_REC
+#define MS_REC          (1<<19)
+#endif
+
 #ifndef MS_SHARED
-#define MS_SHARED (1<<20)
+#define MS_SHARED       (1<<20)
+#endif
+
+#ifndef MS_RELATIME
+#define MS_RELATIME     (1<<21)
+#endif
+
+#ifndef MS_KERNMOUNT
+#define MS_KERNMOUNT    (1<<22)
+#endif
+
+#ifndef MS_I_VERSION
+#define MS_I_VERSION    (1<<23)
+#endif
+
+#ifndef MS_STRICTATIME
+#define MS_STRICTATIME  (1<<24)
+#endif
+
+#ifndef MS_LAZYTIME
+#define MS_LAZYTIME     (1<<25)
+#endif
+
+#ifndef SCM_SECURITY
+#define SCM_SECURITY 0x03
 #endif
 
 #ifndef PR_SET_NO_NEW_PRIVS
@@ -533,12 +579,21 @@ struct btrfs_ioctl_quota_ctl_args {
 #  define DRM_IOCTL_DROP_MASTER _IO('d', 0x1f)
 #endif
 
-#if defined(__i386__) || defined(__x86_64__)
-
-/* The precise definition of __O_TMPFILE is arch specific, so let's
- * just define this on x86 where we know the value. */
+/* The precise definition of __O_TMPFILE is arch specific; use the
+ * values defined by the kernel (note: some are hexa, some are octal,
+ * duplicated as-is from the kernel definitions):
+ * - alpha, parisc, sparc: each has a specific value;
+ * - others: they use the "generic" value.
+ */
 
 #ifndef __O_TMPFILE
+#if defined(__alpha__)
+#define __O_TMPFILE     0100000000
+#elif defined(__parisc__) || defined(__hppa__)
+#define __O_TMPFILE     0400000000
+#elif defined(__sparc__) || defined(__sparc64__)
+#define __O_TMPFILE     0x2000000
+#else
 #define __O_TMPFILE     020000000
 #endif
 
@@ -577,6 +632,9 @@ struct btrfs_ioctl_quota_ctl_args {
 
 #define IN6_ADDR_GEN_MODE_EUI64 0
 #define IN6_ADDR_GEN_MODE_NONE 1
+#endif
+
+#if !HAVE_DECL_IN6_ADDR_GEN_MODE_STABLE_PRIVACY
 #define IN6_ADDR_GEN_MODE_STABLE_PRIVACY 2
 #endif
 
@@ -759,6 +817,14 @@ struct btrfs_ioctl_quota_ctl_args {
 #define IFLA_BRIDGE_MAX (__IFLA_BRIDGE_MAX - 1)
 #endif
 
+#ifndef BRIDGE_VLAN_INFO_RANGE_BEGIN
+#define BRIDGE_VLAN_INFO_RANGE_BEGIN (1<<3) /* VLAN is start of vlan range */
+#endif
+
+#ifndef BRIDGE_VLAN_INFO_RANGE_END
+#define BRIDGE_VLAN_INFO_RANGE_END (1<<4) /* VLAN is end of vlan range */
+#endif
+
 #if !HAVE_DECL_IFLA_BR_VLAN_DEFAULT_PVID
 #define IFLA_BR_UNSPEC 0
 #define IFLA_BR_FORWARD_DELAY 1
@@ -824,6 +890,10 @@ struct btrfs_ioctl_quota_ctl_args {
 
 #if !HAVE_DECL_IFLA_BRPORT_PROXYARP
 #define IFLA_BRPORT_PROXYARP 10
+#endif
+
+#if !HAVE_DECL_IFLA_VRF_TABLE
+#define IFLA_VRF_TABLE 1
 #endif
 
 #if !HAVE_DECL_NDA_IFINDEX
@@ -974,6 +1044,22 @@ struct btrfs_ioctl_quota_ctl_args {
 typedef int32_t key_serial_t;
 #endif
 
+#ifndef KEYCTL_JOIN_SESSION_KEYRING
+#define KEYCTL_JOIN_SESSION_KEYRING 1
+#endif
+
+#ifndef KEYCTL_CHOWN
+#define KEYCTL_CHOWN 4
+#endif
+
+#ifndef KEYCTL_SETPERM
+#define KEYCTL_SETPERM 5
+#endif
+
+#ifndef KEYCTL_DESCRIBE
+#define KEYCTL_DESCRIBE 6
+#endif
+
 #ifndef KEYCTL_READ
 #define KEYCTL_READ 11
 #endif
@@ -982,8 +1068,42 @@ typedef int32_t key_serial_t;
 #define KEYCTL_SET_TIMEOUT 15
 #endif
 
+#ifndef KEY_POS_VIEW
+#define KEY_POS_VIEW    0x01000000
+#define KEY_POS_READ    0x02000000
+#define KEY_POS_WRITE   0x04000000
+#define KEY_POS_SEARCH  0x08000000
+#define KEY_POS_LINK    0x10000000
+#define KEY_POS_SETATTR 0x20000000
+
+#define KEY_USR_VIEW    0x00010000
+#define KEY_USR_READ    0x00020000
+#define KEY_USR_WRITE   0x00040000
+#define KEY_USR_SEARCH  0x00080000
+#define KEY_USR_LINK    0x00100000
+#define KEY_USR_SETATTR 0x00200000
+
+#define KEY_GRP_VIEW    0x00000100
+#define KEY_GRP_READ    0x00000200
+#define KEY_GRP_WRITE   0x00000400
+#define KEY_GRP_SEARCH  0x00000800
+#define KEY_GRP_LINK    0x00001000
+#define KEY_GRP_SETATTR 0x00002000
+
+#define KEY_OTH_VIEW    0x00000001
+#define KEY_OTH_READ    0x00000002
+#define KEY_OTH_WRITE   0x00000004
+#define KEY_OTH_SEARCH  0x00000008
+#define KEY_OTH_LINK    0x00000010
+#define KEY_OTH_SETATTR 0x00000020
+#endif
+
 #ifndef KEY_SPEC_USER_KEYRING
 #define KEY_SPEC_USER_KEYRING -4
+#endif
+
+#ifndef KEY_SPEC_SESSION_KEYRING
+#define KEY_SPEC_SESSION_KEYRING -3
 #endif
 
 #ifndef PR_CAP_AMBIENT
@@ -1024,6 +1144,45 @@ typedef int32_t key_serial_t;
 #define ETHERTYPE_LLDP 0x88cc
 #endif
 
+#ifndef IFA_F_MCAUTOJOIN
+#define IFA_F_MCAUTOJOIN 0x400
+#endif
+
+#ifndef HAVE_STRUCT_ETHTOOL_LINK_SETTINGS
+
+#define ETHTOOL_GLINKSETTINGS   0x0000004c /* Get ethtool_link_settings */
+#define ETHTOOL_SLINKSETTINGS   0x0000004d /* Set ethtool_link_settings */
+
+struct ethtool_link_settings {
+        __u32   cmd;
+        __u32   speed;
+        __u8    duplex;
+        __u8    port;
+        __u8    phy_address;
+        __u8    autoneg;
+        __u8    mdio_support;
+        __u8    eth_tp_mdix;
+        __u8    eth_tp_mdix_ctrl;
+        __s8    link_mode_masks_nwords;
+        __u32   reserved[8];
+        __u32   link_mode_masks[0];
+        /* layout of link_mode_masks fields:
+         * __u32 map_supported[link_mode_masks_nwords];
+         * __u32 map_advertising[link_mode_masks_nwords];
+         * __u32 map_lp_advertising[link_mode_masks_nwords];
+         */
+};
+
+#endif
+
+#endif
+
+#ifndef SOL_ALG
+#define SOL_ALG 279
+#endif
+
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
 #endif
 
 #include "missing_syscall.h"

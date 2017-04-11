@@ -31,9 +31,9 @@ static void test_close_many(void) {
         char name1[] = "/tmp/test-close-many.XXXXXX";
         char name2[] = "/tmp/test-close-many.XXXXXX";
 
-        fds[0] = mkostemp_safe(name0, O_RDWR|O_CLOEXEC);
-        fds[1] = mkostemp_safe(name1, O_RDWR|O_CLOEXEC);
-        fds[2] = mkostemp_safe(name2, O_RDWR|O_CLOEXEC);
+        fds[0] = mkostemp_safe(name0);
+        fds[1] = mkostemp_safe(name1);
+        fds[2] = mkostemp_safe(name2);
 
         close_many(fds, 2);
 
@@ -52,7 +52,7 @@ static void test_close_nointr(void) {
         char name[] = "/tmp/test-test-close_nointr.XXXXXX";
         int fd;
 
-        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        fd = mkostemp_safe(name);
         assert_se(fd >= 0);
         assert_se(close_nointr(fd) >= 0);
         assert_se(close_nointr(fd) < 0);
@@ -94,10 +94,20 @@ static void test_same_fd(void) {
         assert_se(same_fd(b, a) == 0);
 }
 
+static void test_open_serialization_fd(void) {
+        _cleanup_close_ int fd = -1;
+
+        fd = open_serialization_fd("test");
+        assert_se(fd >= 0);
+
+        write(fd, "test\n", 5);
+}
+
 int main(int argc, char *argv[]) {
         test_close_many();
         test_close_nointr();
         test_same_fd();
+        test_open_serialization_fd();
 
         return 0;
 }

@@ -17,7 +17,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -27,6 +26,8 @@
 #include <unistd.h>
 
 #include "btrfs-util.h"
+#include "cgroup-util.h"
+#include "dirent-util.h"
 #include "fd-util.h"
 #include "log.h"
 #include "macro.h"
@@ -36,9 +37,15 @@
 #include "stat-util.h"
 #include "string-util.h"
 
+static bool is_physical_fs(const struct statfs *sfs) {
+        return !is_temporary_fs(sfs) && !is_cgroup_fs(sfs);
+}
+
 int rm_rf_children(int fd, RemoveFlags flags, struct stat *root_dev) {
         _cleanup_closedir_ DIR *d = NULL;
+        struct dirent *de;
         int ret = 0, r;
+        struct statfs sfs;
 
         assert(fd >= 0);
 
@@ -47,13 +54,13 @@ int rm_rf_children(int fd, RemoveFlags flags, struct stat *root_dev) {
 
         if (!(flags & REMOVE_PHYSICAL)) {
 
-                r = fd_is_temporary_fs(fd);
+                r = fstatfs(fd, &sfs);
                 if (r < 0) {
                         safe_close(fd);
-                        return r;
+                        return -errno;
                 }
 
-                if (!r) {
+                if (is_physical_fs(&sfs)) {
                         /* We refuse to clean physical file systems
                          * with this call, unless explicitly
                          * requested. This is extra paranoia just to
@@ -72,20 +79,11 @@ int rm_rf_children(int fd, RemoveFlags flags, struct stat *root_dev) {
                 return errno == ENOENT ? 0 : -errno;
         }
 
-        for (;;) {
-                struct dirent *de;
+        FOREACH_DIRENT_ALL(de, d, return -errno) {
                 bool is_dir;
                 struct stat st;
 
-                errno = 0;
-                de = readdir(d);
-                if (!de) {
-                        if (errno > 0 && ret == 0)
-                                ret = -errno;
-                        return ret;
-                }
-
-                if (streq(de->d_name, ".") || streq(de->d_name, ".."))
+                if (dot_or_dot_dot(de->d_name))
                         continue;
 
                 if (de->d_type == DT_UNKNOWN ||
@@ -172,6 +170,7 @@ int rm_rf_children(int fd, RemoveFlags flags, struct stat *root_dev) {
                         }
                 }
         }
+        return ret;
 }
 
 int rm_rf(const char *path, RemoveFlags flags) {
@@ -210,7 +209,7 @@ int rm_rf(const char *path, RemoveFlags flags) {
                         if (statfs(path, &s) < 0)
                                 return -errno;
 
-                        if (!is_temporary_fs(&s)) {
+                        if (is_physical_fs(&s)) {
                                 log_error("Attempted to remove disk file system, and we can't allow that.");
                                 return -EPERM;
                         }
