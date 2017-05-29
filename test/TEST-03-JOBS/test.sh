@@ -20,7 +20,8 @@ check_result_qemu() {
 }
 
 test_run() {
-    if run_qemu; then
+    #nested qemu has timing issues for jobs, use nspawn instead
+    if [ $(/usr/bin/systemd-detect-virt) != kvm ] && run_qemu; then
         check_result_qemu || return 1
     else
         dwarn "can't run QEMU, skipping"

@@ -11,12 +11,12 @@ check_result_qemu() {
     mount ${LOOPDEV}p1 $TESTDIR/root
     [[ -e $TESTDIR/root/testok ]] && ret=0
     [[ -f $TESTDIR/root/failed ]] && cp -a $TESTDIR/root/failed $TESTDIR
-    cryptsetup luksOpen ${LOOPDEV}p2 varcrypt <$TESTDIR/keyfile
-    mount /dev/mapper/varcrypt $TESTDIR/root/var
-    cp -a $TESTDIR/root/var/log/journal $TESTDIR
-    umount $TESTDIR/root/var
+    cryptsetup luksOpen ${LOOPDEV}p2 tmpcrypt <$TESTDIR/keyfile
+    mount /dev/mapper/tmpcrypt $TESTDIR/root/tmp
+    [[ -f $TESTDIR/root/tmp/log/journal ]] && cp -a $TESTDIR/root/tmp/log/journal $TESTDIR
+    umount $TESTDIR/root/tmp
     umount $TESTDIR/root
-    cryptsetup luksClose /dev/mapper/varcrypt
+    cryptsetup luksClose /dev/mapper/tmpcrypt
     [[ -f $TESTDIR/failed ]] && cat $TESTDIR/failed
     ls -l $TESTDIR/journal/*/*.journal
     test -s $TESTDIR/failed && ret=$(($ret+1))
@@ -37,17 +37,17 @@ test_setup() {
     create_empty_image
     echo -n test >$TESTDIR/keyfile
     cryptsetup -q luksFormat ${LOOPDEV}p2 $TESTDIR/keyfile
-    cryptsetup luksOpen ${LOOPDEV}p2 varcrypt <$TESTDIR/keyfile
-    mkfs.ext3 -L var /dev/mapper/varcrypt
+    cryptsetup luksOpen ${LOOPDEV}p2 tmpcrypt <$TESTDIR/keyfile
+    mkfs.ext4 -L tmp /dev/mapper/tmpcrypt
     mkdir -p $TESTDIR/root
     mount ${LOOPDEV}p1 $TESTDIR/root
-    mkdir -p $TESTDIR/root/var
-    mount /dev/mapper/varcrypt $TESTDIR/root/var
+    mkdir -p $TESTDIR/root/tmp
+    mount /dev/mapper/tmpcrypt $TESTDIR/root/tmp
 
     # Create what will eventually be our root filesystem onto an overlay
     (
         LOG_LEVEL=5
-        eval $(udevadm info --export --query=env --name=/dev/mapper/varcrypt)
+        eval $(udevadm info --export --query=env --name=/dev/mapper/tmpcrypt)
         eval $(udevadm info --export --query=env --name=${LOOPDEV}p2)
 
         setup_basic_environment
@@ -68,26 +68,26 @@ EOF
         install_dmevent
         generate_module_dependencies
         cat >$initdir/etc/crypttab <<EOF
-$DM_NAME UUID=$ID_FS_UUID /etc/varkey
+$DM_NAME UUID=$ID_FS_UUID /etc/tmpkey
 EOF
-        echo -n test > $initdir/etc/varkey
+        echo -n test > $initdir/etc/tmpkey
         cat $initdir/etc/crypttab | ddebug
 
         cat >>$initdir/etc/fstab <<EOF
-/dev/mapper/varcrypt    /var    ext3    defaults 0 1
+/dev/mapper/tmpcrypt    /tmp    ext4    defaults 0 1
 EOF
     ) || return 1
 
-    ddebug "umount $TESTDIR/root/var"
-    umount $TESTDIR/root/var
-    cryptsetup luksClose /dev/mapper/varcrypt
+    ddebug "umount $TESTDIR/root/tmp"
+    umount $TESTDIR/root/tmp
+    cryptsetup luksClose /dev/mapper/tmpcrypt
     ddebug "umount $TESTDIR/root"
     umount $TESTDIR/root
 }
 
 test_cleanup() {
-    umount $TESTDIR/root/var 2>/dev/null
-    [[ -b /dev/mapper/varcrypt ]] && cryptsetup luksClose /dev/mapper/varcrypt
+    umount $TESTDIR/root/tmp 2>/dev/null
+    [[ -b /dev/mapper/tmpcrypt ]] && cryptsetup luksClose /dev/mapper/tmpcrypt
     umount $TESTDIR/root 2>/dev/null
     [[ $LOOPDEV ]] && losetup -d $LOOPDEV
     return 0

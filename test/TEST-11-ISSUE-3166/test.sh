@@ -4,7 +4,6 @@
 TEST_DESCRIPTION="https://github.com/systemd/systemd/issues/3166"
 
 . $TEST_BASE_DIR/test-functions
-SKIP_INITRD=yes
 
 check_result_qemu() {
     ret=1

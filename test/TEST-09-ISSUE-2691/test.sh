@@ -4,7 +4,6 @@
 TEST_DESCRIPTION="https://github.com/systemd/systemd/issues/2691"
 
 . $TEST_BASE_DIR/test-functions
-SKIP_INITRD=yes
 QEMU_TIMEOUT=90
 
 check_result_qemu() {

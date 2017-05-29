@@ -2,7 +2,6 @@
 # -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
 # ex: ts=8 sw=4 sts=4 et filetype=sh
 TEST_DESCRIPTION="systemd-nspawn smoke test"
-SKIP_INITRD=yes
 . $TEST_BASE_DIR/test-functions
 
 check_result_qemu() {

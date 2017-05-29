@@ -5,13 +5,13 @@ set -e
 
 >/failed
 
-cat <<'EOL' >/lib/systemd/system/my.service
+cat <<'EOL' >/usr/lib/systemd/system/my.service
 [Service]
 Type=oneshot
-ExecStart=/bin/echo Timer runs me
+ExecStart=/usr/bin/echo Timer runs me
 EOL
 
-cat <<'EOL' >/lib/systemd/system/my.timer
+cat <<'EOL' >/usr/lib/systemd/system/my.timer
 [Timer]
 OnBootSec=10s
 OnUnitInactiveSec=1h

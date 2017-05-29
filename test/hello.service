@@ -2,4 +2,4 @@
 Description=Hello World
 
 [Service]
-ExecStart=/bin/echo "Hello World"
+ExecStart=/usr/bin/echo "Hello World"
