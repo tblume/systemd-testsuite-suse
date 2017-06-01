@@ -50,7 +50,7 @@ Description=Testsuite service
 After=multi-user.target
 
 [Service]
-ExecStart=/bin/sh -x -c 'mount -o remount,rw /dev/sda1 && echo OK > /testok; systemctl poweroff'
+ExecStart=/bin/sh -x -c 'mount -o remount,rw / && echo OK > /testok; systemctl poweroff'
 Type=oneshot
 EOF
 
