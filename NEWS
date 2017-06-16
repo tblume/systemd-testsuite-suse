@@ -1,6 +1,23 @@
 systemd System and Service Manager
 
+CHANGES WITH 234 in spe
+
+        * The code to call libnss_dns as a fallback from libnss_resolve when
+          the communication with systemd-resolved fails was removed. This
+          fallback was redundant and interfered with the [!UNAVAIL=return]
+          suffix. See nss-resolve(8) for the recommended configuration.
+
+        * All kernel install plugins are called with the environment variable
+          KERNEL_INSTALL_MACHINE_ID which is set to the machine ID given by
+          /etc/machine-id. If the file is missing or empty, the variable is
+          empty and BOOT_DIR_ABS is the path of a temporary directory which is
+          removed after the all plugins exit. So, if KERNEL_INSTALL_MACHINE_ID
+          is empty, all plugins should not put anything in BOOT_DIR_ABS.
+
 CHANGES WITH 233:
+
+        * This version requires at least gperf 3.1 for building, 3.0 is not
+          sufficient.
 
         * The "hybrid" control group mode has been modified to improve
           compatibility with "legacy" cgroups-v1 setups. Specifically, the
@@ -3315,7 +3332,7 @@ CHANGES WITH 216:
           like Cockpit which register web clients as PAM sessions.
 
         * timer units with at least one OnCalendar= setting will now
-          be started only after timer-sync.target has been
+          be started only after time-sync.target has been
           reached. This way they will not elapse before the system
           clock has been corrected by a local NTP client or
           similar. This is particular useful on RTC-less embedded

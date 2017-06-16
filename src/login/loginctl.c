@@ -929,7 +929,7 @@ static int show_session(int argc, char *argv[], void *userdata) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
                 _cleanup_free_ char *path = NULL;
 
-                r = get_session_path(bus, argv[1], &error, &path);
+                r = get_session_path(bus, argv[i], &error, &path);
                 if (r < 0) {
                         log_error("Failed to get session path: %s", bus_error_message(&error, r));
                         return r;
@@ -1386,8 +1386,10 @@ static int help(int argc, char *argv[], void *userdata) {
                "     --kill-who=WHO        Who to send signal to\n"
                "  -s --signal=SIGNAL       Which signal to send\n"
                "  -n --lines=INTEGER       Number of journal entries to show\n"
-               "  -o --output=STRING       Change journal output mode (short, short-monotonic,\n"
-               "                           verbose, export, json, json-pretty, json-sse, cat)\n\n"
+               "  -o --output=STRING       Change journal output mode (short, short-precise,\n"
+               "                             short-iso, short-iso-precise, short-full,\n"
+               "                             short-monotonic, short-unix, verbose, export,\n"
+               "                             json, json-pretty, json-sse, cat)\n"
                "Session Commands:\n"
                "  list-sessions            List sessions\n"
                "  session-status [ID...]   Show session status\n"

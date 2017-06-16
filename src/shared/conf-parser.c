@@ -506,6 +506,7 @@ int config_parse_many(
 
 DEFINE_PARSER(int, int, safe_atoi);
 DEFINE_PARSER(long, long, safe_atoli);
+DEFINE_PARSER(uint8, uint8_t, safe_atou8);
 DEFINE_PARSER(uint16, uint16_t, safe_atou16);
 DEFINE_PARSER(uint32, uint32_t, safe_atou32);
 DEFINE_PARSER(uint64, uint64_t, safe_atou64);
@@ -792,7 +793,7 @@ int config_parse_strv(const char *unit,
                 }
 
                 if (!utf8_is_valid(word)) {
-                        log_syntax_invalid_utf8(unit, LOG_ERR, filename, line, rvalue);
+                        log_syntax_invalid_utf8(unit, LOG_ERR, filename, line, word);
                         free(word);
                         continue;
                 }
@@ -956,6 +957,43 @@ int config_parse_ifname(
         r = free_and_strdup(s, rvalue);
         if (r < 0)
                 return log_oom();
+
+        return 0;
+}
+
+int config_parse_ip_port(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        uint16_t *s = data;
+        uint16_t port;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                *s = 0;
+                return 0;
+        }
+
+        r = parse_ip_port(rvalue, &port);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse port '%s'.", rvalue);
+                return 0;
+        }
+
+        *s = port;
 
         return 0;
 }

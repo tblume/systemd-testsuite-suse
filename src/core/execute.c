@@ -1670,7 +1670,7 @@ static bool exec_needs_mount_namespace(
             context->protect_control_groups)
                 return true;
 
-        if (context->mount_apivfs)
+        if (context->mount_apivfs && (context->root_image || context->root_directory))
                 return true;
 
         return false;
@@ -2887,9 +2887,9 @@ static int exec_child(
                 if (line) {
                         log_open();
                         log_struct(LOG_DEBUG,
-                                   LOG_UNIT_ID(unit),
                                    "EXECUTABLE=%s", command->path,
                                    LOG_UNIT_MESSAGE(unit, "Executing: %s", line),
+                                   LOG_UNIT_ID(unit),
                                    NULL);
                         log_close();
                 }
@@ -2927,8 +2927,13 @@ int exec_spawn(Unit *unit,
             context->std_output == EXEC_OUTPUT_SOCKET ||
             context->std_error == EXEC_OUTPUT_SOCKET) {
 
-                if (params->n_fds != 1) {
+                if (params->n_fds > 1) {
                         log_unit_error(unit, "Got more than one socket.");
+                        return -EINVAL;
+                }
+
+                if (params->n_fds == 0) {
+                        log_unit_error(unit, "Got no socket.");
                         return -EINVAL;
                 }
 
@@ -2953,9 +2958,9 @@ int exec_spawn(Unit *unit,
                 return log_oom();
 
         log_struct(LOG_DEBUG,
-                   LOG_UNIT_ID(unit),
                    LOG_UNIT_MESSAGE(unit, "About to execute: %s", line),
                    "EXECUTABLE=%s", command->path,
+                   LOG_UNIT_ID(unit),
                    NULL);
         pid = fork();
         if (pid < 0)
@@ -2987,6 +2992,14 @@ int exec_spawn(Unit *unit,
                                                  LOG_UNIT_ID(unit),
                                                  LOG_UNIT_MESSAGE(unit, "%s: %m",
                                                                   error_message),
+                                                 "EXECUTABLE=%s", command->path,
+                                                 NULL);
+                        else if (r == -ENOENT && command->ignore)
+                                log_struct_errno(LOG_INFO, r,
+                                                 "MESSAGE_ID=" SD_MESSAGE_SPAWN_FAILED_STR,
+                                                 LOG_UNIT_ID(unit),
+                                                 LOG_UNIT_MESSAGE(unit, "Skipped spawning %s: %m",
+                                                                  command->path),
                                                  "EXECUTABLE=%s", command->path,
                                                  NULL);
                         else
@@ -3224,10 +3237,10 @@ int exec_context_load_environment(Unit *unit, const ExecContext *c, char ***l) {
         STRV_FOREACH(i, c->environment_files) {
                 char *fn;
                 int k;
+                unsigned n;
                 bool ignore = false;
                 char **p;
                 _cleanup_globfree_ glob_t pglob = {};
-                int count, n;
 
                 fn = *i;
 
@@ -3245,23 +3258,19 @@ int exec_context_load_environment(Unit *unit, const ExecContext *c, char ***l) {
                 }
 
                 /* Filename supports globbing, take all matching files */
-                errno = 0;
-                if (glob(fn, 0, NULL, &pglob) != 0) {
+                k = safe_glob(fn, 0, &pglob);
+                if (k < 0) {
                         if (ignore)
                                 continue;
 
                         strv_free(r);
-                        return errno > 0 ? -errno : -EINVAL;
+                        return k;
                 }
-                count = pglob.gl_pathc;
-                if (count == 0) {
-                        if (ignore)
-                                continue;
 
-                        strv_free(r);
-                        return -EINVAL;
-                }
-                for (n = 0; n < count; n++) {
+                /* When we don't match anything, -ENOENT should be returned */
+                assert(pglob.gl_pathc > 0);
+
+                for (n = 0; n < pglob.gl_pathc; n++) {
                         k = load_env_file(NULL, pglob.gl_pathv[n], NULL, &p);
                         if (k < 0) {
                                 if (ignore)

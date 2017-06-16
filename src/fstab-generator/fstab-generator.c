@@ -358,7 +358,7 @@ static int add_mount(
                 "Documentation=man:fstab(5) man:systemd-fstab-generator(8)\n",
                 source);
 
-        if (!noauto && !nofail && !automount)
+        if (!nofail && !automount)
                 fprintf(f, "Before=%s\n", post);
 
         if (!automount && opts) {
@@ -396,6 +396,10 @@ static int add_mount(
                 fprintf(f, "Type=%s\n", fstype);
 
         r = generator_write_timeouts(dest, what, where, opts, &filtered);
+        if (r < 0)
+                return r;
+
+        r = generator_write_device_deps(dest, what, where, opts);
         if (r < 0)
                 return r;
 

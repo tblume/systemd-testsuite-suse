@@ -718,17 +718,20 @@
 
       <varlistentry>
         <term><varname>JobTimeoutSec=</varname></term>
+        <term><varname>JobRunningTimeoutSec=</varname></term>
         <term><varname>JobTimeoutAction=</varname></term>
         <term><varname>JobTimeoutRebootArgument=</varname></term>
 
-        <listitem><para>When a job for this unit is queued, a time-out may be configured. If this time limit is
-        reached, the job will be cancelled, the unit however will not change state or even enter the
-        <literal>failed</literal> mode. This value defaults to <literal>infinity</literal> (job timeouts disabled),
-        except for device units. NB: this timeout is independent from any unit-specific timeout (for example, the
-        timeout set with <varname>TimeoutStartSec=</varname> in service units) as the job timeout has no effect on the
-        unit itself, only on the job that might be pending for it. Or in other words: unit-specific timeouts are useful
-        to abort unit state changes, and revert them. The job timeout set with this option however is useful to abort
-        only the job waiting for the unit state to change.</para>
+        <listitem><para>When a job for this unit is queued, a time-out <varname>JobTimeoutSec=</varname> may be
+        configured. Similarly, <varname>JobRunningTimeoutSec=</varname> starts counting when the queued job is actually
+        started. If either time limit is reached, the job will be cancelled, the unit however will not change state or
+        even enter the <literal>failed</literal> mode. This value defaults to <literal>infinity</literal> (job timeouts
+        disabled), except for device units (<varname>JobRunningTimeoutSec=</varname> defaults to
+        <varname>DefaultTimeoutStartSec=</varname>). NB: this timeout is independent from any unit-specific timeout
+        (for example, the timeout set with <varname>TimeoutStartSec=</varname> in service units) as the job timeout has
+        no effect on the unit itself, only on the job that might be pending for it. Or in other words: unit-specific
+        timeouts are useful to abort unit state changes, and revert them. The job timeout set with this option however
+        is useful to abort only the job waiting for the unit state to change.</para>
 
         <para><varname>JobTimeoutAction=</varname>
         optionally configures an additional
@@ -817,6 +820,8 @@
         <term><varname>ConditionDirectoryNotEmpty=</varname></term>
         <term><varname>ConditionFileNotEmpty=</varname></term>
         <term><varname>ConditionFileIsExecutable=</varname></term>
+        <term><varname>ConditionUser=</varname></term>
+        <term><varname>ConditionGroup=</varname></term>
 
         <!-- We do not document ConditionNull=
              here, as it is not particularly
@@ -859,9 +864,11 @@
         <varname>arm64-be</varname>,
         <varname>sh</varname>,
         <varname>sh64</varname>,
-        <varname>m86k</varname>,
+        <varname>m68k</varname>,
         <varname>tilegx</varname>,
-        <varname>cris</varname> to test
+        <varname>cris</varname>,
+        <varname>arc</varname>,
+        <varname>arc-be</varname> to test
         against a specific architecture. The architecture is
         determined from the information returned by
         <citerefentry project='man-pages'><refentrytitle>uname</refentrytitle><manvolnum>2</manvolnum></citerefentry>
@@ -1028,6 +1035,21 @@
         whether a certain path exists, is a regular file and marked
         executable.</para>
 
+        <para><varname>ConditionUser=</varname> takes a numeric
+        <literal>UID</literal>, a UNIX user name, or the special value
+        <literal>@system</literal>. This condition may be used to check
+        whether the service manager is running as the given user. The
+        special value <literal>@system</literal> can be used to check
+        if the user id is within the system user range. This option is not
+        useful for system services, as the system manager exclusively
+        runs as the root user, and thus the test result is constant.</para>
+
+        <para><varname>ConditionGroup=</varname> is similar
+        to <varname>ConditionUser=</varname> but verifies that the
+        service manager's real or effective group, or any of its
+        auxiliary groups match the specified group or GID. This setting
+        does not have a special value <literal>@system</literal>.</para>
+
         <para>If multiple conditions are specified, the unit will be
         executed if all of them apply (i.e. a logical AND is applied).
         Condition checks can be prefixed with a pipe symbol (|) in
@@ -1064,6 +1086,8 @@
         <term><varname>AssertDirectoryNotEmpty=</varname></term>
         <term><varname>AssertFileNotEmpty=</varname></term>
         <term><varname>AssertFileIsExecutable=</varname></term>
+        <term><varname>AssertUser=</varname></term>
+        <term><varname>AssertGroup=</varname></term>
 
         <listitem><para>Similar to the <varname>ConditionArchitecture=</varname>,
         <varname>ConditionVirtualization=</varname>, …, condition settings described above, these settings add
@@ -1384,7 +1408,7 @@ WantedBy=multi-user.target</programlisting>
       ordered appropriately (<varname>After=</varname>). Thirdly, in
       order to harden the service a bit more, the administrator would
       like to set the <varname>PrivateTmp=</varname> setting (see
-      <citerefentry><refentrytitle>systemd.service</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+      <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>
       for details). And lastly, the administrator would like to reset
       the niceness of the service to its default value of 0.</para>
 

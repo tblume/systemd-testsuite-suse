@@ -42,7 +42,7 @@
 #include "udev-util.h"
 #include "xattr-util.h"
 
-static int probe_filesystem(const char *node, char **ret_fstype) {
+_unused_ static int probe_filesystem(const char *node, char **ret_fstype) {
 #ifdef HAVE_BLKID
         _cleanup_blkid_free_probe_ blkid_probe b = NULL;
         const char *fstype;
@@ -951,7 +951,7 @@ int dissected_image_decrypt(
          *
          *      = 0           → There was nothing to decrypt
          *      > 0           → Decrypted successfully
-         *      -ENOKEY       → There's some to decrypt but no key was supplied
+         *      -ENOKEY       → There's something to decrypt but no key was supplied
          *      -EKEYREJECTED → Passed key was not correct
          */
 

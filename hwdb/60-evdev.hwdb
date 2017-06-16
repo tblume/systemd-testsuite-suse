@@ -115,6 +115,13 @@ evdev:name:ETPS/2 Elantech Touchpad:dmi:*:svnASUSTeKCOMPUTERINC.:pn?550C?:*
  EVDEV_ABS_35=::31
  EVDEV_ABS_36=::30
 
+# Asus UX301L
+evdev:name:Elan Touchpad:dmi:*:svnASUSTeKCOMPUTERINC.:pnUX301LAA:*
+ EVDEV_ABS_00=::30
+ EVDEV_ABS_01=::29
+ EVDEV_ABS_35=::30
+ EVDEV_ABS_36=::29
+
 # Asus UX305
 evdev:name:Elan Touchpad:dmi:*:svnASUSTeKCOMPUTERINC.:pnUX305UA:*
  EVDEV_ABS_00=0:3097:32
@@ -177,6 +184,15 @@ evdev:name:SynPS/2 Synaptics TouchPad:dmi:bvn*:bvr*:bd*:svnDellInc.:pnXPS159550*
 evdev:name:AlpsPS/2 ALPS GlidePoint:dmi:bvn*:bvr*:bd*:svnDellInc.:pnXPSM1530*
  EVDEV_ABS_00=85:947:15
  EVDEV_ABS_01=154:726:18
+
+#####
+# Sun
+#####
+
+# Fujitsu Component - USB Touch Panel
+evdev:input:b0003v0430p0530*
+ EVDEV_ABS_00=0:4096:16
+ EVDEV_ABS_01=0:4096:16
 
 #########################################
 # Google
@@ -338,6 +354,13 @@ evdev:name:ETPS/2 Elantech Touchpad:dmi:*svnSAMSUNGELECTRONICSCO.,LTD.:pn305V4A/
  EVDEV_ABS_35=0:2480:28
  EVDEV_ABS_36=0:1116:24
 
+# Samsung 880Z5E
+evdev:name:ETPS/2 Elantech Touchpad:dmi:*svnSAMSUNGELECTRONICSCO.,LTD.:pn870Z5E/880Z5E/680Z5E*
+ EVDEV_ABS_00=::30
+ EVDEV_ABS_01=::29
+ EVDEV_ABS_35=::30
+ EVDEV_ABS_36=::29
+
 #########################################
 # Toshiba
 #########################################
@@ -346,3 +369,12 @@ evdev:name:ETPS/2 Elantech Touchpad:dmi:*svnSAMSUNGELECTRONICSCO.,LTD.:pn305V4A/
 evdev:name:AlpsPS/2 ALPS DualPoint TouchPad:dmi:*svnTOSHIBA:pnTECRAM11*
  EVDEV_ABS_00=90:962:11
  EVDEV_ABS_01=51:681:14
+
+#########################################
+# Waltop
+#########################################
+
+# WALTOP International Corp. Slim Tablet
+evdev:input:b0003v172Fp0031*
+ EVDEV_ABS_00=0:10000:400
+ EVDEV_ABS_01=0:6250:400

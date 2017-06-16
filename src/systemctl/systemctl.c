@@ -3191,8 +3191,8 @@ static int start_unit(int argc, char *argv[], void *userdata) {
         return r;
 }
 
+#ifdef ENABLE_LOGIND
 static int logind_set_wall_message(void) {
-#ifdef HAVE_LOGIND
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         sd_bus *bus;
         _cleanup_free_ char *m = NULL;
@@ -3220,15 +3220,14 @@ static int logind_set_wall_message(void) {
 
         if (r < 0)
                 return log_warning_errno(r, "Failed to set wall message, ignoring: %s", bus_error_message(&error, r));
-
-#endif
         return 0;
 }
+#endif
 
 /* Ask systemd-logind, which might grant access to unprivileged users
  * through PolicyKit */
 static int logind_reboot(enum action a) {
-#ifdef HAVE_LOGIND
+#ifdef ENABLE_LOGIND
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         const char *method, *description;
         sd_bus *bus;
@@ -3291,7 +3290,7 @@ static int logind_reboot(enum action a) {
 }
 
 static int logind_check_inhibitors(enum action a) {
-#ifdef HAVE_LOGIND
+#ifdef ENABLE_LOGIND
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_strv_free_ char **sessions = NULL;
         const char *what, *who, *why, *mode;
@@ -3410,7 +3409,7 @@ static int logind_check_inhibitors(enum action a) {
 }
 
 static int logind_prepare_firmware_setup(void) {
-#ifdef HAVE_LOGIND
+#ifdef ENABLE_LOGIND
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         sd_bus *bus;
         int r;
@@ -7002,7 +7001,8 @@ static void systemctl_help(void) {
                "     --root=PATH      Enable unit files in the specified root directory\n"
                "  -n --lines=INTEGER  Number of journal entries to show\n"
                "  -o --output=STRING  Change journal output mode (short, short-precise,\n"
-               "                             short-iso, short-full, short-monotonic, short-unix,\n"
+               "                             short-iso, short-iso-precise, short-full,\n"
+               "                             short-monotonic, short-unix,\n"
                "                             verbose, export, json, json-pretty, json-sse, cat)\n"
                "     --firmware-setup Tell the firmware to show the setup menu on next boot\n"
                "     --plain          Print unit dependencies as a list instead of a tree\n\n"
@@ -8260,7 +8260,7 @@ static int halt_now(enum action a) {
                 _cleanup_free_ char *param = NULL;
 
                 r = read_one_line_file("/run/systemd/reboot-param", &param);
-                if (r < 0)
+                if (r < 0 && r != -ENOENT)
                         log_warning_errno(r, "Failed to read reboot parameter file: %m");
 
                 if (!isempty(param)) {
@@ -8281,7 +8281,7 @@ static int halt_now(enum action a) {
 
 static int logind_schedule_shutdown(void) {
 
-#ifdef HAVE_LOGIND
+#ifdef ENABLE_LOGIND
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         char date[FORMAT_TIMESTAMP_MAX];
         const char *action;
@@ -8409,7 +8409,7 @@ static int runlevel_main(void) {
 }
 
 static int logind_cancel_shutdown(void) {
-#ifdef HAVE_LOGIND
+#ifdef ENABLE_LOGIND
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         sd_bus *bus;
         int r;
