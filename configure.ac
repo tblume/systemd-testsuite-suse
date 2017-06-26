@@ -1050,6 +1050,15 @@ fi
 AM_CONDITIONAL(HAVE_LIBIDN, [test "$have_libidn" = "yes"])
 
 # ------------------------------------------------------------------------------
+have_idn=no
+AC_ARG_ENABLE(idn, AS_HELP_STRING([--disable-idn], [disable IDN when printing host names]))
+if test "x$enable_idn" != "xno"; then
+        have_idn=yes
+        AC_DEFINE(ENABLE_IDN, [1], [IDN is enabled])
+fi
+AM_CONDITIONAL(ENABLE_IDN, [test "$have_idn" = "yes"])
+
+# ------------------------------------------------------------------------------
 have_libiptc=no
 AC_ARG_ENABLE(libiptc, AS_HELP_STRING([--disable-libiptc], [disable optional LIBIPTC support]))
 if test "x$enable_libiptc" != "xno"; then
@@ -1316,6 +1325,11 @@ AC_ARG_WITH(default-dnssec,
                [default DNSSEC mode, defaults to "allow-downgrade"]),
         [DEFAULT_DNSSEC_MODE="$withval"],
         [DEFAULT_DNSSEC_MODE="allow-downgrade"])
+
+if test "x$have_gcrypt" = xno -a "x${DEFAULT_DNSSEC_MODE}" != xno ; then
+        AC_MSG_WARN(default-dnssec cannot be set to yes or allow-downgrade when gcrypt is disabled. Setting default-dnssec to no.)
+        DEFAULT_DNSSEC_MODE="no"
+fi
 
 AS_CASE("x${DEFAULT_DNSSEC_MODE}",
         [xno], [mode=DNSSEC_NO],
@@ -1742,6 +1756,7 @@ AC_MSG_RESULT([
         libcurl:                           ${have_libcurl}
         libidn2:                           ${have_libidn2}
         libidn:                            ${have_libidn}
+        IDN:                               ${have_idn}
         libiptc:                           ${have_libiptc}
         ELFUTILS:                          ${have_elfutils}
         binfmt:                            ${have_binfmt}
