@@ -312,7 +312,6 @@ link_test_c = files('tools/meson-link-test.c')
 foreach arg : ['-Wl,-z,relro',
                '-Wl,-z,now',
                '-pie',
-               '-Wl,-fuse-ld=gold',
               ]
 
         have = run_command(check_compilation_sh,
@@ -1014,6 +1013,7 @@ foreach pair : [['utmp',          'HAVE_UTMP'],
                 ['smack',         'HAVE_SMACK'],
                 ['gshadow',       'ENABLE_GSHADOW'],
                 ['idn',           'ENABLE_IDN'],
+                ['nss-systemd',   'ENABLE_NSS_SYSTEMD'],
                ]
 
         if get_option(pair[0])
@@ -1162,7 +1162,7 @@ test_dlopen = executable(
         dependencies : [libdl])
 
 foreach tuple : [['myhostname', 'HAVE_MYHOSTNAME'],
-                 ['systemd',    ''               ],
+                 ['systemd',    'ENABLE_NSS_SYSTEMD'],
                  ['mymachines', 'ENABLE_MACHINED'],
                  ['resolve',    'ENABLE_RESOLVED']]
 
@@ -2219,8 +2219,6 @@ foreach tuple : tests
         endif
 
         if condition == '' or conf.get(condition, false)
-                install = install_tests and type == ''
-
                 exe = executable(
                         name,
                         sources,
@@ -2229,8 +2227,8 @@ foreach tuple : tests
                         dependencies : dependencies,
                         c_args : defs,
                         install_rpath : rootlibexecdir,
-                        install : install,
-                        install_dir : testsdir)
+                        install : install_tests,
+                        install_dir : join_paths(testsdir, type))
 
                 if type == 'manual'
                         message('@0@ is a manual test'.format(name))
@@ -2457,6 +2455,7 @@ foreach tuple : [
         ['idn'],
         ['libidn2'],
         ['libidn'],
+        ['nss-systemd'],
         ['libiptc'],
         ['elfutils'],
         ['binfmt'],
