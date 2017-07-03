@@ -3871,6 +3871,7 @@ dist_udevrules_DATA += \
 	rules/60-block.rules \
 	rules/60-drm.rules \
 	rules/60-evdev.rules \
+	rules/60-input-id.rules \
 	rules/60-persistent-storage-tape.rules \
 	rules/60-persistent-input.rules \
 	rules/60-persistent-alsa.rules \
@@ -3925,10 +3926,10 @@ noinst_LTLIBRARIES += \
 
 src/udev/keyboard-keys-list.txt:
 	$(AM_V_at)$(MKDIR_P) $(dir $@)
-	$(AM_V_GEN)$(CPP) $(CFLAGS) $(AM_CPPFLAGS) $(CPPFLAGS) -dM -include linux/input.h - < /dev/null | $(AWK) '/^#define[ \t]+KEY_[^ ]+[ \t]+[0-9K]/ { if ($$2 != "KEY_MAX") { print $$2 } }' > $@
+	$(AM_V_GEN)$(top_srcdir)/src/udev/generate-keyboard-keys-list.sh "$(CPP) $(CFLAGS) $(AM_CPPFLAGS) $(CPPFLAGS)" > $@
 
 src/udev/keyboard-keys-from-name.gperf: src/udev/keyboard-keys-list.txt
-	$(AM_V_GEN)$(AWK) 'BEGIN{ print "struct key_name { const char* name; unsigned short id; };"; print "%null-strings"; print "%%";} { print tolower(substr($$1 ,5)) ", " $$1 }' < $< > $@
+	$(AM_V_GEN)$(top_srcdir)/src/udev/generate-keyboard-keys-gperf.sh $< > $@
 
 src/udev/keyboard-keys-from-name.h: src/udev/keyboard-keys-from-name.gperf
 	$(AM_V_GPERF)$(GPERF) -L ANSI-C -t -N keyboard_lookup_key -H hash_key_name -p -C < $< > $@
@@ -5758,6 +5759,7 @@ dist_zshcompletion_data += \
 tests += \
 	test-dns-packet \
 	test-resolve-tables \
+	test-resolved-packet \
 	test-dnssec
 
 manual_tests += \
@@ -5775,6 +5777,19 @@ test_resolve_tables_CFLAGS = \
 	$(GCRYPT_CFLAGS)
 
 test_resolve_tables_LDADD = \
+	libsystemd-shared.la \
+	$(GCRYPT_LIBS) \
+	-lm
+
+test_resolved_packet_SOURCES = \
+	src/resolve/test-resolved-packet.c \
+	$(basic_dns_sources)
+
+test_resolved_packet_CFLAGS = \
+	$(AM_CFLAGS) \
+	$(GCRYPT_CFLAGS)
+
+test_resolved_packet_LDADD = \
 	libsystemd-shared.la \
 	$(GCRYPT_LIBS) \
 	-lm
