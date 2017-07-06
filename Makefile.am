@@ -42,9 +42,9 @@ LIBUDEV_CURRENT=7
 LIBUDEV_REVISION=6
 LIBUDEV_AGE=6
 
-LIBSYSTEMD_CURRENT=18
+LIBSYSTEMD_CURRENT=19
 LIBSYSTEMD_REVISION=0
-LIBSYSTEMD_AGE=18
+LIBSYSTEMD_AGE=19
 
 # Dirs of external packages
 dbuspolicydir=@dbuspolicydir@
@@ -1624,6 +1624,7 @@ tests += \
 	test-conf-parser \
 	test-capability \
 	test-async \
+	test-random-util \
 	test-ratelimit \
 	test-condition \
 	test-uid-range \
@@ -1943,6 +1944,12 @@ test_fstab_util_SOURCES = \
 	src/test/test-fstab-util.c
 
 test_fstab_util_LDADD = \
+	libsystemd-shared.la
+
+test_random_util_SOURCES = \
+	src/test/test-random-util.c
+
+test_random_util_LDADD = \
 	libsystemd-shared.la
 
 test_ratelimit_SOURCES = \
@@ -3019,7 +3026,7 @@ efi_headers = \
 	src/boot/efi/graphics.h \
 	src/boot/efi/linux.h \
 	src/boot/efi/measure.h \
-	src/boot/efi/pefile.h \
+	src/boot/efi/pe.h \
 	src/boot/efi/splash.h \
 	src/boot/efi/util.h \
 	src/boot/efi/shim.h
@@ -3030,7 +3037,7 @@ systemd_boot_sources = \
 	src/boot/efi/disk.c \
 	src/boot/efi/graphics.c \
 	src/boot/efi/measure.c \
-	src/boot/efi/pefile.c \
+	src/boot/efi/pe.c \
 	src/boot/efi/util.c \
 	src/boot/efi/shim.c
 
@@ -3067,7 +3074,7 @@ stub_sources = \
 	src/boot/efi/graphics.c \
 	src/boot/efi/linux.c \
 	src/boot/efi/measure.c \
-	src/boot/efi/pefile.c \
+	src/boot/efi/pe.c \
 	src/boot/efi/splash.c \
 	src/boot/efi/stub.c \
 	src/boot/efi/util.c
