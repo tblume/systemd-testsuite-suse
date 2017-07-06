@@ -7,6 +7,8 @@ export PATH
 LOOKS_LIKE_DEBIAN=$(source /etc/os-release && [[ "$ID" = "debian" || "$ID_LIKE" = "debian" ]] && echo yes)
 KERNEL_VER=${KERNEL_VER-$(uname -r)}
 KERNEL_MODS="/lib/modules/$KERNEL_VER/"
+LOOKS_LIKE_SUSE=$(source /etc/os-release && [[ "$ID_LIKE" = "suse" ]] && echo yes)
+[[ "$LOOKS_LIKE_SUSE" ]] && FSTYPE="${FSTYPE:-btrfs}" || FSTYPE="${FSTYPE:-ext3}"
 
 if ! ROOTLIBDIR=$(pkg-config --variable=systemdutildir systemd); then
     echo "WARNING! Cannot determine rootlibdir from pkg-config, assuming /usr/lib/systemd" >&2
@@ -53,16 +55,29 @@ run_qemu() {
 
     [ "$KERNEL_BIN" ] || KERNEL_BIN=/boot/vmlinuz-$KERNEL_VER
     [ "$INITRD" ]     || INITRD=/boot/initramfs-${KERNEL_VER}.img
+    default_suse_initrd=/boot/initrd-${KERNEL_VER}
+    if [[ ! "$INITRD" ]]; then
+        if [[ "$LOOKS_LIKE_SUSE" && -e "$default_suse_initrd" ]]; then
+            INITRD="$default_suse_initrd"
+        fi
+    fi
+
     [ "$QEMU_SMP" ]   || QEMU_SMP=1
 
     find_qemu_bin || return 1
 
-    KERNEL_APPEND="root=/dev/sda1 \
+if [[ "$LOOKS_LIKE_SUSE" ]]; then
+    PARAMS+="rd.hostonly=0"
+else
+    PARAMS+="ro"
+fi
+
+KERNEL_APPEND="$PARAMS \
+root=/dev/sda1 \
 systemd.log_level=debug \
 raid=noautodetect \
 loglevel=2 \
 init=$ROOTLIBDIR/systemd \
-ro \
 console=ttyS0 \
 selinux=0 \
 $KERNEL_APPEND \
@@ -130,6 +145,9 @@ install_systemd() {
     # we strip binaries since debug symbols increase binaries size a lot
     # and it could fill the available space
     strip_binaries
+
+   [[ "$LOOKS_LIKE_SUSE" ]] && setup_suse
+
 }
 
 install_missing_libraries() {
@@ -240,8 +258,14 @@ install_config_files() {
     # set the hostname
     echo systemd-testsuite > $initdir/etc/hostname
     # fstab
+    if [[ "$LOOKS_LIKE_SUSE" ]]; then
+       ROOTMOUNT="/dev/sda1           /       ${FSTYPE}    rw 0 1"
+    else
+       ROOTMOUNT="LABEL=systemd           /       ${FSTYPE}    rw 0 1"
+    fi
+
     cat >$initdir/etc/fstab <<EOF
-LABEL=systemd           /       ext3    rw 0 1
+$ROOTMOUNT
 EOF
 }
 
@@ -1131,6 +1155,11 @@ check_nspawn() {
     [[ -d /sys/fs/cgroup/systemd ]]
 }
 
+setup_suse() {
+    ln -s ../usr/bin/systemctl $initdir/bin/systemctl
+    ln -s ../usr/lib/systemd $initdir/lib/systemd
+    inst_simple "/usr/lib/systemd/system/haveged.service"
+}
 
 do_test() {
     if [[ $UID != "0" ]]; then
