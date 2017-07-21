@@ -165,13 +165,28 @@
         <term><varname>Group=</varname></term>
 
         <listitem><para>Set the UNIX user or group that the processes are executed as, respectively. Takes a single
-        user or group name, or numeric ID as argument. For system services (services run by the system service manager,
+        user or group name, or a numeric ID as argument. For system services (services run by the system service manager,
         i.e. managed by PID 1) and for user services of the root user (services managed by root's instance of
         <command>systemd --user</command>), the default is <literal>root</literal>, but <varname>User=</varname> may be
         used to specify a different user. For user services of any other user, switching user identity is not
         permitted, hence the only valid setting is the same user the user's service manager is running as. If no group
         is set, the default group of the user is used. This setting does not affect commands whose command line is
-        prefixed with <literal>+</literal>.</para></listitem>
+        prefixed with <literal>+</literal>.</para>
+
+        <para>Note that restrictions on the user/group name syntax are enforced: the specified name must consist only
+        of the characters a-z, A-Z, 0-9, <literal>_</literal> and <literal>-</literal>, except for the first character
+        which must be one of a-z, A-Z or <literal>_</literal> (i.e. numbers and <literal>-</literal> are not permitted
+        as first character). The user/group name must have at least one character, and at most 31. These restrictions
+        are enforced in order to avoid ambiguities and to ensure user/group names and unit files remain portable among
+        Linux systems.</para>
+
+        <para>When used in conjunction with <varname>DynamicUser=</varname> the user/group name specified is
+        dynamically allocated at the time the service is started, and released at the time the service is stopped —
+        unless it is already allocated statically (see below). If <varname>DynamicUser=</varname> is not used the
+        specified user and group must have been created statically in the user database no later than the moment the
+        service is started, for example using the
+        <citerefentry><refentrytitle>sysusers.d</refentrytitle><manvolnum>5</manvolnum></citerefentry> facility, which
+        is applied at boot or package install time.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1038,14 +1053,19 @@
         <varname>After=</varname> dependencies on all mount units necessary to access <filename>/tmp</filename> and
         <filename>/var/tmp</filename>. Moreover an implicitly <varname>After=</varname> ordering on
         <citerefentry><refentrytitle>systemd-tmpfiles-setup.service</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-        is added.</para></listitem>
+        is added.</para>
+
+        <para>Note that the implementation of this setting might be impossible (for example if mount namespaces
+        are not available), and the unit should be written in a way that does not solely rely on this setting for
+        security.</para></listitem>
       </varlistentry>
 
       <varlistentry>
         <term><varname>PrivateDevices=</varname></term>
 
-        <listitem><para>Takes a boolean argument. If true, sets up a new /dev namespace for the executed processes and
-        only adds API pseudo devices such as <filename>/dev/null</filename>, <filename>/dev/zero</filename> or
+        <listitem><para>Takes a boolean argument. If true, sets up a new <filename>/dev</filename> mount for the
+        executed processes and only adds API pseudo devices such as <filename>/dev/null</filename>,
+        <filename>/dev/zero</filename> or
         <filename>/dev/random</filename> (as well as the pseudo TTY subsystem) to it, but no physical devices such as
         <filename>/dev/sda</filename>, system memory <filename>/dev/mem</filename>, system ports
         <filename>/dev/port</filename> and others. This is useful to securely turn off physical device access by the
@@ -1056,8 +1076,8 @@
         <citerefentry><refentrytitle>systemd.resource-control</refentrytitle><manvolnum>5</manvolnum></citerefentry>
         for details). Note that using this setting will disconnect propagation of mounts from the service to the host
         (propagation in the opposite direction continues to work).  This means that this setting may not be used for
-        services which shall be able to install mount points in the main mount namespace. The /dev namespace will be
-        mounted read-only and 'noexec'.  The latter may break old programs which try to set up executable memory by
+        services which shall be able to install mount points in the main mount namespace. The new <filename>/dev</filename>
+        will be mounted read-only and 'noexec'. The latter may break old programs which try to set up executable memory by
         using <citerefentry><refentrytitle>mmap</refentrytitle><manvolnum>2</manvolnum></citerefentry> of
         <filename>/dev/zero</filename> instead of using <constant>MAP_ANON</constant>. This setting is implied if
         <varname>DynamicUser=</varname> is set. For this setting the same restrictions regarding mount propagation and
@@ -1065,7 +1085,11 @@
         If turned on and if running in user mode, or in system mode, but without the <constant>CAP_SYS_ADMIN</constant>
         capability (e.g. setting <varname>User=</varname>), <varname>NoNewPrivileges=yes</varname>
         is implied.
-        </para></listitem>
+        </para>
+
+        <para>Note that the implementation of this setting might be impossible (for example if mount namespaces
+        are not available), and the unit should be written in a way that does not solely rely on this setting for
+        security.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1076,7 +1100,7 @@
         configures only the loopback network device
         <literal>lo</literal> inside it. No other network devices will
         be available to the executed process. This is useful to
-        securely turn off network access by the executed process.
+        turn off network access by the executed process.
         Defaults to false. It is possible to run two or more units
         within the same private network namespace by using the
         <varname>JoinsNamespaceOf=</varname> directive, see
@@ -1086,7 +1110,11 @@
         The latter has the effect that AF_UNIX sockets in the abstract
         socket namespace will become unavailable to the processes
         (however, those located in the file system will continue to be
-        accessible).</para></listitem>
+        accessible).</para>
+
+        <para>Note that the implementation of this setting might be impossible (for example if network namespaces
+        are not available), and the unit should be written in a way that does not solely rely on this setting for
+        security.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1108,7 +1136,11 @@
         <para>This setting is particularly useful in conjunction with
         <varname>RootDirectory=</varname>/<varname>RootImage=</varname>, as the need to synchronize the user and group
         databases in the root directory and on the host is reduced, as the only users and groups who need to be matched
-        are <literal>root</literal>, <literal>nobody</literal> and the unit's own user and group.</para></listitem>
+        are <literal>root</literal>, <literal>nobody</literal> and the unit's own user and group.</para>
+
+        <para>Note that the implementation of this setting might be impossible (for example if user namespaces
+        are not available), and the unit should be written in a way that does not solely rely on this setting for
+        security.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -1587,7 +1619,7 @@
         any combination of: <constant>cgroup</constant>, <constant>ipc</constant>, <constant>net</constant>,
         <constant>mnt</constant>, <constant>pid</constant>, <constant>user</constant> and <constant>uts</constant>. Any
         namespace type listed is made accessible to the unit's processes, access to namespace types not listed is
-        prohibited (whitelisting). By prepending the list with a single tilda character (<literal>~</literal>) the
+        prohibited (whitelisting). By prepending the list with a single tilde character (<literal>~</literal>) the
         effect may be inverted: only the listed namespace types will be made inaccessible, all unlisted ones are
         permitted (blacklisting). If the empty string is assigned, the default namespace restrictions are applied,
         which is equivalent to false. Internally, this setting limits access to the
@@ -1622,35 +1654,77 @@
       <varlistentry>
         <term><varname>RuntimeDirectory=</varname></term>
 
-        <listitem><para>Takes a list of directory names. If set, one
-        or more directories by the specified names will be created
-        below <filename>/run</filename> (for system services) or below
-        <varname>$XDG_RUNTIME_DIR</varname> (for user services) when
-        the unit is started, and removed when the unit is stopped. The
-        directories will have the access mode specified in
-        <varname>RuntimeDirectoryMode=</varname>, and will be owned by
-        the user and group specified in <varname>User=</varname> and
-        <varname>Group=</varname>. Use this to manage one or more
-        runtime directories of the unit and bind their lifetime to the
-        daemon runtime. The specified directory names must be
-        relative, and may not include a <literal>/</literal>, i.e.
-        must refer to simple directories to create or remove. This is
-        particularly useful for unprivileged daemons that cannot
-        create runtime directories in <filename>/run</filename> due to
-        lack of privileges, and to make sure the runtime directory is
-        cleaned up automatically after use. For runtime directories
-        that require more complex or different configuration or
-        lifetime guarantees, please consider using
-        <citerefentry><refentrytitle>tmpfiles.d</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para></listitem>
+        <listitem><para>Takes a whitespace-separated list of directory names. The specified directory names must be
+        relative, and may not include <literal>.</literal> or <literal>..</literal>. If set, one or more directories
+        including their parents by the specified names will be created below <filename>/run</filename> (for system
+        services) or below <varname>$XDG_RUNTIME_DIR</varname> (for user services) when the unit is started. The
+        lowest subdirectories are removed when the unit is stopped. It is possible to preserve the directories if
+        <varname>RuntimeDirectoryPreserve=</varname> is configured to <option>restart</option> or <option>yes</option>.
+        The lowest subdirectories will have the access mode specified in <varname>RuntimeDirectoryMode=</varname>,
+        and be owned by the user and group specified in <varname>User=</varname> and <varname>Group=</varname>.
+        This implies <varname>ReadWritePaths=</varname>, that is, the directories specified
+        in this option are accessible with the access mode specified in <varname>RuntimeDirectoryMode=</varname>
+        even if <varname>ProtectSystem=</varname> is set to <option>strict</option>.
+        Use this to manage one or more runtime directories of the unit and bind their
+        lifetime to the daemon runtime. This is particularly useful for unprivileged daemons that cannot create
+        runtime directories in <filename>/run</filename> due to lack of privileges, and to make sure the runtime
+        directory is cleaned up automatically after use. For runtime directories that require more complex or
+        different configuration or lifetime guarantees, please consider using
+        <citerefentry><refentrytitle>tmpfiles.d</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
+
+        <para>Example: if a system service unit has the following,
+        <programlisting>RuntimeDirectory=foo/bar baz</programlisting>
+        the service manager creates <filename>/run/foo</filename> (if it does not exist), <filename>/run/foo/bar</filename>,
+        and <filename>/run/baz</filename>. The directories <filename>/run/foo/bar</filename> and <filename>/run/baz</filename>
+        except <filename>/run/foo</filename> are owned by the user and group specified in <varname>User=</varname> and
+        <varname>Group=</varname>, and removed when the service is stopped.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>StateDirectory=</varname></term>
+        <term><varname>CacheDirectory=</varname></term>
+        <term><varname>LogsDirectory=</varname></term>
+        <term><varname>ConfigurationDirectory=</varname></term>
+
+        <listitem><para>Takes a whitespace-separated list of directory names. If set, as similar to
+        <varname>RuntimeDirectory=</varname>, one or more directories including their parents by the specified names
+        will be created below <filename>/var/lib</filename>, <filename>/var/cache</filename>, <filename>/var/log</filename>,
+        or <filename>/etc</filename>, respectively, when the unit is started.
+        Unlike <varname>RuntimeDirectory=</varname>, the directories are not removed when the unit is stopped.
+        The lowest subdirectories will be owned by the user and group specified in <varname>User=</varname>
+        and <varname>Group=</varname>. The options imply <varname>ReadWritePaths=</varname>.
+        </para></listitem>
       </varlistentry>
 
       <varlistentry>
         <term><varname>RuntimeDirectoryMode=</varname></term>
+        <term><varname>StateDirectoryMode=</varname></term>
+        <term><varname>CacheDirectoryMode=</varname></term>
+        <term><varname>LogsDirectoryMode=</varname></term>
+        <term><varname>ConfigurationDirectoryMode=</varname></term>
 
         <listitem><para>Specifies the access mode of the directories specified in
-        <varname>RuntimeDirectory=</varname> as an octal number. Defaults to
-        <constant>0755</constant>. See "Permissions" in
-        <citerefentry project='man-pages'><refentrytitle>path_resolution</refentrytitle><manvolnum>7</manvolnum></citerefentry> for a discussion of the meaning of permission bits.
+        <varname>RuntimeDirectory=</varname>, <varname>StateDirectory=</varname>, <varname>CacheDirectory=</varname>,
+        <varname>LogsDirectory=</varname>, or <varname>ConfigurationDirectory=</varname>, respectively, as an octal number.
+        Defaults to <constant>0755</constant>. See "Permissions" in
+        <citerefentry project='man-pages'><refentrytitle>path_resolution</refentrytitle><manvolnum>7</manvolnum></citerefentry>
+        for a discussion of the meaning of permission bits.
+        </para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>RuntimeDirectoryPreserve=</varname></term>
+
+        <listitem><para>Takes a boolean argument or <option>restart</option>.
+        If set to <option>no</option> (the default), the directories specified in <varname>RuntimeDirectory=</varname>
+        are always removed when the service stops. If set to <option>restart</option> the directories are preserved
+        when the service is both automatically and manually restarted. Here, the automatic restart means the operation
+        specified in <varname>Restart=</varname>, and manual restart means the one triggered by
+        <command>systemctl restart foo.service</command>. If set to <option>yes</option>, then the directories are not
+        removed when the service is stopped. Note that since the runtime directory <filename>/run</filename> is a mount
+        point of <literal>tmpfs</literal>, then for system services the directories specified in
+        <varname>RuntimeDirectory=</varname> are removed when the system is rebooted.
         </para></listitem>
       </varlistentry>
 
@@ -1674,7 +1748,7 @@
         services, so that they cannot be used to circumvent the restrictions of this option. Specifically, it is
         recommended to combine this option with <varname>SystemCallArchitectures=native</varname> or similar. If
         running in user mode, or in system mode, but without the <constant>CAP_SYS_ADMIN</constant> capability
-        (e.g. setting <varname>User=</varname>), <varname>NoNewPrivileges=yes</varname> is implied.  </para></listitem>
+        (e.g. setting <varname>User=</varname>), <varname>NoNewPrivileges=yes</varname> is implied.</para></listitem>
       </varlistentry>
 
       <varlistentry>

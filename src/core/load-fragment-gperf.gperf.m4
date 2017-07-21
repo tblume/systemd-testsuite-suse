@@ -18,8 +18,8 @@ struct ConfigPerfItem;
 m4_dnl Define the context options only once
 m4_define(`EXEC_CONTEXT_CONFIG_ITEMS',
 `$1.WorkingDirectory,            config_parse_working_directory,     0,                             offsetof($1, exec_context)
-$1.RootDirectory,                config_parse_unit_path_printf,      0,                             offsetof($1, exec_context.root_directory)
-$1.RootImage,                    config_parse_unit_path_printf,      0,                             offsetof($1, exec_context.root_image)
+$1.RootDirectory,                config_parse_unit_path_printf,      true,                          offsetof($1, exec_context.root_directory)
+$1.RootImage,                    config_parse_unit_path_printf,      true,                          offsetof($1, exec_context.root_image)
 $1.User,                         config_parse_user_group,            0,                             offsetof($1, exec_context.user)
 $1.Group,                        config_parse_user_group,            0,                             offsetof($1, exec_context.group)
 $1.SupplementaryGroups,          config_parse_user_group_strv,       0,                             offsetof($1, exec_context.supplementary_groups)
@@ -35,7 +35,7 @@ $1.UMask,                        config_parse_mode,                  0,         
 $1.Environment,                  config_parse_environ,               0,                             offsetof($1, exec_context.environment)
 $1.EnvironmentFile,              config_parse_unit_env_file,         0,                             offsetof($1, exec_context.environment_files)
 $1.PassEnvironment,              config_parse_pass_environ,          0,                             offsetof($1, exec_context.pass_environment)
-$1.DynamicUser,                  config_parse_bool,                  0,                             offsetof($1, exec_context.dynamic_user)
+$1.DynamicUser,                  config_parse_bool,                  true,                          offsetof($1, exec_context.dynamic_user)
 $1.StandardInput,                config_parse_exec_input,            0,                             offsetof($1, exec_context)
 $1.StandardOutput,               config_parse_exec_output,           0,                             offsetof($1, exec_context)
 $1.StandardError,                config_parse_exec_output,           0,                             offsetof($1, exec_context)
@@ -104,8 +104,17 @@ $1.ProtectHome,                  config_parse_protect_home,          0,         
 $1.MountFlags,                   config_parse_exec_mount_flags,      0,                             offsetof($1, exec_context)
 $1.MountAPIVFS,                  config_parse_bool,                  0,                             offsetof($1, exec_context.mount_apivfs)
 $1.Personality,                  config_parse_personality,           0,                             offsetof($1, exec_context.personality)
-$1.RuntimeDirectoryMode,         config_parse_mode,                  0,                             offsetof($1, exec_context.runtime_directory_mode)
-$1.RuntimeDirectory,             config_parse_runtime_directory,     0,                             offsetof($1, exec_context.runtime_directory)
+$1.RuntimeDirectoryPreserve,     config_parse_runtime_preserve_mode, 0,                             offsetof($1, exec_context.runtime_directory_preserve_mode)
+$1.RuntimeDirectoryMode,         config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_RUNTIME].mode)
+$1.RuntimeDirectory,             config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_RUNTIME].paths)
+$1.DataDirectoryMode,            config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_STATE].mode)
+$1.DataDirectory,                config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_STATE].paths)
+$1.CacheDirectoryMode,           config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_CACHE].mode)
+$1.CacheDirectory,               config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_CACHE].paths)
+$1.LogsDirectoryMode,            config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_LOGS].mode)
+$1.LogsDirectory,                config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_LOGS].paths)
+$1.ConfigurationDirectoryMode,   config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_CONFIGURATION].mode)
+$1.ConfigurationDirectory,       config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_CONFIGURATION].paths)
 m4_ifdef(`HAVE_PAM',
 `$1.PAMName,                     config_parse_unit_string_printf,    0,                             offsetof($1, exec_context.pam_name)',
 `$1.PAMName,                     config_parse_warn_compat,           DISABLED_CONFIGURATION,        0')
@@ -194,7 +203,7 @@ Unit.OnFailureIsolate,           config_parse_job_mode_isolate,      0,         
 Unit.IgnoreOnIsolate,            config_parse_bool,                  0,                             offsetof(Unit, ignore_on_isolate)
 Unit.IgnoreOnSnapshot,           config_parse_warn_compat,           DISABLED_LEGACY,               0
 Unit.JobTimeoutSec,              config_parse_sec_fix_0,             0,                             offsetof(Unit, job_timeout)
-Unit.JobRunningTimeoutSec,       config_parse_sec,                   0,                             offsetof(Unit, job_running_timeout)
+Unit.JobRunningTimeoutSec,       config_parse_sec_fix_0,             0,                             offsetof(Unit, job_running_timeout)
 Unit.JobTimeoutAction,           config_parse_emergency_action,      0,                             offsetof(Unit, job_timeout_action)
 Unit.JobTimeoutRebootArgument,   config_parse_unit_string_printf,    0,                             offsetof(Unit, job_timeout_reboot_arg)
 Unit.StartLimitIntervalSec,      config_parse_sec,                   0,                             offsetof(Unit, start_limit.interval)

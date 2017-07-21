@@ -3818,6 +3818,8 @@ typedef struct UnitStatusInfo {
         bool failed_assert_negate;
         const char *failed_assert;
         const char *failed_assert_parameter;
+        usec_t next_elapse_real;
+        usec_t next_elapse_monotonic;
 
         /* Socket */
         unsigned n_accepted;
@@ -3986,6 +3988,31 @@ static void print_status_info(
                 printf(" since %s\n", s2);
         else
                 printf("\n");
+
+        if (endswith(i->id, ".timer")) {
+                char tstamp1[FORMAT_TIMESTAMP_RELATIVE_MAX],
+                     tstamp2[FORMAT_TIMESTAMP_MAX];
+                char *next_rel_time, *next_time;
+                dual_timestamp nw, next = {i->next_elapse_real,
+                                           i->next_elapse_monotonic};
+                usec_t next_elapse;
+
+                printf("  Trigger: ");
+
+                dual_timestamp_get(&nw);
+                next_elapse = calc_next_elapse(&nw, &next);
+                next_rel_time = format_timestamp_relative(tstamp1,
+                                                          sizeof(tstamp1),
+                                                          next_elapse);
+                next_time = format_timestamp(tstamp2,
+                                             sizeof(tstamp2),
+                                             next_elapse);
+
+                if (next_time && next_rel_time)
+                        printf("%s; %s\n", next_time, next_rel_time);
+                else
+                        printf("n/a\n");
+        }
 
         if (!i->condition_result && i->condition_timestamp > 0) {
                 UnitCondition *c;
@@ -4424,6 +4451,10 @@ static int status_property(const char *name, sd_bus_message *m, UnitStatusInfo *
                         i->tasks_max = u;
                 else if (streq(name, "CPUUsageNSec"))
                         i->cpu_usage_nsec = u;
+                else if (streq(name, "NextElapseUSecMonotonic"))
+                        i->next_elapse_monotonic = u;
+                else if (streq(name, "NextElapseUSecRealtime"))
+                        i->next_elapse_real = u;
 
                 break;
         }
@@ -6002,6 +6033,34 @@ static int mangle_names(char **original_names, char ***mangled_names) {
         return 0;
 }
 
+static int normalize_filenames(char **names) {
+        char **u;
+        int r;
+
+        STRV_FOREACH(u, names)
+                if (!path_is_absolute(*u)) {
+                        char* normalized_path;
+
+                        if (!isempty(arg_root)) {
+                                log_error("Non-absolute paths are not allowed when --root is used: %s", *u);
+                                return -EINVAL;
+                        }
+
+                        if (!strchr(*u,'/')) {
+                                log_error("Link argument does contain at least one directory separator: %s", *u);
+                                return -EINVAL;
+                        }
+
+                        r = path_make_absolute_cwd(*u, &normalized_path);
+                        if (r < 0)
+                                return r;
+
+                        free_and_replace(*u, normalized_path);
+                }
+
+        return 0;
+}
+
 static int normalize_names(char **names, bool warn_if_path) {
         char **u;
         bool was_path = false;
@@ -6094,6 +6153,12 @@ static int enable_unit(int argc, char *argv[], void *userdata) {
 
         if (streq(verb, "disable")) {
                 r = normalize_names(names, true);
+                if (r < 0)
+                        return r;
+        }
+
+        if (streq(verb, "link")) {
+                r = normalize_filenames(names);
                 if (r < 0)
                         return r;
         }

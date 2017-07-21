@@ -241,7 +241,7 @@ usec_t timeval_load(const struct timeval *tv) {
 struct timeval *timeval_store(struct timeval *tv, usec_t u) {
         assert(tv);
 
-        if (u == USEC_INFINITY||
+        if (u == USEC_INFINITY ||
             u / USEC_PER_SEC > TIME_T_MAX) {
                 tv->tv_sec = (time_t) -1;
                 tv->tv_usec = (suseconds_t) -1;
@@ -864,10 +864,10 @@ finish:
         if (ret > USEC_TIMESTAMP_FORMATTABLE_MAX)
                 return -EINVAL;
 
-        if (ret > minus)
+        if (ret >= minus)
                 ret -= minus;
         else
-                ret = 0;
+                return -EINVAL;
 
         *usec = ret;
 

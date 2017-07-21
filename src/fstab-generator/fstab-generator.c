@@ -25,6 +25,7 @@
 
 #include "alloc-util.h"
 #include "fd-util.h"
+#include "fs-util.h"
 #include "fileio.h"
 #include "fstab-util.h"
 #include "generator.h"
@@ -91,7 +92,7 @@ static int add_swap(
                 bool noauto,
                 bool nofail) {
 
-        _cleanup_free_ char *name = NULL, *unit = NULL, *lnk = NULL;
+        _cleanup_free_ char *name = NULL, *unit = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
 
@@ -148,14 +149,10 @@ static int add_swap(
                 return r;
 
         if (!noauto) {
-                lnk = strjoin(arg_dest, "/" SPECIAL_SWAP_TARGET,
-                              nofail ? ".wants/" : ".requires/", name, NULL);
-                if (!lnk)
-                        return log_oom();
-
-                mkdir_parents_label(lnk, 0755);
-                if (symlink(unit, lnk) < 0)
-                        return log_error_errno(errno, "Failed to create symlink %s: %m", lnk);
+                r = generator_add_symlink(arg_dest, SPECIAL_SWAP_TARGET,
+                                          nofail ? "wants" : "requires", name);
+                if (r < 0)
+                        return r;
         }
 
         return 0;
@@ -290,6 +287,7 @@ static int add_mount(
                 const char *dest,
                 const char *what,
                 const char *where,
+                const char *original_where,
                 const char *fstype,
                 const char *opts,
                 int passno,
@@ -300,7 +298,7 @@ static int add_mount(
                 const char *source) {
 
         _cleanup_free_ char
-                *name = NULL, *unit = NULL, *lnk = NULL,
+                *name = NULL, *unit = NULL,
                 *automount_name = NULL, *automount_unit = NULL,
                 *filtered = NULL;
         _cleanup_fclose_ FILE *f = NULL;
@@ -358,7 +356,7 @@ static int add_mount(
                 "Documentation=man:fstab(5) man:systemd-fstab-generator(8)\n",
                 source);
 
-        if (STR_IN_SET(fstype, "nfs", "nfs4") && !automount &&
+        if (STRPTR_IN_SET(fstype, "nfs", "nfs4") && !automount &&
             fstab_test_yes_no_option(opts, "bg\0" "fg\0")) {
                 /* The default retry timeout that mount.nfs uses for 'bg' mounts
                  * is 10000 minutes, where as it uses 2 minutes for 'fg' mounts.
@@ -396,11 +394,10 @@ static int add_mount(
                         return r;
         }
 
-        fprintf(f,
-                "\n"
-                "[Mount]\n"
-                "Where=%s\n",
-                where);
+        fprintf(f, "\n[Mount]\n");
+        if (original_where)
+                fprintf(f, "# Canonicalized from %s\n", original_where);
+        fprintf(f, "Where=%s\n", where);
 
         r = write_what(f, what);
         if (r < 0)
@@ -430,13 +427,10 @@ static int add_mount(
                 return log_error_errno(r, "Failed to write unit file %s: %m", unit);
 
         if (!noauto && !automount) {
-                lnk = strjoin(dest, "/", post, nofail ? ".wants/" : ".requires/", name);
-                if (!lnk)
-                        return log_oom();
-
-                mkdir_parents_label(lnk, 0755);
-                if (symlink(unit, lnk) < 0)
-                        return log_error_errno(errno, "Failed to create symlink %s: %m", lnk);
+                r = generator_add_symlink(dest, post,
+                                          nofail ? "wants" : "requires", name);
+                if (r < 0)
+                        return r;
         }
 
         if (automount) {
@@ -491,14 +485,10 @@ static int add_mount(
                 if (r < 0)
                         return log_error_errno(r, "Failed to write unit file %s: %m", automount_unit);
 
-                free(lnk);
-                lnk = strjoin(dest, "/", post, nofail ? ".wants/" : ".requires/", automount_name);
-                if (!lnk)
-                        return log_oom();
-
-                mkdir_parents_label(lnk, 0755);
-                if (symlink(automount_unit, lnk) < 0)
-                        return log_error_errno(errno, "Failed to create symlink %s: %m", lnk);
+                r = generator_add_symlink(dest, post,
+                                          nofail ? "wants" : "requires", automount_name);
+                if (r < 0)
+                        return r;
         }
 
         return 0;
@@ -520,7 +510,7 @@ static int parse_fstab(bool initrd) {
         }
 
         while ((me = getmntent(f))) {
-                _cleanup_free_ char *where = NULL, *what = NULL;
+                _cleanup_free_ char *where = NULL, *what = NULL, *canonical_where = NULL;
                 bool noauto, nofail;
                 int k;
 
@@ -540,8 +530,28 @@ static int parse_fstab(bool initrd) {
                 if (!where)
                         return log_oom();
 
-                if (is_path(where))
+                if (is_path(where)) {
                         path_kill_slashes(where);
+                        /* Follow symlinks here; see 5261ba901845c084de5a8fd06500ed09bfb0bd80 which makes sense for
+                         * mount units, but causes problems since it historically worked to have symlinks in e.g.
+                         * /etc/fstab. So we canonicalize here. Note that we use CHASE_NONEXISTENT to handle the case
+                         * where a symlink refers to another mount target; this works assuming the sub-mountpoint
+                         * target is the final directory.
+                         */
+                        r = chase_symlinks(where, initrd ? "/sysroot" : NULL,
+                                           CHASE_PREFIX_ROOT | CHASE_NONEXISTENT,
+                                           &canonical_where);
+                        if (r < 0)
+                                /* In this case for now we continue on as if it wasn't a symlink */
+                                log_warning_errno(r, "Failed to read symlink target for %s: %m", where);
+                        else {
+                                if (streq(canonical_where, where))
+                                        canonical_where = mfree(canonical_where);
+                                else
+                                        log_debug("Canonicalized what=%s where=%s to %s",
+                                                  what, where, canonical_where);
+                        }
+                }
 
                 noauto = fstab_test_yes_no_option(me->mnt_opts, "noauto\0" "auto\0");
                 nofail = fstab_test_yes_no_option(me->mnt_opts, "nofail\0" "fail\0");
@@ -567,7 +577,8 @@ static int parse_fstab(bool initrd) {
 
                         k = add_mount(arg_dest,
                                       what,
-                                      where,
+                                      canonical_where ?: where,
+                                      canonical_where ? where: NULL,
                                       me->mnt_type,
                                       me->mnt_opts,
                                       me->mnt_passno,
@@ -630,6 +641,7 @@ static int add_sysroot_mount(void) {
         return add_mount(arg_dest,
                          what,
                          "/sysroot",
+                         NULL,
                          arg_root_fstype,
                          opts,
                          is_device_path(what) ? 1 : 0, /* passno */
@@ -684,6 +696,7 @@ static int add_sysroot_usr_mount(void) {
         return add_mount(arg_dest,
                          what,
                          "/sysroot/usr",
+                         NULL,
                          arg_usr_fstype,
                          opts,
                          is_device_path(what) ? 1 : 0, /* passno */
@@ -724,6 +737,7 @@ static int add_volatile_var(void) {
         return add_mount(arg_dest_late,
                          "tmpfs",
                          "/var",
+                         NULL,
                          "tmpfs",
                          "mode=0755",
                          0,

@@ -72,6 +72,14 @@ typedef enum ExecOutput {
         _EXEC_OUTPUT_INVALID = -1
 } ExecOutput;
 
+typedef enum ExecPreserveMode {
+        EXEC_PRESERVE_NO,
+        EXEC_PRESERVE_YES,
+        EXEC_PRESERVE_RESTART,
+        _EXEC_PRESERVE_MODE_MAX,
+        _EXEC_PRESERVE_MODE_INVALID = -1
+} ExecPreserveMode;
+
 struct ExecStatus {
         dual_timestamp start_timestamp;
         dual_timestamp exit_timestamp;
@@ -99,6 +107,21 @@ struct ExecRuntime {
          * namespace. */
         int netns_storage_socket[2];
 };
+
+typedef enum ExecDirectoryType {
+        EXEC_DIRECTORY_RUNTIME = 0,
+        EXEC_DIRECTORY_STATE,
+        EXEC_DIRECTORY_CACHE,
+        EXEC_DIRECTORY_LOGS,
+        EXEC_DIRECTORY_CONFIGURATION,
+        _EXEC_DIRECTORY_MAX,
+        _EXEC_DIRECTORY_INVALID = -1,
+} ExecDirectoryType;
+
+typedef struct ExecDirectory {
+        char **paths;
+        mode_t mode;
+} ExecDirectory;
 
 struct ExecContext {
         char **environment;
@@ -209,8 +232,8 @@ struct ExecContext {
         Set *address_families;
         bool address_families_whitelist:1;
 
-        char **runtime_directory;
-        mode_t runtime_directory_mode;
+        ExecPreserveMode runtime_directory_preserve_mode;
+        ExecDirectory directories[_EXEC_DIRECTORY_MAX];
 
         bool memory_deny_write_execute;
         bool restrict_realtime;
@@ -256,7 +279,7 @@ struct ExecParameters {
         CGroupMask cgroup_supported;
         const char *cgroup_path;
 
-        const char *runtime_prefix;
+        char **prefix;
 
         const char *confirm_spawn;
 
@@ -330,3 +353,9 @@ ExecInput exec_input_from_string(const char *s) _pure_;
 
 const char* exec_utmp_mode_to_string(ExecUtmpMode i) _const_;
 ExecUtmpMode exec_utmp_mode_from_string(const char *s) _pure_;
+
+const char* exec_preserve_mode_to_string(ExecPreserveMode i) _const_;
+ExecPreserveMode exec_preserve_mode_from_string(const char *s) _pure_;
+
+const char* exec_directory_type_to_string(ExecDirectoryType i) _const_;
+ExecDirectoryType exec_directory_type_from_string(const char *s) _pure_;
