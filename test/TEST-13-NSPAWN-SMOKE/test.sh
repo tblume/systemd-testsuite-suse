@@ -44,6 +44,7 @@ test_setup() {
         cp create-busybox-container $initdir/
 
         ./create-busybox-container $initdir/nc-container
+        [[ "$LOOKS_LIKE_SUSE" ]] && initdir="$initdir/nc-container" dracut_install socat ||\
         initdir="$initdir/nc-container" dracut_install nc
 
         # setup the testsuite service
@@ -145,6 +146,8 @@ done
 touch /testok
 EOF
 
+        [[ "$LOOKS_LIKE_SUSE" ]] && \
+            sed -i 's#"$_cmd"#"echo a | socat -U /run/systemd/nspawn/notify -"#' $initdir/test-nspawn.sh
         chmod 0755 $initdir/test-nspawn.sh
         setup_testsuite
     ) || return 1

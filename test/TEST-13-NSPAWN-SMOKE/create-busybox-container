@@ -18,6 +18,8 @@ ln -s busybox "$root/bin/tr"
 ln -s busybox "$root/bin/ps"
 ln -s busybox "$root/bin/ip"
 
+cp -avr /lib64 $root/
+
 mkdir -p "$root/sbin"
 cat <<'EOF' >"$root/sbin/init"
 #!/bin/sh
