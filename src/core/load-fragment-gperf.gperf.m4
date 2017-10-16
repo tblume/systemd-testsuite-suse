@@ -60,14 +60,16 @@ $1.SystemCallErrorNumber,        config_parse_syscall_errno,         0,         
 $1.MemoryDenyWriteExecute,       config_parse_bool,                  0,                             offsetof($1, exec_context.memory_deny_write_execute)
 $1.RestrictNamespaces,           config_parse_restrict_namespaces,   0,                             offsetof($1, exec_context)
 $1.RestrictRealtime,             config_parse_bool,                  0,                             offsetof($1, exec_context.restrict_realtime)
-$1.RestrictAddressFamilies,      config_parse_address_families,      0,                             offsetof($1, exec_context)',
+$1.RestrictAddressFamilies,      config_parse_address_families,      0,                             offsetof($1, exec_context)
+$1.LockPersonality,              config_parse_bool,                  0,                             offsetof($1, exec_context.lock_personality)',
 `$1.SystemCallFilter,            config_parse_warn_compat,           DISABLED_CONFIGURATION,        0
 $1.SystemCallArchitectures,      config_parse_warn_compat,           DISABLED_CONFIGURATION,        0
 $1.SystemCallErrorNumber,        config_parse_warn_compat,           DISABLED_CONFIGURATION,        0
 $1.MemoryDenyWriteExecute,       config_parse_warn_compat,           DISABLED_CONFIGURATION,        0
 $1.RestrictNamespaces,           config_parse_warn_compat,           DISABLED_CONFIGURATION,        0
 $1.RestrictRealtime,             config_parse_warn_compat,           DISABLED_CONFIGURATION,        0
-$1.RestrictAddressFamilies,      config_parse_warn_compat,           DISABLED_CONFIGURATION,        0')
+$1.RestrictAddressFamilies,      config_parse_warn_compat,           DISABLED_CONFIGURATION,        0
+$1.LockPersonality,              config_parse_warn_compat,           DISABLED_CONFIGURATION,        0')
 $1.LimitCPU,                     config_parse_limit,                 RLIMIT_CPU,                    offsetof($1, exec_context.rlimit)
 $1.LimitFSIZE,                   config_parse_limit,                 RLIMIT_FSIZE,                  offsetof($1, exec_context.rlimit)
 $1.LimitDATA,                    config_parse_limit,                 RLIMIT_DATA,                   offsetof($1, exec_context.rlimit)
@@ -107,8 +109,8 @@ $1.Personality,                  config_parse_personality,           0,         
 $1.RuntimeDirectoryPreserve,     config_parse_runtime_preserve_mode, 0,                             offsetof($1, exec_context.runtime_directory_preserve_mode)
 $1.RuntimeDirectoryMode,         config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_RUNTIME].mode)
 $1.RuntimeDirectory,             config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_RUNTIME].paths)
-$1.DataDirectoryMode,            config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_STATE].mode)
-$1.DataDirectory,                config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_STATE].paths)
+$1.StateDirectoryMode,           config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_STATE].mode)
+$1.StateDirectory,               config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_STATE].paths)
 $1.CacheDirectoryMode,           config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_CACHE].mode)
 $1.CacheDirectory,               config_parse_exec_directories,      0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_CACHE].paths)
 $1.LogsDirectoryMode,            config_parse_mode,                  0,                             offsetof($1, exec_context.directories[EXEC_DIRECTORY_LOGS].mode)
@@ -362,15 +364,6 @@ m4_ifdef(`HAVE_SELINUX',
 EXEC_CONTEXT_CONFIG_ITEMS(Socket)m4_dnl
 CGROUP_CONTEXT_CONFIG_ITEMS(Socket)m4_dnl
 KILL_CONTEXT_CONFIG_ITEMS(Socket)m4_dnl
-m4_dnl
-BusName.Name,                    config_parse_string,                0,                             offsetof(BusName, name)
-BusName.Activating,              config_parse_bool,                  0,                             offsetof(BusName, activating)
-BusName.Service,                 config_parse_busname_service,       0,                             0
-BusName.AllowUser,               config_parse_bus_policy,            0,                             0
-BusName.AllowGroup,              config_parse_bus_policy,            0,                             0
-BusName.AllowWorld,              config_parse_bus_policy_world,      0,                             offsetof(BusName, policy_world)
-BusName.SELinuxContext,          config_parse_exec_selinux_context,  0,                             0
-BusName.AcceptFileDescriptors,   config_parse_bool,                  0,                             offsetof(BusName, accept_fd)
 m4_dnl
 Mount.What,                      config_parse_unit_string_printf,    0,                             offsetof(Mount, parameters_fragment.what)
 Mount.Where,                     config_parse_path,                  0,                             offsetof(Mount, where)

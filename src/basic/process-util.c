@@ -312,18 +312,17 @@ int rename_process(const char name[]) {
         /* Third step, completely replace the argv[] array the kernel maintains for us. This requires privileges, but
          * has the advantage that the argv[] array is exactly what we want it to be, and not filled up with zeros at
          * the end. This is the best option for changing /proc/self/cmdline. */
-        if (mm_size < l+1) {
+
+        /* Let's not bother with this if we don't have euid == 0. Strictly speaking we should check for the
+         * CAP_SYS_RESOURCE capability which is independent of the euid. In our own code the capability generally is
+         * present only for euid == 0, hence let's use this as quick bypass check, to avoid calling mmap() if
+         * PR_SET_MM_ARG_{START,END} fails with EPERM later on anyway. After all geteuid() is dead cheap to call, but
+         * mmap() is not. */
+        if (geteuid() != 0)
+                log_debug("Skipping PR_SET_MM, as we don't have privileges.");
+        else if (mm_size < l+1) {
                 size_t nn_size;
                 char *nn;
-
-                /* Let's not bother with this if we don't have euid == 0. Strictly speaking if people do weird stuff
-                 * with capabilities this could work even for euid != 0, but our own code generally doesn't do that,
-                 * hence let's use this as quick bypass check, to avoid calling mmap() if PR_SET_MM_ARG_START fails
-                 * with EPERM later on anyway. After all geteuid() is dead cheap to call, but mmap() is not. */
-                if (geteuid() != 0) {
-                        log_debug("Skipping PR_SET_MM_ARG_START, as we don't have privileges.");
-                        goto use_saved_argv;
-                }
 
                 nn_size = PAGE_ALIGN(l+1);
                 nn = mmap(NULL, nn_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
@@ -351,8 +350,13 @@ int rename_process(const char name[]) {
 
                 mm = nn;
                 mm_size = nn_size;
-        } else
+        } else {
                 strncpy(mm, name, mm_size);
+
+                /* Update the end pointer, continuing regardless of any failure. */
+                if (prctl(PR_SET_MM, PR_SET_MM_ARG_END, (unsigned long) mm + l + 1, 0, 0) < 0)
+                        log_debug_errno(errno, "PR_SET_MM_ARG_END failed, proceeding without: %m");
+        }
 
 use_saved_argv:
         /* Fourth step: in all cases we'll also update the original argv[], so that our own code gets it right too if
@@ -388,7 +392,7 @@ int is_kernel_thread(pid_t pid) {
         bool eof;
         FILE *f;
 
-        if (pid == 0 || pid == 1) /* pid 1, and we ourselves certainly aren't a kernel thread */
+        if (pid == 0 || pid == 1 || pid == getpid_cached()) /* pid 1, and we ourselves certainly aren't a kernel thread */
                 return 0;
 
         assert(pid > 1);
@@ -471,6 +475,9 @@ static int get_process_id(pid_t pid, const char *field, uid_t *uid) {
         assert(field);
         assert(uid);
 
+        if (pid < 0)
+                return -EINVAL;
+
         p = procfs_file_alloca(pid, "status");
         f = fopen(p, "re");
         if (!f) {
@@ -498,10 +505,22 @@ static int get_process_id(pid_t pid, const char *field, uid_t *uid) {
 }
 
 int get_process_uid(pid_t pid, uid_t *uid) {
+
+        if (pid == 0 || pid == getpid_cached()) {
+                *uid = getuid();
+                return 0;
+        }
+
         return get_process_id(pid, "Uid:", uid);
 }
 
 int get_process_gid(pid_t pid, gid_t *gid) {
+
+        if (pid == 0 || pid == getpid_cached()) {
+                *gid = getgid();
+                return 0;
+        }
+
         assert_cc(sizeof(uid_t) == sizeof(gid_t));
         return get_process_id(pid, "Gid:", gid);
 }
@@ -577,7 +596,7 @@ int get_process_ppid(pid_t pid, pid_t *_ppid) {
         assert(pid >= 0);
         assert(_ppid);
 
-        if (pid == 0) {
+        if (pid == 0 || pid == getpid_cached()) {
                 *_ppid = getppid();
                 return 0;
         }
@@ -775,6 +794,9 @@ bool pid_is_unwaited(pid_t pid) {
         if (pid <= 1) /* If we or PID 1 would be dead and have been waited for, this code would not be running */
                 return true;
 
+        if (pid == getpid_cached())
+                return true;
+
         if (kill(pid, 0) >= 0)
                 return true;
 
@@ -792,6 +814,9 @@ bool pid_is_alive(pid_t pid) {
         if (pid <= 1) /* If we or PID 1 would be a zombie, this code would not be running */
                 return true;
 
+        if (pid == getpid_cached())
+                return true;
+
         r = get_process_state(pid);
         if (r == -ESRCH || r == 'Z')
                 return false;
@@ -803,7 +828,10 @@ int pid_from_same_root_fs(pid_t pid) {
         const char *root;
 
         if (pid < 0)
-                return 0;
+                return false;
+
+        if (pid == 0 || pid == getpid_cached())
+                return true;
 
         root = procfs_file_alloca(pid, "root");
 
@@ -814,7 +842,7 @@ bool is_main_thread(void) {
         static thread_local int cached = 0;
 
         if (_unlikely_(cached == 0))
-                cached = getpid() == gettid() ? 1 : -1;
+                cached = getpid_cached() == gettid() ? 1 : -1;
 
         return cached > 0;
 }
@@ -876,9 +904,28 @@ const char* personality_to_string(unsigned long p) {
         return architecture_to_string(architecture);
 }
 
+int opinionated_personality(unsigned long *ret) {
+        int current;
+
+        /* Returns the current personality, or PERSONALITY_INVALID if we can't determine it. This function is a bit
+         * opinionated though, and ignores all the finer-grained bits and exotic personalities, only distinguishing the
+         * two most relevant personalities: PER_LINUX and PER_LINUX32. */
+
+        current = personality(PERSONALITY_INVALID);
+        if (current < 0)
+                return -errno;
+
+        if (((unsigned long) current & 0xffff) == PER_LINUX32)
+                *ret = PER_LINUX32;
+        else
+                *ret = PER_LINUX;
+
+        return 0;
+}
+
 void valgrind_summary_hack(void) {
 #ifdef HAVE_VALGRIND_VALGRIND_H
-        if (getpid() == 1 && RUNNING_ON_VALGRIND) {
+        if (getpid_cached() == 1 && RUNNING_ON_VALGRIND) {
                 pid_t pid;
                 pid = raw_clone(SIGCHLD);
                 if (pid < 0)
@@ -920,6 +967,68 @@ int ioprio_parse_priority(const char *s, int *ret) {
 
         *ret = i;
         return 0;
+}
+
+/* The cached PID, possible values:
+ *
+ *     == UNSET [0]  → cache not initialized yet
+ *     == BUSY [-1]  → some thread is initializing it at the moment
+ *     any other     → the cached PID
+ */
+
+#define CACHED_PID_UNSET ((pid_t) 0)
+#define CACHED_PID_BUSY ((pid_t) -1)
+
+static pid_t cached_pid = CACHED_PID_UNSET;
+
+static void reset_cached_pid(void) {
+        /* Invoked in the child after a fork(), i.e. at the first moment the PID changed */
+        cached_pid = CACHED_PID_UNSET;
+}
+
+/* We use glibc __register_atfork() + __dso_handle directly here, as they are not included in the glibc
+ * headers. __register_atfork() is mostly equivalent to pthread_atfork(), but doesn't require us to link against
+ * libpthread, as it is part of glibc anyway. */
+extern int __register_atfork(void (*prepare) (void), void (*parent) (void), void (*child) (void), void * __dso_handle);
+extern void* __dso_handle __attribute__ ((__weak__));
+
+pid_t getpid_cached(void) {
+        pid_t current_value;
+
+        /* getpid_cached() is much like getpid(), but caches the value in local memory, to avoid having to invoke a
+         * system call each time. This restores glibc behaviour from before 2.24, when getpid() was unconditionally
+         * cached. Starting with 2.24 getpid() started to become prohibitively expensive when used for detecting when
+         * objects were used across fork()s. With this caching the old behaviour is somewhat restored.
+         *
+         * https://bugzilla.redhat.com/show_bug.cgi?id=1443976
+         * https://sourceware.org/git/gitweb.cgi?p=glibc.git;h=1d2bc2eae969543b89850e35e532f3144122d80a
+         */
+
+        current_value = __sync_val_compare_and_swap(&cached_pid, CACHED_PID_UNSET, CACHED_PID_BUSY);
+
+        switch (current_value) {
+
+        case CACHED_PID_UNSET: { /* Not initialized yet, then do so now */
+                pid_t new_pid;
+
+                new_pid = getpid();
+
+                if (__register_atfork(NULL, NULL, reset_cached_pid, __dso_handle) != 0) {
+                        /* OOM? Let's try again later */
+                        cached_pid = CACHED_PID_UNSET;
+                        return new_pid;
+                }
+
+                cached_pid = new_pid;
+                return new_pid;
+        }
+
+        case CACHED_PID_BUSY: /* Somebody else is currently initializing */
+                return getpid();
+
+        default: /* Properly initialized */
+                return current_value;
+        }
 }
 
 static const char *const ioprio_class_table[] = {

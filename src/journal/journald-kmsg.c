@@ -106,7 +106,7 @@ static bool is_us(const char *pid) {
         if (parse_pid(pid, &t) < 0)
                 return false;
 
-        return t == getpid();
+        return t == getpid_cached();
 }
 
 static void dev_kmsg_record(Server *s, const char *p, size_t l) {
@@ -310,7 +310,7 @@ static void dev_kmsg_record(Server *s, const char *p, size_t l) {
         if (cunescape_length_with_prefix(p, pl, "MESSAGE=", UNESCAPE_RELAX, &message) >= 0)
                 IOVEC_SET_STRING(iovec[n++], message);
 
-        server_dispatch_message(s, iovec, n, ELEMENTSOF(iovec), NULL, NULL, NULL, 0, NULL, priority, 0);
+        server_dispatch_message(s, iovec, n, ELEMENTSOF(iovec), NULL, NULL, priority, 0);
 
 finish:
         for (j = 0; j < z; j++)

@@ -29,8 +29,11 @@
 #include "alloc-util.h"
 #include "macro.h"
 #include "nsflags.h"
+#include "process-util.h"
 #include "seccomp-util.h"
+#include "set.h"
 #include "string-util.h"
+#include "strv.h"
 #include "util.h"
 #include "errno-list.h"
 
@@ -636,6 +639,25 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "mbind\0"
                 "sched_setattr\0"
                 "prlimit64\0"
+        },
+        [SYSCALL_FILTER_SET_SETUID] = {
+                .name = "@setuid",
+                .help = "Operations for changing user/group credentials",
+                .value =
+                "setgid32\0"
+                "setgid\0"
+                "setgroups32\0"
+                "setgroups\0"
+                "setregid32\0"
+                "setregid\0"
+                "setresgid32\0"
+                "setresgid\0"
+                "setresuid32\0"
+                "setresuid\0"
+                "setreuid32\0"
+                "setreuid\0"
+                "setuid32\0"
+                "setuid\0"
         },
         [SYSCALL_FILTER_SET_SWAP] = {
                 .name = "@swap",
@@ -1312,4 +1334,105 @@ int seccomp_restrict_archs(Set *archs) {
                 return r;
 
         return seccomp_load(seccomp);
+}
+
+int parse_syscall_archs(char **l, Set **archs) {
+        _cleanup_set_free_ Set *_archs;
+        char **s;
+        int r;
+
+        assert(l);
+        assert(archs);
+
+        r = set_ensure_allocated(&_archs, NULL);
+        if (r < 0)
+                return r;
+
+        STRV_FOREACH(s, l) {
+                uint32_t a;
+
+                r = seccomp_arch_from_string(*s, &a);
+                if (r < 0)
+                        return -EINVAL;
+
+                r = set_put(_archs, UINT32_TO_PTR(a + 1));
+                if (r < 0)
+                        return -ENOMEM;
+        }
+
+        *archs = _archs;
+        _archs = NULL;
+
+        return 0;
+}
+
+int seccomp_filter_set_add(Set *filter, bool add, const SyscallFilterSet *set) {
+        const char *i;
+        int r;
+
+        assert(set);
+
+        NULSTR_FOREACH(i, set->value) {
+
+                if (i[0] == '@') {
+                        const SyscallFilterSet *more;
+
+                        more = syscall_filter_set_find(i);
+                        if (!more)
+                                return -ENXIO;
+
+
+                        r = seccomp_filter_set_add(filter, add, more);
+                        if (r < 0)
+                                return r;
+                } else {
+                        int id;
+
+                        id = seccomp_syscall_resolve_name(i);
+                        if (id == __NR_SCMP_ERROR)
+                                return -ENXIO;
+
+                        if (add) {
+                                r = set_put(filter, INT_TO_PTR(id + 1));
+                                if (r < 0)
+                                        return r;
+                        } else
+                                (void) set_remove(filter, INT_TO_PTR(id + 1));
+                }
+        }
+
+        return 0;
+}
+
+int seccomp_lock_personality(unsigned long personality) {
+        uint32_t arch;
+        int r;
+
+        if (personality >= PERSONALITY_INVALID)
+                return -EINVAL;
+
+        SECCOMP_FOREACH_LOCAL_ARCH(arch) {
+                _cleanup_(seccomp_releasep) scmp_filter_ctx seccomp = NULL;
+
+                r = seccomp_init_for_arch(&seccomp, arch, SCMP_ACT_ALLOW);
+                if (r < 0)
+                        return r;
+
+                r = seccomp_rule_add_exact(
+                                seccomp,
+                                SCMP_ACT_ERRNO(EPERM),
+                                SCMP_SYS(personality),
+                                1,
+                                SCMP_A0(SCMP_CMP_NE, personality));
+                if (r < 0)
+                        return r;
+
+                r = seccomp_load(seccomp);
+                if (IN_SET(r, -EPERM, -EACCES))
+                        return r;
+                if (r < 0)
+                        log_debug_errno(r, "Failed to enable personality lock for architecture %s, skipping: %m", seccomp_arch_to_string(arch));
+        }
+
+        return 0;
 }

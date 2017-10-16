@@ -100,6 +100,7 @@ static const MountEntry protect_kernel_tunables_table[] = {
         { "/sys/kernel/debug",   READONLY,     true  },
         { "/sys/kernel/tracing", READONLY,     true  },
         { "/sys/fs/cgroup",      READWRITE,    false }, /* READONLY is set by ProtectControlGroups= option */
+        { "/sys/fs/selinux",     READWRITE,    true  },
 };
 
 /* ProtectKernelModules= option */
@@ -1062,9 +1063,11 @@ int setup_namespace(
                 if (r < 0)
                         goto finish;
 
-                r = decrypted_image_relinquish(decrypted_image);
-                if (r < 0)
-                        goto finish;
+                if (decrypted_image) {
+                        r = decrypted_image_relinquish(decrypted_image);
+                        if (r < 0)
+                                goto finish;
+                }
 
                 loop_device_relinquish(loop_device);
 

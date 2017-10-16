@@ -1328,6 +1328,14 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
         if (r < 0)
                 return r;
 
+        if (m->first_boot && m->unit_file_scope == UNIT_FILE_SYSTEM) {
+                q = unit_file_preset_all(UNIT_FILE_SYSTEM, 0, NULL, UNIT_FILE_PRESET_ENABLE_ONLY, NULL, 0);
+                if (q < 0)
+                        log_full_errno(q == -EEXIST ? LOG_NOTICE : LOG_WARNING, q, "Failed to populate /etc with preset unit settings, ignoring: %m");
+                else
+                        log_info("Populated /etc with preset unit settings.");
+        }
+
         lookup_paths_reduce(&m->lookup_paths);
         manager_build_unit_path_cache(m);
 
@@ -1343,8 +1351,11 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
         dual_timestamp_get(&m->units_load_finish_timestamp);
 
         /* Second, deserialize if there is something to deserialize */
-        if (serialization)
+        if (serialization) {
                 r = manager_deserialize(m, serialization, fds);
+                if (r < 0)
+                        log_error_errno(r, "Deserialization failed: %m");
+        }
 
         /* Any fds left? Find some unit which wants them. This is
          * useful to allow container managers to pass some file
@@ -1480,6 +1491,40 @@ int manager_add_job_by_name_and_warn(Manager *m, JobType type, const char *name,
         if (r < 0)
                 return log_warning_errno(r, "Failed to enqueue %s job for %s: %s", job_mode_to_string(mode), name, bus_error_message(&error, r));
 
+        return r;
+}
+
+int manager_propagate_reload(Manager *m, Unit *unit, JobMode mode, sd_bus_error *e) {
+        int r;
+        Transaction *tr;
+
+        assert(m);
+        assert(unit);
+        assert(mode < _JOB_MODE_MAX);
+        assert(mode != JOB_ISOLATE); /* Isolate is only valid for start */
+
+        tr = transaction_new(mode == JOB_REPLACE_IRREVERSIBLY);
+        if (!tr)
+                return -ENOMEM;
+
+        /* We need an anchor job */
+        r = transaction_add_job_and_dependencies(tr, JOB_NOP, unit, NULL, false, false, true, true, e);
+        if (r < 0)
+                goto tr_abort;
+
+        /* Failure in adding individual dependencies is ignored, so this always succeeds. */
+        transaction_add_propagate_reload_jobs(tr, unit, tr->anchor_job, mode == JOB_IGNORE_DEPENDENCIES, e);
+
+        r = transaction_activate(tr, m, mode, e);
+        if (r < 0)
+                goto tr_abort;
+
+        transaction_free(tr);
+        return 0;
+
+tr_abort:
+        transaction_abort(tr);
+        transaction_free(tr);
         return r;
 }
 
@@ -2592,15 +2637,15 @@ int manager_serialize(Manager *m, FILE *f, FDSet *fds, bool switching_root) {
         manager_serialize_uid_refs(m, f);
         manager_serialize_gid_refs(m, f);
 
-        fputc('\n', f);
+        fputc_unlocked('\n', f);
 
         HASHMAP_FOREACH_KEY(u, t, m->units, i) {
                 if (u->id != t)
                         continue;
 
                 /* Start marker */
-                fputs(u->id, f);
-                fputc('\n', f);
+                fputs_unlocked(u->id, f);
+                fputc_unlocked('\n', f);
 
                 r = unit_serialize(u, f, fds, !switching_root);
                 if (r < 0) {
@@ -2779,6 +2824,7 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
         for (;;) {
                 Unit *u;
                 char name[UNIT_NAME_MAX+2];
+                const char* unit_name;
 
                 /* Start marker */
                 if (!fgets(name, sizeof(name), f)) {
@@ -2791,14 +2837,23 @@ int manager_deserialize(Manager *m, FILE *f, FDSet *fds) {
                 }
 
                 char_array_0(name);
+                unit_name = strstrip(name);
 
-                r = manager_load_unit(m, strstrip(name), NULL, NULL, &u);
-                if (r < 0)
-                        goto finish;
+                r = manager_load_unit(m, unit_name, NULL, NULL, &u);
+                if (r < 0) {
+                        log_notice_errno(r, "Failed to load unit \"%s\", skipping deserialization: %m", unit_name);
+                        if (r == -ENOMEM)
+                                goto finish;
+                        unit_deserialize_skip(f);
+                        continue;
+                }
 
                 r = unit_deserialize(u, f, fds);
-                if (r < 0)
-                        goto finish;
+                if (r < 0) {
+                        log_notice_errno(r, "Failed to deserialize unit \"%s\": %m", unit_name);
+                        if (r == -ENOMEM)
+                                goto finish;
+                }
         }
 
 finish:
@@ -2871,8 +2926,12 @@ int manager_reload(Manager *m) {
 
         /* Second, deserialize our stored data */
         q = manager_deserialize(m, f, fds);
-        if (q < 0 && r >= 0)
-                r = q;
+        if (q < 0) {
+                log_error_errno(q, "Deserialization failed: %m");
+
+                if (r >= 0)
+                        r = q;
+        }
 
         fclose(f);
         f = NULL;
@@ -3354,7 +3413,7 @@ Set *manager_get_units_requiring_mounts_for(Manager *m, const char *path) {
         return hashmap_get(m->units_requiring_mounts_for, streq(p, "/") ? "" : p);
 }
 
-int manager_set_exec_params(Manager *m, ExecParameters *p) {
+void manager_set_exec_params(Manager *m, ExecParameters *p) {
         assert(m);
         assert(p);
 
@@ -3363,7 +3422,7 @@ int manager_set_exec_params(Manager *m, ExecParameters *p) {
         p->cgroup_supported = m->cgroup_supported;
         p->prefix = m->prefix;
 
-        return 0;
+        SET_FLAG(p->flags, EXEC_PASS_LOG_UNIT|EXEC_CHOWN_DIRECTORIES, MANAGER_IS_SYSTEM(m));
 }
 
 int manager_update_failed_units(Manager *m, Unit *u, bool failed) {

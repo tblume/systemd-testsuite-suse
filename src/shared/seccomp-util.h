@@ -58,6 +58,7 @@ enum {
         SYSCALL_FILTER_SET_RAW_IO,
         SYSCALL_FILTER_SET_REBOOT,
         SYSCALL_FILTER_SET_RESOURCES,
+        SYSCALL_FILTER_SET_SETUID,
         SYSCALL_FILTER_SET_SWAP,
         _SYSCALL_FILTER_SET_MAX
 };
@@ -65,6 +66,8 @@ enum {
 extern const SyscallFilterSet syscall_filter_sets[];
 
 const SyscallFilterSet *syscall_filter_set_find(const char *name);
+
+int seccomp_filter_set_add(Set *s, bool b, const SyscallFilterSet *set);
 
 int seccomp_load_syscall_filter_set(uint32_t default_action, const SyscallFilterSet *set, uint32_t action);
 int seccomp_load_syscall_filter_set_raw(uint32_t default_action, Set* set, uint32_t action);
@@ -75,6 +78,7 @@ int seccomp_protect_sysctl(void);
 int seccomp_restrict_address_families(Set *address_families, bool whitelist);
 int seccomp_restrict_realtime(void);
 int seccomp_memory_deny_write_execute(void);
+int seccomp_lock_personality(unsigned long personality);
 
 extern const uint32_t seccomp_local_archs[];
 
@@ -84,3 +88,5 @@ extern const uint32_t seccomp_local_archs[];
              (arch) = seccomp_local_archs[++_i])
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(scmp_filter_ctx, seccomp_release);
+
+int parse_syscall_archs(char **l, Set **archs);

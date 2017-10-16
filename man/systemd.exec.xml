@@ -1079,12 +1079,10 @@
         services which shall be able to install mount points in the main mount namespace. The new <filename>/dev</filename>
         will be mounted read-only and 'noexec'. The latter may break old programs which try to set up executable memory by
         using <citerefentry><refentrytitle>mmap</refentrytitle><manvolnum>2</manvolnum></citerefentry> of
-        <filename>/dev/zero</filename> instead of using <constant>MAP_ANON</constant>. This setting is implied if
-        <varname>DynamicUser=</varname> is set. For this setting the same restrictions regarding mount propagation and
-        privileges apply as for <varname>ReadOnlyPaths=</varname> and related calls, see above.
+        <filename>/dev/zero</filename> instead of using <constant>MAP_ANON</constant>. For this setting the same restrictions
+        regarding mount propagation and privileges apply as for <varname>ReadOnlyPaths=</varname> and related calls, see above.
         If turned on and if running in user mode, or in system mode, but without the <constant>CAP_SYS_ADMIN</constant>
-        capability (e.g. setting <varname>User=</varname>), <varname>NoNewPrivileges=yes</varname>
-        is implied.
+        capability (e.g. setting <varname>User=</varname>), <varname>NoNewPrivileges=yes</varname> is implied.
         </para>
 
         <para>Note that the implementation of this setting might be impossible (for example if mount namespaces
@@ -1508,6 +1506,10 @@
                 <entry>System calls for changing resource limits, memory and scheduling parameters (<citerefentry project='man-pages'><refentrytitle>setrlimit</refentrytitle><manvolnum>2</manvolnum></citerefentry>, <citerefentry project='man-pages'><refentrytitle>setpriority</refentrytitle><manvolnum>2</manvolnum></citerefentry>, …)</entry>
               </row>
               <row>
+                <entry>@setuid</entry>
+                <entry>System calls for changing user ID and group ID credentials, (<citerefentry project='man-pages'><refentrytitle>setuid</refentrytitle><manvolnum>2</manvolnum></citerefentry>, <citerefentry project='man-pages'><refentrytitle>setgid</refentrytitle><manvolnum>2</manvolnum></citerefentry>, <citerefentry project='man-pages'><refentrytitle>setresuid</refentrytitle><manvolnum>2</manvolnum></citerefentry>, …)</entry>
+              </row>
+              <row>
                 <entry>@swap</entry>
                 <entry>System calls for enabling/disabling swap devices (<citerefentry project='man-pages'><refentrytitle>swapon</refentrytitle><manvolnum>2</manvolnum></citerefentry>, <citerefentry project='man-pages'><refentrytitle>swapoff</refentrytitle><manvolnum>2</manvolnum></citerefentry>)</entry>
               </row>
@@ -1568,7 +1570,7 @@
         does not have, however. On systems supporting multiple ABIs at the same time — such as x86/x86-64 — it is hence
         recommended to limit the set of permitted system call architectures so that secondary ABIs may not be used to
         circumvent the restrictions applied to the native ABI of the system. In particular, setting
-        <varname>SystemCallFilter=native</varname> is a good choice for disabling non-native ABIs.</para>
+        <varname>SystemCallArchitectures=native</varname> is a good choice for disabling non-native ABIs.</para>
 
         <para>System call architectures may also be restricted system-wide via the
         <varname>SystemCallArchitectures=</varname> option in the global configuration. See
@@ -1649,6 +1651,18 @@
         <constant>x86</constant> personalities but no others. The personality feature is useful when running 32-bit
         services on a 64-bit host system. If not specified, the personality is left unmodified and thus reflects the
         personality of the host system's kernel.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><varname>LockPersonality=</varname></term>
+
+        <listitem><para>Locks down the <citerefentry
+        project='man-pages'><refentrytitle>personality</refentrytitle><manvolnum>2</manvolnum></citerefentry> system
+        call so that the kernel execution domain may not be changed from the default or the personality selected with
+        <varname>Personality=</varname> directive. This may be useful to improve security, because odd personality
+        emulations may be poorly tested and source of vulnerabilities. If running in user mode, or in system mode, but
+        without the <constant>CAP_SYS_ADMIN</constant> capability (e.g. setting <varname>User=</varname>),
+        <varname>NoNewPrivileges=yes</varname> is implied.</para></listitem>
       </varlistentry>
 
       <varlistentry>

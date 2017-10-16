@@ -93,7 +93,7 @@ static void check_execcommand(ExecCommand *c,
                 assert_se(streq_ptr(c->argv[1], argv1));
         if (n > 1)
                 assert_se(streq_ptr(c->argv[2], argv2));
-        assert_se(c->ignore == ignore);
+        assert_se(!!(c->flags & EXEC_COMMAND_IGNORE_FAILURE) == ignore);
 }
 
 static void test_config_parse_exec(void) {
@@ -841,12 +841,18 @@ static void test_config_parse_pass_environ(void) {
 
 }
 
+static void test_unit_dump_config_items(void) {
+        unit_dump_config_items(stdout);
+}
+
 int main(int argc, char *argv[]) {
         _cleanup_(rm_rf_physical_and_freep) char *runtime_dir = NULL;
         int r;
 
         log_parse_environment();
         log_open();
+
+        enter_cgroup_subroot();
 
         assert_se(runtime_dir = setup_fake_runtime_dir());
 
@@ -861,6 +867,7 @@ int main(int argc, char *argv[]) {
         test_load_env_file_4();
         test_load_env_file_5();
         TEST_REQ_RUNNING_SYSTEMD(test_install_printf());
+        test_unit_dump_config_items();
 
         return r;
 }

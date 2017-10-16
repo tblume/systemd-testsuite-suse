@@ -90,6 +90,7 @@
 #include "seccomp-util.h"
 #endif
 #include "securebits.h"
+#include "securebits-util.h"
 #include "selinux-util.h"
 #include "signal-util.h"
 #include "smack-util.h"
@@ -278,7 +279,7 @@ static int open_null_as(int flags, int nfd) {
 }
 
 static int connect_journal_socket(int fd, uid_t uid, gid_t gid) {
-        union sockaddr_union sa = {
+        static const union sockaddr_union sa = {
                 .un.sun_family = AF_UNIX,
                 .un.sun_path = "/run/systemd/journal/stdout",
         };
@@ -286,36 +287,32 @@ static int connect_journal_socket(int fd, uid_t uid, gid_t gid) {
         gid_t oldgid = GID_INVALID;
         int r;
 
-        if (gid != GID_INVALID) {
+        if (gid_is_valid(gid)) {
                 oldgid = getgid();
 
-                r = setegid(gid);
-                if (r < 0)
+                if (setegid(gid) < 0)
                         return -errno;
         }
 
-        if (uid != UID_INVALID) {
+        if (uid_is_valid(uid)) {
                 olduid = getuid();
 
-                r = seteuid(uid);
-                if (r < 0) {
+                if (seteuid(uid) < 0) {
                         r = -errno;
                         goto restore_gid;
                 }
         }
 
-        r = connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
-        if (r < 0)
-                r = -errno;
+        r = connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0 ? -errno : 0;
 
         /* If we fail to restore the uid or gid, things will likely
            fail later on. This should only happen if an LSM interferes. */
 
-        if (uid != UID_INVALID)
+        if (uid_is_valid(uid))
                 (void) seteuid(olduid);
 
  restore_gid:
-        if (gid != GID_INVALID)
+        if (gid_is_valid(gid))
                 (void) setegid(oldgid);
 
         return r;
@@ -324,6 +321,7 @@ static int connect_journal_socket(int fd, uid_t uid, gid_t gid) {
 static int connect_logger_as(
                 Unit *unit,
                 const ExecContext *context,
+                const ExecParameters *params,
                 ExecOutput output,
                 const char *ident,
                 int nfd,
@@ -333,6 +331,7 @@ static int connect_logger_as(
         int fd, r;
 
         assert(context);
+        assert(params);
         assert(output < _EXEC_OUTPUT_MAX);
         assert(ident);
         assert(nfd >= 0);
@@ -360,8 +359,8 @@ static int connect_logger_as(
                 "%i\n"
                 "%i\n"
                 "%i\n",
-                context->syslog_identifier ? context->syslog_identifier : ident,
-                unit->id,
+                context->syslog_identifier ?: ident,
+                params->flags & EXEC_PASS_LOG_UNIT ? unit->id : "",
                 context->syslog_priority,
                 !!context->syslog_level_prefix,
                 output == EXEC_OUTPUT_SYSLOG || output == EXEC_OUTPUT_SYSLOG_AND_CONSOLE,
@@ -575,7 +574,7 @@ static int setup_output(
         case EXEC_OUTPUT_KMSG_AND_CONSOLE:
         case EXEC_OUTPUT_JOURNAL:
         case EXEC_OUTPUT_JOURNAL_AND_CONSOLE:
-                r = connect_logger_as(unit, context, o, ident, fileno, uid, gid);
+                r = connect_logger_as(unit, context, params, o, ident, fileno, uid, gid);
                 if (r < 0) {
                         log_unit_error_errno(unit, r, "Failed to connect %s to the journal socket, ignoring: %m", fileno == STDOUT_FILENO ? "stdout" : "stderr");
                         r = open_null_as(O_WRONLY, fileno);
@@ -1099,7 +1098,7 @@ static int setup_pam(
 
         assert_se(sigprocmask_many(SIG_BLOCK, &old_ss, SIGTERM, -1) >= 0);
 
-        parent_pid = getpid();
+        parent_pid = getpid_cached();
 
         pam_pid = fork();
         if (pam_pid < 0) {
@@ -1297,7 +1296,8 @@ static bool context_has_no_new_privileges(const ExecContext *c) {
                 c->protect_kernel_modules ||
                 c->private_devices ||
                 context_has_syscall_filters(c) ||
-                !set_isempty(c->syscall_archs);
+                !set_isempty(c->syscall_archs) ||
+                c->lock_personality;
 }
 
 #ifdef HAVE_SECCOMP
@@ -1313,8 +1313,9 @@ static bool skip_seccomp_unavailable(const Unit* u, const char* msg) {
         return true;
 }
 
-static int apply_syscall_filter(const Unit* u, const ExecContext *c) {
+static int apply_syscall_filter(const Unit* u, const ExecContext *c, bool needs_ambient_hack) {
         uint32_t negative_action, default_action, action;
+        int r;
 
         assert(u);
         assert(c);
@@ -1333,6 +1334,12 @@ static int apply_syscall_filter(const Unit* u, const ExecContext *c) {
         } else {
                 default_action = SCMP_ACT_ALLOW;
                 action = negative_action;
+        }
+
+        if (needs_ambient_hack) {
+                r = seccomp_filter_set_add(c->syscall_filter, c->syscall_whitelist, syscall_filter_sets + SYSCALL_FILTER_SET_SETUID);
+                if (r < 0)
+                        return r;
         }
 
         return seccomp_load_syscall_filter_set_raw(default_action, c->syscall_filter, action);
@@ -1449,6 +1456,32 @@ static int apply_restrict_namespaces(Unit *u, const ExecContext *c) {
         return seccomp_restrict_namespaces(c->restrict_namespaces);
 }
 
+static int apply_lock_personality(const Unit* u, const ExecContext *c) {
+        unsigned long personality;
+        int r;
+
+        assert(u);
+        assert(c);
+
+        if (!c->lock_personality)
+                return 0;
+
+        if (skip_seccomp_unavailable(u, "LockPersonality="))
+                return 0;
+
+        personality = c->personality;
+
+        /* If personality is not specified, use either PER_LINUX or PER_LINUX32 depending on what is currently set. */
+        if (personality == PERSONALITY_INVALID) {
+
+                r = opinionated_personality(&personality);
+                if (r < 0)
+                        return r;
+        }
+
+        return seccomp_lock_personality(personality);
+}
+
 #endif
 
 static void do_idle_pipe_dance(int idle_pipe[4]) {
@@ -1506,7 +1539,7 @@ static int build_environment(
         if (n_fds > 0) {
                 _cleanup_free_ char *joined = NULL;
 
-                if (asprintf(&x, "LISTEN_PID="PID_FMT, getpid()) < 0)
+                if (asprintf(&x, "LISTEN_PID="PID_FMT, getpid_cached()) < 0)
                         return -ENOMEM;
                 our_env[n_env++] = x;
 
@@ -1525,7 +1558,7 @@ static int build_environment(
         }
 
         if ((p->flags & EXEC_SET_WATCHDOG) && p->watchdog_usec > 0) {
-                if (asprintf(&x, "WATCHDOG_PID="PID_FMT, getpid()) < 0)
+                if (asprintf(&x, "WATCHDOG_PID="PID_FMT, getpid_cached()) < 0)
                         return -ENOMEM;
                 our_env[n_env++] = x;
 
@@ -1537,7 +1570,7 @@ static int build_environment(
         /* If this is D-Bus, tell the nss-systemd module, since it relies on being able to use D-Bus look up dynamic
          * users via PID 1, possibly dead-locking the dbus daemon. This way it will not use D-Bus to resolve names, but
          * check the database directly. */
-        if (unit_has_name(u, SPECIAL_DBUS_SERVICE)) {
+        if (p->flags & EXEC_NSS_BYPASS_BUS) {
                 x = strdup("SYSTEMD_NSS_BYPASS_BUS=1");
                 if (!x)
                         return -ENOMEM;
@@ -1844,7 +1877,6 @@ static int setup_exec_directory(
                 const ExecParameters *params,
                 uid_t uid,
                 gid_t gid,
-                bool manager_is_system,
                 ExecDirectoryType type,
                 int *exit_status) {
 
@@ -1866,7 +1898,7 @@ static int setup_exec_directory(
         if (!params->prefix[type])
                 return 0;
 
-        if (manager_is_system) {
+        if (params->flags & EXEC_CHOWN_DIRECTORIES) {
                 if (!uid_is_valid(uid))
                         uid = 0;
                 if (!gid_is_valid(gid))
@@ -1890,6 +1922,11 @@ static int setup_exec_directory(
                 if (r < 0)
                         goto fail;
 
+                /* Don't change the owner of the configuration directory, as in the common case it is not written to by
+                 * a service, and shall not be writable. */
+                if (type == EXEC_DIRECTORY_CONFIGURATION)
+                        continue;
+
                 r = chmod_and_chown(p, context->directories[type].mode, uid, gid);
                 if (r < 0)
                         goto fail;
@@ -1907,14 +1944,10 @@ static int setup_smack(
                 const ExecContext *context,
                 const ExecCommand *command) {
 
-#ifdef HAVE_SMACK
         int r;
 
         assert(context);
         assert(command);
-
-        if (!mac_smack_use())
-                return 0;
 
         if (context->smack_process_label) {
                 r = mac_smack_apply_pid(0, context->smack_process_label);
@@ -1933,7 +1966,6 @@ static int setup_smack(
                 if (r < 0)
                         return r;
         }
-#endif
 #endif
 
         return 0;
@@ -2006,7 +2038,7 @@ static int apply_mount_namespace(
                 .protect_kernel_modules = context->protect_kernel_modules,
                 .mount_apivfs = context->mount_apivfs,
         };
-        bool apply_restrictions;
+        bool needs_sandboxing;
         int r;
 
         assert(context);
@@ -2041,18 +2073,18 @@ static int apply_mount_namespace(
         if (!context->dynamic_user && root_dir)
                 ns_info.ignore_protect_paths = true;
 
-        apply_restrictions = (params->flags & EXEC_APPLY_PERMISSIONS) && !command->privileged;
+        needs_sandboxing = (params->flags & EXEC_APPLY_SANDBOXING) && !(command->flags & EXEC_COMMAND_FULLY_PRIVILEGED);
 
         r = setup_namespace(root_dir, root_image,
                             &ns_info, rw,
-                            apply_restrictions ? context->read_only_paths : NULL,
-                            apply_restrictions ? context->inaccessible_paths : NULL,
+                            needs_sandboxing ? context->read_only_paths : NULL,
+                            needs_sandboxing ? context->inaccessible_paths : NULL,
                             context->bind_mounts,
                             context->n_bind_mounts,
                             tmp,
                             var,
-                            apply_restrictions ? context->protect_home : PROTECT_HOME_NO,
-                            apply_restrictions ? context->protect_system : PROTECT_SYSTEM_NO,
+                            needs_sandboxing ? context->protect_home : PROTECT_HOME_NO,
+                            needs_sandboxing ? context->protect_system : PROTECT_SYSTEM_NO,
                             context->mount_flags,
                             DISSECT_IMAGE_DISCARD_ON_LOOP);
 
@@ -2304,12 +2336,25 @@ static int exec_child(
         const char *home = NULL, *shell = NULL;
         dev_t journal_stream_dev = 0;
         ino_t journal_stream_ino = 0;
-        bool needs_mount_namespace;
+        bool needs_sandboxing,          /* Do we need to set up full sandboxing? (i.e. all namespacing, all MAC stuff, caps, yadda yadda */
+                needs_setuid,           /* Do we need to do the actual setresuid()/setresgid() calls? */
+                needs_mount_namespace,  /* Do we need to set up a mount namespace for this kernel? */
+                needs_ambient_hack;     /* Do we need to apply the ambient capabilities hack? */
+#ifdef HAVE_SELINUX
+        bool use_selinux = false;
+#endif
+#ifdef HAVE_SMACK
+        bool use_smack = false;
+#endif
+#ifdef HAVE_APPARMOR
+        bool use_apparmor = false;
+#endif
         uid_t uid = UID_INVALID;
         gid_t gid = GID_INVALID;
         int i, r, ngids = 0;
         unsigned n_fds;
         ExecDirectoryType dt;
+        int secure_bits;
 
         assert(unit);
         assert(command);
@@ -2564,7 +2609,7 @@ static int exec_child(
                 }
 
         if (context->utmp_id)
-                utmp_put_init_process(context->utmp_id, getpid(), getsid(0),
+                utmp_put_init_process(context->utmp_id, getpid_cached(), getsid(0),
                                       context->tty_path,
                                       context->utmp_mode == EXEC_UTMP_INIT  ? INIT_PROCESS :
                                       context->utmp_mode == EXEC_UTMP_LOGIN ? LOGIN_PROCESS :
@@ -2582,7 +2627,7 @@ static int exec_child(
         /* If delegation is enabled we'll pass ownership of the cgroup
          * (but only in systemd's own controller hierarchy!) to the
          * user of the new process. */
-        if (params->cgroup_path && context->user && params->cgroup_delegate) {
+        if (params->cgroup_path && context->user && (params->flags & EXEC_CGROUP_DELEGATE)) {
                 r = cg_set_task_access(SYSTEMD_CGROUP_CONTROLLER, params->cgroup_path, 0644, uid, gid);
                 if (r < 0) {
                         *exit_status = EXIT_CGROUP;
@@ -2598,7 +2643,7 @@ static int exec_child(
         }
 
         for (dt = 0; dt < _EXEC_DIRECTORY_MAX; dt++) {
-                r = setup_exec_directory(context, params, uid, gid, MANAGER_IS_SYSTEM(unit->manager), dt, exit_status);
+                r = setup_exec_directory(context, params, uid, gid, dt, exit_status);
                 if (r < 0)
                         return r;
         }
@@ -2646,7 +2691,35 @@ static int exec_child(
                 return r;
         }
 
-        if ((params->flags & EXEC_APPLY_PERMISSIONS) && !command->privileged) {
+        /* We need sandboxing if the caller asked us to apply it and the command isn't explicitly excepted from it */
+        needs_sandboxing = (params->flags & EXEC_APPLY_SANDBOXING) && !(command->flags & EXEC_COMMAND_FULLY_PRIVILEGED);
+
+        /* We need the ambient capability hack, if the caller asked us to apply it and the command is marked for it, and the kernel doesn't actually support ambient caps */
+        needs_ambient_hack = (params->flags & EXEC_APPLY_SANDBOXING) && (command->flags & EXEC_COMMAND_AMBIENT_MAGIC) && !ambient_capabilities_supported();
+
+        /* We need setresuid() if the caller asked us to apply sandboxing and the command isn't explicitly excepted from either whole sandboxing or just setresuid() itself, and the ambient hack is not desired */
+        if (needs_ambient_hack)
+                needs_setuid = false;
+        else
+                needs_setuid = (params->flags & EXEC_APPLY_SANDBOXING) && !(command->flags & (EXEC_COMMAND_FULLY_PRIVILEGED|EXEC_COMMAND_NO_SETUID));
+
+        if (needs_sandboxing) {
+                /* MAC enablement checks need to be done before a new mount ns is created, as they rely on /sys being
+                 * present. The actual MAC context application will happen later, as late as possible, to avoid
+                 * impacting our own code paths. */
+
+#ifdef HAVE_SELINUX
+                use_selinux = mac_selinux_use();
+#endif
+#ifdef HAVE_SMACK
+                use_smack = mac_smack_use();
+#endif
+#ifdef HAVE_APPARMOR
+                use_apparmor = mac_apparmor_use();
+#endif
+        }
+
+        if (needs_setuid) {
                 if (context->pam_name && username) {
                         r = setup_pam(context->pam_name, username, uid, gid, context->tty_path, &accum_env, fds, n_fds);
                         if (r < 0) {
@@ -2679,7 +2752,7 @@ static int exec_child(
                 return r;
 
         /* Drop groups as early as possbile */
-        if ((params->flags & EXEC_APPLY_PERMISSIONS) && !command->privileged) {
+        if (needs_setuid) {
                 r = enforce_groups(context, gid, supplementary_gids, ngids);
                 if (r < 0) {
                         *exit_status = EXIT_GROUP;
@@ -2687,35 +2760,29 @@ static int exec_child(
                 }
         }
 
+        if (needs_sandboxing) {
 #ifdef HAVE_SELINUX
-        if ((params->flags & EXEC_APPLY_PERMISSIONS) &&
-            mac_selinux_use() &&
-            params->selinux_context_net &&
-            socket_fd >= 0 &&
-            !command->privileged) {
-
-                r = mac_selinux_get_child_mls_label(socket_fd, command->path, context->selinux_context, &mac_selinux_context_net);
-                if (r < 0) {
-                        *exit_status = EXIT_SELINUX_CONTEXT;
-                        return r;
+                if (use_selinux && params->selinux_context_net && socket_fd >= 0) {
+                        r = mac_selinux_get_child_mls_label(socket_fd, command->path, context->selinux_context, &mac_selinux_context_net);
+                        if (r < 0) {
+                                *exit_status = EXIT_SELINUX_CONTEXT;
+                                return r;
+                        }
                 }
-        }
 #endif
 
-        if ((params->flags & EXEC_APPLY_PERMISSIONS) && context->private_users) {
-                r = setup_private_users(uid, gid);
-                if (r < 0) {
-                        *exit_status = EXIT_USER;
-                        return r;
+                if (context->private_users) {
+                        r = setup_private_users(uid, gid);
+                        if (r < 0) {
+                                *exit_status = EXIT_USER;
+                                return r;
+                        }
                 }
         }
 
-        /* We repeat the fd closing here, to make sure that
-         * nothing is leaked from the PAM modules. Note that
-         * we are more aggressive this time since socket_fd
-         * and the netns fds we don't need anymore. The custom
-         * endpoint fd was needed to upload the policy and can
-         * now be closed as well. */
+        /* We repeat the fd closing here, to make sure that nothing is leaked from the PAM modules. Note that we are
+         * more aggressive this time since socket_fd and the netns fds we don't need anymore. The custom endpoint fd
+         * was needed to upload the policy and can now be closed as well. */
         r = close_all_fds(fds, n_fds);
         if (r >= 0)
                 r = shift_fds(fds, n_fds);
@@ -2726,9 +2793,10 @@ static int exec_child(
                 return r;
         }
 
-        if ((params->flags & EXEC_APPLY_PERMISSIONS) && !command->privileged) {
+        secure_bits = context->secure_bits;
 
-                int secure_bits = context->secure_bits;
+        if (needs_sandboxing) {
+                uint64_t bset;
 
                 for (i = 0; i < _RLIMIT_MAX; i++) {
 
@@ -2750,8 +2818,17 @@ static int exec_child(
                         }
                 }
 
-                if (!cap_test_all(context->capability_bounding_set)) {
-                        r = capability_bounding_set_drop(context->capability_bounding_set, false);
+                bset = context->capability_bounding_set;
+                /* If the ambient caps hack is enabled (which means the kernel can't do them, and the user asked for
+                 * our magic fallback), then let's add some extra caps, so that the service can drop privs of its own,
+                 * instead of us doing that */
+                if (needs_ambient_hack)
+                        bset |= (UINT64_C(1) << CAP_SETPCAP) |
+                                (UINT64_C(1) << CAP_SETUID) |
+                                (UINT64_C(1) << CAP_SETGID);
+
+                if (!cap_test_all(bset)) {
+                        r = capability_bounding_set_drop(bset, false);
                         if (r < 0) {
                                 *exit_status = EXIT_CAPABILITIES;
                                 *error_message = strdup("Failed to drop capabilities");
@@ -2761,7 +2838,8 @@ static int exec_child(
 
                 /* This is done before enforce_user, but ambient set
                  * does not survive over setresuid() if keep_caps is not set. */
-                if (context->capability_ambient_set != 0) {
+                if (!needs_ambient_hack &&
+                    context->capability_ambient_set != 0) {
                         r = capability_ambient_set_apply(context->capability_ambient_set, true);
                         if (r < 0) {
                                 *exit_status = EXIT_CAPABILITIES;
@@ -2769,7 +2847,9 @@ static int exec_child(
                                 return r;
                         }
                 }
+        }
 
+        if (needs_setuid) {
                 if (context->user) {
                         r = enforce_user(context, uid);
                         if (r < 0) {
@@ -2777,7 +2857,9 @@ static int exec_child(
                                 (void) asprintf(error_message, "Failed to change UID to "UID_FMT, uid);
                                 return r;
                         }
-                        if (context->capability_ambient_set != 0) {
+
+                        if (!needs_ambient_hack &&
+                            context->capability_ambient_set != 0) {
 
                                 /* Fix the ambient capabilities after user change. */
                                 r = capability_ambient_set_apply(context->capability_ambient_set, false);
@@ -2797,14 +2879,16 @@ static int exec_child(
                                 secure_bits |= 1<<SECURE_KEEP_CAPS;
                         }
                 }
+        }
 
+        if (needs_sandboxing) {
                 /* Apply the MAC contexts late, but before seccomp syscall filtering, as those should really be last to
                  * influence our own codepaths as little as possible. Moreover, applying MAC contexts usually requires
                  * syscalls that are subject to seccomp filtering, hence should probably be applied before the syscalls
                  * are restricted. */
 
 #ifdef HAVE_SELINUX
-                if (mac_selinux_use()) {
+                if (use_selinux) {
                         char *exec_context = mac_selinux_context_net ?: context->selinux_context;
 
                         if (exec_context) {
@@ -2818,15 +2902,19 @@ static int exec_child(
                 }
 #endif
 
-                r = setup_smack(context, command);
-                if (r < 0) {
-                        *exit_status = EXIT_SMACK_PROCESS_LABEL;
-                        *error_message = strdup("Failed to set SMACK process label");
-                        return r;
+#ifdef HAVE_SMACK
+                if (use_smack) {
+                        r = setup_smack(context, command);
+                        if (r < 0) {
+                                *exit_status = EXIT_SMACK_PROCESS_LABEL;
+                                *error_message = strdup("Failed to set SMACK process label");
+                                return r;
+                        }
                 }
+#endif
 
 #ifdef HAVE_APPARMOR
-                if (context->apparmor_profile && mac_apparmor_use()) {
+                if (use_apparmor && context->apparmor_profile) {
                         r = aa_change_onexec(context->apparmor_profile);
                         if (r < 0 && !context->apparmor_profile_ignore) {
                                 *exit_status = EXIT_APPARMOR_PROFILE;
@@ -2838,10 +2926,8 @@ static int exec_child(
                 }
 #endif
 
-                /* PR_GET_SECUREBITS is not privileged, while
-                 * PR_SET_SECUREBITS is. So to suppress
-                 * potential EPERMs we'll try not to call
-                 * PR_SET_SECUREBITS unless necessary. */
+                /* PR_GET_SECUREBITS is not privileged, while PR_SET_SECUREBITS is. So to suppress potential EPERMs
+                 * we'll try not to call PR_SET_SECUREBITS unless necessary. */
                 if (prctl(PR_GET_SECUREBITS) != secure_bits)
                         if (prctl(PR_SET_SECUREBITS, secure_bits) < 0) {
                                 *exit_status = EXIT_SECUREBITS;
@@ -2913,9 +2999,16 @@ static int exec_child(
                         return r;
                 }
 
+                r = apply_lock_personality(unit, context);
+                if (r < 0) {
+                        *exit_status = EXIT_SECCOMP;
+                        *error_message = strdup("Failed to lock personalities");
+                        return r;
+                }
+
                 /* This really should remain the last step before the execve(), to make sure our own code is unaffected
                  * by the filter as little as possible. */
-                r = apply_syscall_filter(unit, context);
+                r = apply_syscall_filter(unit, context, needs_ambient_hack);
                 if (r < 0) {
                         *exit_status = EXIT_SECCOMP;
                         *error_message = strdup("Failed to apply syscall filters");
@@ -3049,7 +3142,7 @@ int exec_spawn(Unit *unit,
                                                                   error_message),
                                                  "EXECUTABLE=%s", command->path,
                                                  NULL);
-                        else if (r == -ENOENT && command->ignore)
+                        else if (r == -ENOENT && (command->flags & EXEC_COMMAND_IGNORE_FAILURE))
                                 log_struct_errno(LOG_INFO, r,
                                                  "MESSAGE_ID=" SD_MESSAGE_SPAWN_FAILED_STR,
                                                  LOG_UNIT_ID(unit),
@@ -3381,8 +3474,7 @@ static bool tty_may_match_dev_console(const char *tty) {
         if (!tty)
                 return true;
 
-        if (startswith(tty, "/dev/"))
-                tty += 5;
+        tty = skip_dev_prefix(tty);
 
         /* trivial identity? */
         if (streq(tty, "console"))
@@ -3506,23 +3598,23 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
         if (c->ioprio_set) {
                 _cleanup_free_ char *class_str = NULL;
 
-                ioprio_class_to_string_alloc(IOPRIO_PRIO_CLASS(c->ioprio), &class_str);
-                fprintf(f,
-                        "%sIOSchedulingClass: %s\n"
-                        "%sIOPriority: %i\n",
-                        prefix, strna(class_str),
-                        prefix, (int) IOPRIO_PRIO_DATA(c->ioprio));
+                r = ioprio_class_to_string_alloc(IOPRIO_PRIO_CLASS(c->ioprio), &class_str);
+                if (r >= 0)
+                        fprintf(f, "%sIOSchedulingClass: %s\n", prefix, class_str);
+
+                fprintf(f, "%sIOPriority: %lu\n", prefix, IOPRIO_PRIO_DATA(c->ioprio));
         }
 
         if (c->cpu_sched_set) {
                 _cleanup_free_ char *policy_str = NULL;
 
-                sched_policy_to_string_alloc(c->cpu_sched_policy, &policy_str);
+                r = sched_policy_to_string_alloc(c->cpu_sched_policy, &policy_str);
+                if (r >= 0)
+                        fprintf(f, "%sCPUSchedulingPolicy: %s\n", prefix, policy_str);
+
                 fprintf(f,
-                        "%sCPUSchedulingPolicy: %s\n"
                         "%sCPUSchedulingPriority: %i\n"
                         "%sCPUSchedulingResetOnFork: %s\n",
-                        prefix, strna(policy_str),
                         prefix, c->cpu_sched_priority,
                         prefix, yes_no(c->cpu_sched_reset_on_fork));
         }
@@ -3557,61 +3649,54 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
                         prefix, yes_no(c->tty_vhangup),
                         prefix, yes_no(c->tty_vt_disallocate));
 
-        if (c->std_output == EXEC_OUTPUT_SYSLOG ||
-            c->std_output == EXEC_OUTPUT_KMSG ||
-            c->std_output == EXEC_OUTPUT_JOURNAL ||
-            c->std_output == EXEC_OUTPUT_SYSLOG_AND_CONSOLE ||
-            c->std_output == EXEC_OUTPUT_KMSG_AND_CONSOLE ||
-            c->std_output == EXEC_OUTPUT_JOURNAL_AND_CONSOLE ||
-            c->std_error == EXEC_OUTPUT_SYSLOG ||
-            c->std_error == EXEC_OUTPUT_KMSG ||
-            c->std_error == EXEC_OUTPUT_JOURNAL ||
-            c->std_error == EXEC_OUTPUT_SYSLOG_AND_CONSOLE ||
-            c->std_error == EXEC_OUTPUT_KMSG_AND_CONSOLE ||
-            c->std_error == EXEC_OUTPUT_JOURNAL_AND_CONSOLE) {
+        if (IN_SET(c->std_output,
+                   EXEC_OUTPUT_SYSLOG,
+                   EXEC_OUTPUT_KMSG,
+                   EXEC_OUTPUT_JOURNAL,
+                   EXEC_OUTPUT_SYSLOG_AND_CONSOLE,
+                   EXEC_OUTPUT_KMSG_AND_CONSOLE,
+                   EXEC_OUTPUT_JOURNAL_AND_CONSOLE) ||
+            IN_SET(c->std_error,
+                   EXEC_OUTPUT_SYSLOG,
+                   EXEC_OUTPUT_KMSG,
+                   EXEC_OUTPUT_JOURNAL,
+                   EXEC_OUTPUT_SYSLOG_AND_CONSOLE,
+                   EXEC_OUTPUT_KMSG_AND_CONSOLE,
+                   EXEC_OUTPUT_JOURNAL_AND_CONSOLE)) {
 
                 _cleanup_free_ char *fac_str = NULL, *lvl_str = NULL;
 
-                log_facility_unshifted_to_string_alloc(c->syslog_priority >> 3, &fac_str);
-                log_level_to_string_alloc(LOG_PRI(c->syslog_priority), &lvl_str);
+                r = log_facility_unshifted_to_string_alloc(c->syslog_priority >> 3, &fac_str);
+                if (r >= 0)
+                        fprintf(f, "%sSyslogFacility: %s\n", prefix, fac_str);
 
-                fprintf(f,
-                        "%sSyslogFacility: %s\n"
-                        "%sSyslogLevel: %s\n",
-                        prefix, strna(fac_str),
-                        prefix, strna(lvl_str));
+                r = log_level_to_string_alloc(LOG_PRI(c->syslog_priority), &lvl_str);
+                if (r >= 0)
+                        fprintf(f, "%sSyslogLevel: %s\n", prefix, lvl_str);
         }
 
-        if (c->secure_bits)
-                fprintf(f, "%sSecure Bits:%s%s%s%s%s%s\n",
-                        prefix,
-                        (c->secure_bits & 1<<SECURE_KEEP_CAPS) ? " keep-caps" : "",
-                        (c->secure_bits & 1<<SECURE_KEEP_CAPS_LOCKED) ? " keep-caps-locked" : "",
-                        (c->secure_bits & 1<<SECURE_NO_SETUID_FIXUP) ? " no-setuid-fixup" : "",
-                        (c->secure_bits & 1<<SECURE_NO_SETUID_FIXUP_LOCKED) ? " no-setuid-fixup-locked" : "",
-                        (c->secure_bits & 1<<SECURE_NOROOT) ? " noroot" : "",
-                        (c->secure_bits & 1<<SECURE_NOROOT_LOCKED) ? "noroot-locked" : "");
+        if (c->secure_bits) {
+                _cleanup_free_ char *str = NULL;
+
+                r = secure_bits_to_string_alloc(c->secure_bits, &str);
+                if (r >= 0)
+                        fprintf(f, "%sSecure Bits: %s\n", prefix, str);
+        }
 
         if (c->capability_bounding_set != CAP_ALL) {
-                unsigned long l;
-                fprintf(f, "%sCapabilityBoundingSet:", prefix);
+                _cleanup_free_ char *str = NULL;
 
-                for (l = 0; l <= cap_last_cap(); l++)
-                        if (c->capability_bounding_set & (UINT64_C(1) << l))
-                                fprintf(f, " %s", strna(capability_to_name(l)));
-
-                fputs("\n", f);
+                r = capability_set_to_string_alloc(c->capability_bounding_set, &str);
+                if (r >= 0)
+                        fprintf(f, "%sCapabilityBoundingSet: %s\n", prefix, str);
         }
 
         if (c->capability_ambient_set != 0) {
-                unsigned long l;
-                fprintf(f, "%sAmbientCapabilities:", prefix);
+                _cleanup_free_ char *str = NULL;
 
-                for (l = 0; l <= cap_last_cap(); l++)
-                        if (c->capability_ambient_set & (UINT64_C(1) << l))
-                                fprintf(f, " %s", strna(capability_to_name(l)));
-
-                fputs("\n", f);
+                r = capability_set_to_string_alloc(c->capability_ambient_set, &str);
+                if (r >= 0)
+                        fprintf(f, "%sAmbientCapabilities: %s\n", prefix, str);
         }
 
         if (c->user)
@@ -3681,6 +3766,10 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
                 fprintf(f,
                         "%sPersonality: %s\n",
                         prefix, strna(personality_to_string(c->personality)));
+
+        fprintf(f,
+                "%sLockPersonality: %s\n",
+                prefix, yes_no(c->lock_personality));
 
         if (c->syscall_filter) {
 #ifdef HAVE_SECCOMP

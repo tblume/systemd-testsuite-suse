@@ -136,10 +136,9 @@ int manager_connect_bus(Manager *m) {
         assert(m);
 
         r = sd_bus_default_system(&m->bus);
-        if (r == -ENOENT) {
+        if (r < 0) {
                 /* We failed to connect? Yuck, we must be in early
-                 * boot. Let's try in 5s again. As soon as we have
-                 * kdbus we can stop doing this... */
+                 * boot. Let's try in 5s again. */
 
                 log_debug_errno(r, "Failed to connect to bus, trying again in 5s: %m");
 
@@ -866,12 +865,12 @@ static void print_string_set(FILE *f, const char *field, OrderedSet *s) {
         if (ordered_set_isempty(s))
                 return;
 
-        fputs(field, f);
+        fputs_unlocked(field, f);
 
         ORDERED_SET_FOREACH(p, s, i)
                 fputs_with_space(f, p, NULL, &space);
 
-        fputc('\n', f);
+        fputc_unlocked('\n', f);
 }
 
 static int manager_save(Manager *m) {

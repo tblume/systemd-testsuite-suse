@@ -170,10 +170,10 @@ man = custom_target(
         depends : man_pages,
         command : ['echo'])
 
-html = run_target(
+html = custom_target(
         'html',
-        depends : html_pages,
         output : 'html',
+        depends : html_pages,
         command : ['echo'])
 
 run_target(
@@ -191,14 +191,15 @@ run_target(
 ############################################################
 
 if git.found()
-        run_target(
+        custom_target(
                 'update-man-rules',
+                output : 'update-man-rules',
                 # slightly strange syntax because of
                 # https://github.com/mesonbuild/meson/issues/1643
                 # and https://github.com/mesonbuild/meson/issues/1512
                 command : ['sh', '-c',
                            'cd @0@ && '.format(meson.build_root()) +
-                           'python3 @0@/tools/make-man-rules.py --meson `git ls-files ":/man/*.xml"` >t && '.format(meson.source_root()) +
+                           'python3 @0@/tools/make-man-rules.py `git ls-files ":/man/*.xml"` >t && '.format(meson.source_root()) +
                            'mv t @0@/rules/meson.build'.format(meson.current_source_dir())],
                 depend_files : custom_entities_ent)
 endif

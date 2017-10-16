@@ -63,7 +63,6 @@
 const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX] = {
         [UNIT_SERVICE] = &service_vtable,
         [UNIT_SOCKET] = &socket_vtable,
-        [UNIT_BUSNAME] = &busname_vtable,
         [UNIT_TARGET] = &target_vtable,
         [UNIT_DEVICE] = &device_vtable,
         [UNIT_MOUNT] = &mount_vtable,
@@ -1098,7 +1097,6 @@ void unit_dump(Unit *u, FILE *f, const char *prefix) {
 
 /* Common implementation for multiple backends */
 int unit_load_fragment_and_dropin(Unit *u) {
-        Unit *t;
         int r;
 
         assert(u);
@@ -1111,18 +1109,15 @@ int unit_load_fragment_and_dropin(Unit *u) {
         if (u->load_state == UNIT_STUB)
                 return -ENOENT;
 
-        /* If the unit is an alias and the final unit has already been
-         * loaded, there's no point in reloading the dropins one more time. */
-        t = unit_follow_merge(u);
-        if (t != u && t->load_state != UNIT_STUB)
-                return 0;
-
-        return unit_load_dropin(t);
+        /* Load drop-in directory data. If u is an alias, we might be reloading the
+         * target unit needlessly. But we cannot be sure which drops-ins have already
+         * been loaded and which not, at least without doing complicated book-keeping,
+         * so let's always reread all drop-ins. */
+        return unit_load_dropin(unit_follow_merge(u));
 }
 
 /* Common implementation for multiple backends */
 int unit_load_fragment_and_dropin_optional(Unit *u) {
-        Unit *t;
         int r;
 
         assert(u);
@@ -1138,13 +1133,8 @@ int unit_load_fragment_and_dropin_optional(Unit *u) {
         if (u->load_state == UNIT_STUB)
                 u->load_state = UNIT_LOADED;
 
-        /* If the unit is an alias and the final unit has already been
-         * loaded, there's no point in reloading the dropins one more time. */
-        t = unit_follow_merge(u);
-        if (t != u && t->load_state != UNIT_STUB)
-                return 0;
-
-        return unit_load_dropin(t);
+        /* Load drop-in directory data */
+        return unit_load_dropin(unit_follow_merge(u));
 }
 
 int unit_add_default_target_dependency(Unit *u, Unit *target) {
@@ -3121,6 +3111,27 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
         return 0;
 }
 
+void unit_deserialize_skip(FILE *f) {
+        assert(f);
+
+        /* Skip serialized data for this unit. We don't know what it is. */
+
+        for (;;) {
+                char line[LINE_MAX], *l;
+
+                if (!fgets(line, sizeof line, f))
+                        return;
+
+                char_array_0(line);
+                l = strstrip(line);
+
+                /* End marker */
+                if (isempty(l))
+                        return;
+        }
+}
+
+
 int unit_add_node_link(Unit *u, const char *what, bool wants, UnitDependency dep) {
         Unit *device;
         _cleanup_free_ char *e = NULL;
@@ -4387,4 +4398,16 @@ int unit_acquire_invocation_id(Unit *u) {
                 return log_unit_error_errno(u, r, "Failed to set invocation ID for unit: %m");
 
         return 0;
+}
+
+void unit_set_exec_params(Unit *s, ExecParameters *p) {
+        CGroupContext *c;
+
+        assert(s);
+        assert(s);
+
+        p->cgroup_path = s->cgroup_path;
+
+        c = unit_get_cgroup_context(s);
+        SET_FLAG(p->flags, EXEC_CGROUP_DELEGATE, c && c->delegate);
 }

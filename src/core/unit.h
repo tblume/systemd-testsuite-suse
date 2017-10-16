@@ -276,7 +276,6 @@ typedef enum UnitSetPropertiesMode {
 } UnitSetPropertiesMode;
 
 #include "automount.h"
-#include "busname.h"
 #include "device.h"
 #include "path.h"
 #include "scope.h"
@@ -471,7 +470,6 @@ extern const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX];
 
 DEFINE_CAST(SERVICE, Service);
 DEFINE_CAST(SOCKET, Socket);
-DEFINE_CAST(BUSNAME, BusName);
 DEFINE_CAST(TARGET, Target);
 DEFINE_CAST(DEVICE, Device);
 DEFINE_CAST(MOUNT, Mount);
@@ -565,6 +563,7 @@ bool unit_can_serialize(Unit *u) _pure_;
 
 int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs);
 int unit_deserialize(Unit *u, FILE *f, FDSet *fds);
+void unit_deserialize_skip(FILE *f);
 
 int unit_serialize_item(Unit *u, FILE *f, const char *key, const char *value);
 int unit_serialize_item_escaped(Unit *u, FILE *f, const char *key, const char *value);
@@ -659,6 +658,8 @@ int unit_set_invocation_id(Unit *u, sd_id128_t id);
 int unit_acquire_invocation_id(Unit *u);
 
 bool unit_shall_confirm_spawn(Unit *u);
+
+void unit_set_exec_params(Unit *s, ExecParameters *p);
 
 /* Macros which append UNIT= or USER_UNIT= to the message */
 

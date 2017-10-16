@@ -21,6 +21,8 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include "sd-messages.h"
+
 #include "alloc-util.h"
 #include "async.h"
 #include "bus-error.h"
@@ -157,7 +159,7 @@ static int service_set_main_pid(Service *s, pid_t pid) {
         if (pid <= 1)
                 return -EINVAL;
 
-        if (pid == getpid())
+        if (pid == getpid_cached())
                 return -EINVAL;
 
         if (s->main_pid == pid && s->main_pid_known)
@@ -171,7 +173,7 @@ static int service_set_main_pid(Service *s, pid_t pid) {
         s->main_pid = pid;
         s->main_pid_known = true;
 
-        if (get_process_ppid(pid, &ppid) >= 0 && ppid != getpid()) {
+        if (get_process_ppid(pid, &ppid) >= 0 && ppid != getpid_cached()) {
                 log_unit_warning(UNIT(s), "Supervising process "PID_FMT" which is not our child. We'll most likely not notice when it exits.", pid);
                 s->main_pid_alien = true;
         } else
@@ -614,7 +616,7 @@ static int service_setup_bus_name(Service *s) {
         if (r < 0)
                 return log_unit_error_errno(UNIT(s), r, "Failed to add dependency on " SPECIAL_DBUS_SOCKET ": %m");
 
-        /* Regardless if kdbus is used or not, we always want to be ordered against dbus.socket if both are in the transaction. */
+        /* We always want to be ordered against dbus.socket if both are in the transaction. */
         r = unit_add_dependency_by_name(UNIT(s), UNIT_AFTER, SPECIAL_DBUS_SOCKET, NULL, true);
         if (r < 0)
                 return log_unit_error_errno(UNIT(s), r, "Failed to add dependency on " SPECIAL_DBUS_SOCKET ": %m");
@@ -1216,7 +1218,6 @@ static int service_spawn(
         _cleanup_strv_free_ char **final_env = NULL, **our_env = NULL, **fd_names = NULL;
         _cleanup_free_ int *fds = NULL;
         unsigned n_storage_fds = 0, n_socket_fds = 0, n_env = 0;
-        const char *path;
         pid_t pid;
 
         ExecParameters exec_params = {
@@ -1235,7 +1236,7 @@ static int service_spawn(
         if (flags & EXEC_IS_CONTROL) {
                 /* If this is a control process, mask the permissions/chroot application if this is requested. */
                 if (s->permissions_start_only)
-                        exec_params.flags &= ~EXEC_APPLY_PERMISSIONS;
+                        exec_params.flags &= ~EXEC_APPLY_SANDBOXING;
                 if (s->root_directory_start_only)
                         exec_params.flags &= ~EXEC_APPLY_CHROOT;
         }
@@ -1283,7 +1284,7 @@ static int service_spawn(
                         return -ENOMEM;
 
         if (MANAGER_IS_USER(UNIT(s)->manager))
-                if (asprintf(our_env + n_env++, "MANAGERPID="PID_FMT, getpid()) < 0)
+                if (asprintf(our_env + n_env++, "MANAGERPID="PID_FMT, getpid_cached()) < 0)
                         return -ENOMEM;
 
         if (s->socket_fd >= 0) {
@@ -1342,29 +1343,31 @@ static int service_spawn(
                 }
         }
 
-        r = manager_set_exec_params(UNIT(s)->manager, &exec_params);
-        if (r < 0)
-                return r;
+        manager_set_exec_params(UNIT(s)->manager, &exec_params);
+        unit_set_exec_params(UNIT(s), &exec_params);
 
         final_env = strv_env_merge(2, exec_params.environment, our_env, NULL);
         if (!final_env)
                 return -ENOMEM;
 
         if ((flags & EXEC_IS_CONTROL) && UNIT(s)->cgroup_path) {
-                path = strjoina(UNIT(s)->cgroup_path, "/control");
-                (void) cg_create(SYSTEMD_CGROUP_CONTROLLER, path);
-        } else
-                path = UNIT(s)->cgroup_path;
+                exec_params.cgroup_path = strjoina(UNIT(s)->cgroup_path, "/control");
+                (void) cg_create(SYSTEMD_CGROUP_CONTROLLER, exec_params.cgroup_path);
+        }
 
-        exec_params.flags |= MANAGER_IS_SYSTEM(UNIT(s)->manager) ? EXEC_NEW_KEYRING : 0;
+        /* System services should get a new keyring by default. */
+        SET_FLAG(exec_params.flags, EXEC_NEW_KEYRING, MANAGER_IS_SYSTEM(UNIT(s)->manager));
+
+        /* System D-Bus needs nss-systemd disabled, so that we don't deadlock */
+        SET_FLAG(exec_params.flags, EXEC_NSS_BYPASS_BUS,
+                 MANAGER_IS_SYSTEM(UNIT(s)->manager) && unit_has_name(UNIT(s), SPECIAL_DBUS_SERVICE));
+
         exec_params.argv = c->argv;
         exec_params.environment = final_env;
         exec_params.fds = fds;
         exec_params.fd_names = fd_names;
         exec_params.n_storage_fds = n_storage_fds;
         exec_params.n_socket_fds = n_socket_fds;
-        exec_params.cgroup_path = path;
-        exec_params.cgroup_delegate = s->cgroup_context.delegate;
         exec_params.watchdog_usec = s->watchdog_usec;
         exec_params.selinux_context_net = s->socket_fd_selinux_context_net;
         if (s->type == SERVICE_IDLE)
@@ -1495,7 +1498,13 @@ static bool service_will_restart(Service *s) {
 
 static void service_enter_dead(Service *s, ServiceResult f, bool allow_restart) {
         int r;
+
         assert(s);
+
+        /* If there's a stop job queued before we enter the DEAD state, we shouldn't act on Restart=, in order to not
+         * undo what has already been enqueued. */
+        if (unit_stop_pending(UNIT(s)))
+                allow_restart = false;
 
         if (s->result == SERVICE_SUCCESS)
                 s->result = f;
@@ -1514,7 +1523,10 @@ static void service_enter_dead(Service *s, ServiceResult f, bool allow_restart) 
                         goto fail;
 
                 service_set_state(s, SERVICE_AUTO_RESTART);
-        }
+        } else
+                /* If we shan't restart, then flush out the restart counter. But don't do that immediately, so that the
+                 * user can still introspect the counter. Do so on the next start. */
+                s->flush_n_restarts = true;
 
         /* The next restart might not be a manual stop, hence reset the flag indicating manual stops */
         s->forbid_restart = false;
@@ -1564,7 +1576,7 @@ static void service_enter_stop_post(Service *s, ServiceResult f) {
                 r = service_spawn(s,
                                   s->control_command,
                                   s->timeout_stop_usec,
-                                  EXEC_APPLY_PERMISSIONS|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_IS_CONTROL|EXEC_SETENV_RESULT,
+                                  EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_IS_CONTROL|EXEC_SETENV_RESULT,
                                   &s->control_pid);
                 if (r < 0)
                         goto fail;
@@ -1675,7 +1687,7 @@ static void service_enter_stop(Service *s, ServiceResult f) {
                 r = service_spawn(s,
                                   s->control_command,
                                   s->timeout_stop_usec,
-                                  EXEC_APPLY_PERMISSIONS|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL|EXEC_SETENV_RESULT,
+                                  EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL|EXEC_SETENV_RESULT,
                                   &s->control_pid);
                 if (r < 0)
                         goto fail;
@@ -1754,7 +1766,7 @@ static void service_enter_start_post(Service *s) {
                 r = service_spawn(s,
                                   s->control_command,
                                   s->timeout_start_usec,
-                                  EXEC_APPLY_PERMISSIONS|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL,
+                                  EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL,
                                   &s->control_pid);
                 if (r < 0)
                         goto fail;
@@ -1832,7 +1844,7 @@ static void service_enter_start(Service *s) {
         r = service_spawn(s,
                           c,
                           timeout,
-                          EXEC_PASS_FDS|EXEC_APPLY_PERMISSIONS|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_SET_WATCHDOG,
+                          EXEC_PASS_FDS|EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_SET_WATCHDOG,
                           &pid);
         if (r < 0)
                 goto fail;
@@ -1891,7 +1903,7 @@ static void service_enter_start_pre(Service *s) {
                 r = service_spawn(s,
                                   s->control_command,
                                   s->timeout_start_usec,
-                                  EXEC_APPLY_PERMISSIONS|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL|EXEC_APPLY_TTY_STDIN,
+                                  EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL|EXEC_APPLY_TTY_STDIN,
                                   &s->control_pid);
                 if (r < 0)
                         goto fail;
@@ -1932,11 +1944,26 @@ static void service_enter_restart(Service *s) {
         if (r < 0)
                 goto fail;
 
+        /* Count the jobs we enqueue for restarting. This counter is maintained as long as the unit isn't fully
+         * stopped, i.e. as long as it remains up or remains in auto-start states. The use can reset the counter
+         * explicitly however via the usual "systemctl reset-failure" logic. */
+        s->n_restarts ++;
+        s->flush_n_restarts = false;
+
+        log_struct(LOG_INFO,
+                   "MESSAGE_ID=" SD_MESSAGE_UNIT_RESTART_SCHEDULED_STR,
+                   LOG_UNIT_ID(UNIT(s)),
+                   LOG_UNIT_MESSAGE(UNIT(s), "Scheduled restart job, restart counter is at %u.", s->n_restarts),
+                   "N_RESTARTS=%u", s->n_restarts,
+                   NULL);
+
+        /* Notify clients about changed restart counter */
+        unit_add_to_dbus_queue(UNIT(s));
+
         /* Note that we stay in the SERVICE_AUTO_RESTART state here,
          * it will be canceled as part of the service_stop() call that
          * is executed as part of JOB_RESTART. */
 
-        log_unit_debug(UNIT(s), "Scheduled restart job.");
         return;
 
 fail:
@@ -1945,10 +1972,18 @@ fail:
 }
 
 static void service_enter_reload_by_notify(Service *s) {
+        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+        int r;
+
         assert(s);
 
         service_arm_timer(s, usec_add(now(CLOCK_MONOTONIC), s->timeout_start_usec));
         service_set_state(s, SERVICE_RELOAD);
+
+        /* service_enter_reload_by_notify is never called during a reload, thus no loops are possible. */
+        r = manager_propagate_reload(UNIT(s)->manager, UNIT(s), JOB_FAIL, &error);
+        if (r < 0)
+                log_unit_warning(UNIT(s), "Failed to schedule propagation of reload: %s", bus_error_message(&error, -r));
 }
 
 static void service_enter_reload(Service *s) {
@@ -1966,7 +2001,7 @@ static void service_enter_reload(Service *s) {
                 r = service_spawn(s,
                                   s->control_command,
                                   s->timeout_start_usec,
-                                  EXEC_APPLY_PERMISSIONS|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL,
+                                  EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL,
                                   &s->control_pid);
                 if (r < 0)
                         goto fail;
@@ -2004,7 +2039,7 @@ static void service_run_next_control(Service *s) {
         r = service_spawn(s,
                           s->control_command,
                           timeout,
-                          EXEC_APPLY_PERMISSIONS|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL|
+                          EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_IS_CONTROL|
                           (IN_SET(s->control_command_id, SERVICE_EXEC_START_PRE, SERVICE_EXEC_STOP_POST) ? EXEC_APPLY_TTY_STDIN : 0)|
                           (IN_SET(s->control_command_id, SERVICE_EXEC_STOP, SERVICE_EXEC_STOP_POST) ? EXEC_SETENV_RESULT : 0),
                           &s->control_pid);
@@ -2042,7 +2077,7 @@ static void service_run_next_main(Service *s) {
         r = service_spawn(s,
                           s->main_command,
                           s->timeout_start_usec,
-                          EXEC_PASS_FDS|EXEC_APPLY_PERMISSIONS|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_SET_WATCHDOG,
+                          EXEC_PASS_FDS|EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN|EXEC_SET_WATCHDOG,
                           &pid);
         if (r < 0)
                 goto fail;
@@ -2110,6 +2145,12 @@ static int service_start(Unit *u) {
 
         s->watchdog_override_enable = false;
         s->watchdog_override_usec = 0;
+
+        /* This is not an automatic restart? Flush the restart counter then */
+        if (s->flush_n_restarts) {
+                s->n_restarts = 0;
+                s->flush_n_restarts = false;
+        }
 
         service_enter_start_pre(s);
         return 1;
@@ -2262,6 +2303,9 @@ static int service_serialize(Unit *u, FILE *f, FDSet *fds) {
         unit_serialize_item(u, f, "main-pid-known", yes_no(s->main_pid_known));
         unit_serialize_item(u, f, "bus-name-good", yes_no(s->bus_name_good));
         unit_serialize_item(u, f, "bus-name-owner", s->bus_name_owner);
+
+        unit_serialize_item_format(u, f, "n-restarts", "%u", s->n_restarts);
+        unit_serialize_item(u, f, "n-restarts", yes_no(s->flush_n_restarts));
 
         r = unit_serialize_item_escaped(u, f, "status-text", s->status_text);
         if (r < 0)
@@ -2628,6 +2672,18 @@ static int service_deserialize_item(Unit *u, const char *key, const char *value,
                 r = service_deserialize_exec_command(u, key, value);
                 if (r < 0)
                         log_unit_debug_errno(u, r, "Failed to parse serialized command \"%s\": %m", value);
+
+        } else if (streq(key, "n-restarts")) {
+                r = safe_atou(value, &s->n_restarts);
+                if (r < 0)
+                        log_unit_debug_errno(u, r, "Failed to parse serialized restart counter '%s': %m", value);
+
+        } else if (streq(key, "flush-n-restarts")) {
+                r = parse_boolean(value);
+                if (r < 0)
+                        log_unit_debug_errno(u, r, "Failed to parse serialized flush restart counter setting '%s': %m", value);
+                else
+                        s->flush_n_restarts = r;
         } else
                 log_unit_debug(u, "Unknown serialization key: %s", key);
 
@@ -2864,7 +2920,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
 
                         s->main_command->exec_status = s->main_exec_status;
 
-                        if (s->main_command->ignore)
+                        if (s->main_command->flags & EXEC_COMMAND_IGNORE_FAILURE)
                                 f = SERVICE_SUCCESS;
                 } else if (s->exec_command[SERVICE_EXEC_START]) {
 
@@ -2872,7 +2928,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                          * ignore the return value if this was
                          * configured for the starter process */
 
-                        if (s->exec_command[SERVICE_EXEC_START]->ignore)
+                        if (s->exec_command[SERVICE_EXEC_START]->flags & EXEC_COMMAND_IGNORE_FAILURE)
                                 f = SERVICE_SUCCESS;
                 }
 
@@ -2899,6 +2955,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
 
                 if (s->main_command &&
                     s->main_command->command_next &&
+                    s->type == SERVICE_ONESHOT &&
                     f == SERVICE_SUCCESS) {
 
                         /* There is another command to *
@@ -2977,7 +3034,7 @@ static void service_sigchld_event(Unit *u, pid_t pid, int code, int status) {
                 if (s->control_command) {
                         exec_status_exit(&s->control_command->exec_status, &s->exec_context, pid, code, status);
 
-                        if (s->control_command->ignore)
+                        if (s->control_command->flags & EXEC_COMMAND_IGNORE_FAILURE)
                                 f = SERVICE_SUCCESS;
                 }
 
@@ -3284,7 +3341,7 @@ static void service_notify_message(Unit *u, pid_t pid, char **tags, FDSet *fds) 
                         log_unit_warning(u, "Failed to parse MAINPID= field in notification message: %s", e);
                 else if (pid == s->control_pid)
                         log_unit_warning(u, "A control process cannot also be the main process");
-                else if (pid == getpid() || pid == 1)
+                else if (pid == getpid_cached() || pid == 1)
                         log_unit_warning(u, "Service manager can't be main process, ignoring sd_notify() MAINPID= field");
                 else {
                         service_set_main_pid(s, pid);
@@ -3540,6 +3597,8 @@ static void service_reset_failed(Unit *u) {
 
         s->result = SERVICE_SUCCESS;
         s->reload_result = SERVICE_SUCCESS;
+        s->n_restarts = 0;
+        s->flush_n_restarts = false;
 }
 
 static int service_kill(Unit *u, KillWho who, int signo, sd_bus_error *error) {

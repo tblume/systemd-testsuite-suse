@@ -931,8 +931,6 @@ static void cgroup_context_apply(Unit *u, CGroupMask mask, ManagerState state) {
                                 whitelist_device(path, x, y);
 
                         whitelist_major(path, "pts", 'c', "rw");
-                        whitelist_major(path, "kdbus", 'c', "rw");
-                        whitelist_major(path, "kdbus/*", 'c', "rw");
                 }
 
                 LIST_FOREACH(device_allow, a, c->device_allow) {
@@ -951,7 +949,7 @@ static void cgroup_context_apply(Unit *u, CGroupMask mask, ManagerState state) {
 
                         acc[k++] = 0;
 
-                        if (startswith(a->path, "/dev/"))
+                        if (path_startswith(a->path, "/dev/"))
                                 whitelist_device(path, a->path, acc);
                         else if ((val = startswith(a->path, "block-")))
                                 whitelist_major(path, val, 'b', acc);
@@ -1593,7 +1591,7 @@ int unit_search_main_pid(Unit *u, pid_t *ret) {
         if (r < 0)
                 return r;
 
-        mypid = getpid();
+        mypid = getpid_cached();
         while (cg_read_pid(f, &npid) > 0)  {
                 pid_t ppid;
 

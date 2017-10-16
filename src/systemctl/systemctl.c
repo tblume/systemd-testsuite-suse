@@ -2010,7 +2010,7 @@ static void output_machines_list(struct machine_info *machine_infos, unsigned n)
 
         for (m = machine_infos; m < machine_infos + n; m++) {
                 namelen = MAX(namelen, strlen(m->name) + (m->is_host ? sizeof(" (host)") - 1 : 0));
-                statelen = MAX(statelen, m->state ? strlen(m->state) : 0);
+                statelen = MAX(statelen, strlen_ptr(m->state));
                 failedlen = MAX(failedlen, DECIMAL_STR_WIDTH(m->n_failed_units));
                 jobslen = MAX(jobslen, DECIMAL_STR_WIDTH(m->n_jobs));
 
@@ -7257,11 +7257,6 @@ static void help_states(void) {
                 puts("\nAvailable automount unit substates:");
         for (i = 0; i < _AUTOMOUNT_STATE_MAX; i++)
                 puts(automount_state_to_string(i));
-
-        if (!arg_no_legend)
-                puts("\nAvailable busname unit substates:");
-        for (i = 0; i < _BUSNAME_STATE_MAX; i++)
-                puts(busname_state_to_string(i));
 
         if (!arg_no_legend)
                 puts("\nAvailable device unit substates:");

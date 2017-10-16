@@ -26,6 +26,14 @@ m4_defines = []
 
 #####################################################################
 
+# Try to install the git pre-commit hook
+git_hook = run_command(join_paths(meson.source_root(), 'tools/add-git-hook.sh'))
+if git_hook.returncode() == 0
+        message(git_hook.stdout().strip())
+endif
+
+#####################################################################
+
 rootprefixdir = get_option('rootprefix')
 if get_option('split-usr')
         conf.set('HAVE_SPLIT_USR', true)
@@ -73,6 +81,7 @@ polkitpkladir = join_paths(localstatedir, 'lib/polkit-1/localauthority/10-vendor
 varlogdir = join_paths(localstatedir, 'log')
 xinitrcdir = join_paths(sysconfdir, 'X11/xinit/xinitrc.d')
 rpmmacrosdir = get_option('rpmmacrosdir')
+modprobedir = join_paths(prefixdir, 'lib/modprobe.d')
 
 # Our own paths
 pkgdatadir = join_paths(datadir, 'systemd')
@@ -537,6 +546,8 @@ endforeach
 ############################################################
 
 conf.set_quoted('FALLBACK_HOSTNAME', get_option('fallback-hostname'))
+conf.set10('ENABLE_COMPAT_GATEWAY_HOSTNAME', get_option('compat-gateway-hostname'))
+gateway_hostnames = ['_gateway'] + (conf.get('ENABLE_COMPAT_GATEWAY_HOSTNAME') == 1 ? ['gateway'] : [])
 
 default_hierarchy = get_option('default-hierarchy')
 conf.set_quoted('DEFAULT_HIERARCHY_NAME', default_hierarchy,
@@ -837,6 +848,23 @@ else
         libqrencode = []
 endif
 
+want_gcrypt = get_option('gcrypt')
+if want_gcrypt != 'false'
+        libgcrypt = cc.find_library('gcrypt', required : want_gcrypt == 'true')
+        libgpg_error = cc.find_library('gpg-error', required : want_gcrypt == 'true')
+
+        have_deps = libgcrypt.found() and libgpg_error.found()
+        conf.set('HAVE_GCRYPT', have_deps)
+        if not have_deps
+                # link to neither of the libs if one is not found
+                libgcrypt = []
+                libgpg_error = []
+        endif
+else
+        libgcrypt = []
+        libgpg_error = []
+endif
+
 want_gnutls = get_option('gnutls')
 if want_gnutls != 'false'
         libgnutls = dependency('gnutls',
@@ -892,6 +920,16 @@ else
         liblz4 = []
 endif
 
+want_xkbcommon = get_option('xkbcommon')
+if want_xkbcommon != 'false'
+        libxkbcommon = dependency('xkbcommon',
+                                  version : '>= 0.3.0',
+                                  required : want_xkbcommon == 'true')
+        conf.set('HAVE_XKBCOMMON', libxkbcommon.found())
+else
+        libxkbcommon = []
+endif
+
 want_glib = get_option('glib')
 if want_glib != 'false'
         libglib =    dependency('glib-2.0',
@@ -910,16 +948,6 @@ else
         libgio = []
 endif
 
-want_xkbcommon = get_option('xkbcommon')
-if want_xkbcommon != 'false'
-        libxkbcommon = dependency('xkbcommon',
-                                  version : '>= 0.3.0',
-                                  required : want_xkbcommon == 'true')
-        conf.set('HAVE_XKBCOMMON', libxkbcommon.found())
-else
-        libxkbcommon = []
-endif
-
 want_dbus = get_option('dbus')
 if want_dbus != 'false'
         libdbus = dependency('dbus-1',
@@ -928,23 +956,6 @@ if want_dbus != 'false'
         conf.set('HAVE_DBUS', libdbus.found())
 else
         libdbus = []
-endif
-
-want_gcrypt = get_option('gcrypt')
-if want_gcrypt != 'false'
-        libgcrypt = cc.find_library('gcrypt', required : want_gcrypt == 'true')
-        libgpg_error = cc.find_library('gpg-error', required : want_gcrypt == 'true')
-
-        have_deps = libgcrypt.found() and libgpg_error.found()
-        conf.set('HAVE_GCRYPT', have_deps)
-        if not have_deps
-                # link to neither of the libs if one is not found
-                libgcrypt = []
-                libgpg_error = []
-        endif
-else
-        libgcrypt = []
-        libgpg_error = []
 endif
 
 default_dnssec = get_option('default-dnssec')
@@ -1008,7 +1019,7 @@ foreach pair : [['utmp',          'HAVE_UTMP'],
                 ['rfkill',        'ENABLE_RFKILL'],
                 ['ldconfig',      'ENABLE_LDCONFIG'],
                 ['efi',           'ENABLE_EFI'],
-                ['tpm',           'SD_BOOT_LOG_TPM'],
+                ['tpm',           'ENABLE_TPM'],
                 ['ima',           'HAVE_IMA'],
                 ['smack',         'HAVE_SMACK'],
                 ['gshadow',       'ENABLE_GSHADOW'],
@@ -1025,6 +1036,8 @@ endforeach
 want_tests = get_option('tests')
 install_tests = get_option('install-tests')
 tests = []
+
+conf.set10('SYSTEMD_SLOW_TESTS_DEFAULT', get_option('slow-tests'))
 
 #####################################################################
 
@@ -2188,18 +2201,17 @@ if conf.get('ENABLE_NETWORKD', false)
                    install_rpath : rootlibexecdir,
                    install : true,
                    install_dir : rootlibexecdir)
-endif
 
-exe = executable('networkctl',
-                 networkctl_sources,
-                 include_directories : includes,
-                 link_with : [libsystemd_network,
+        exe = executable('networkctl',
+                   networkctl_sources,
+                   include_directories : includes,
+                   link_with : [libsystemd_network,
                               libshared],
-                 install_rpath : rootlibexecdir,
-                 install : true,
-                 install_dir : rootbindir)
-public_programs += [exe]
-
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootbindir)
+        public_programs += [exe]
+endif
 ############################################################
 
 foreach tuple : tests
@@ -2295,6 +2307,8 @@ install_data('xorg/50-systemd-user.sh',
              install_dir : xinitrcdir)
 install_data('system-preset/90-systemd.preset',
              install_dir : systempresetdir)
+install_data('modprobe.d/systemd.conf',
+             install_dir : modprobedir)
 install_data('README',
              'NEWS',
              'CODING_STYLE',
@@ -2324,19 +2338,19 @@ endforeach
 if git.found()
         all_files = run_command(
                 git,
-                ['--git-dir=@0@/.git'.format(meson.source_root()),
+                ['--git-dir=@0@/.git'.format(meson.current_source_dir()),
                  'ls-files',
                  ':/*.[ch]'])
         all_files = files(all_files.stdout().split())
 
-        run_target(
+        custom_target(
                 'tags',
-                input : all_files,
-                command : ['env', 'etags', '-o', '@0@/TAGS'.format(meson.source_root())] + all_files)
-        run_target(
+                output : 'tags',
+                command : ['env', 'etags', '-o', '@0@/TAGS'.format(meson.current_source_dir())] + all_files)
+        custom_target(
                 'ctags',
-                input : all_files,
-                command : ['env', 'ctags', '-o', '@0@/tags'.format(meson.source_root())] + all_files)
+                output : 'ctags',
+                command : ['env', 'ctags', '-o', '@0@/tags'.format(meson.current_source_dir())] + all_files)
 endif
 
 if git.found()
@@ -2349,17 +2363,17 @@ endif
 if git.found()
         git_head = run_command(
                 git,
-                ['--git-dir=@0@/.git'.format(meson.source_root()),
+                ['--git-dir=@0@/.git'.format(meson.current_source_dir()),
                  'rev-parse', 'HEAD']).stdout().strip()
         git_head_short = run_command(
                 git,
-                ['--git-dir=@0@/.git'.format(meson.source_root()),
+                ['--git-dir=@0@/.git'.format(meson.current_source_dir()),
                  'rev-parse', '--short=7', 'HEAD']).stdout().strip()
 
         run_target(
                 'git-snapshot',
                 command : ['git', 'archive',
-                           '-o', '@0@/systemd-@1@.tar.gz'.format(meson.source_root(),
+                           '-o', '@0@/systemd-@1@.tar.gz'.format(meson.current_source_dir(),
                                                                  git_head_short),
                            '--prefix', 'systemd-@0@/'.format(git_head),
                            'HEAD'])
@@ -2381,6 +2395,7 @@ status = [
         'PAM modules dir:                   @0@'.format(pamlibdir),
         'PAM configuration dir:             @0@'.format(pamconfdir),
         'RPM macros dir:                    @0@'.format(rpmmacrosdir),
+        'modprobe.d dir:                    @0@'.format(modprobedir),
         'D-Bus policy dir:                  @0@'.format(dbuspolicydir),
         'D-Bus session dir:                 @0@'.format(dbussessionservicedir),
         'D-Bus system dir:                  @0@'.format(dbussystemservicedir),
@@ -2399,6 +2414,7 @@ status = [
         'nobody user name:                  @0@'.format(get_option('nobody-user')),
         'nobody group name:                 @0@'.format(get_option('nobody-group')),
         'fallback hostname:                 @0@'.format(get_option('fallback-hostname')),
+        'symbolic gateway hostnames:        @0@'.format(', '.join(gateway_hostnames)),
 
         'default DNSSEC mode:               @0@'.format(default_dnssec),
         'default cgroup hierarchy:          @0@'.format(default_hierarchy),
@@ -2523,6 +2539,9 @@ foreach tuple : [
 endforeach
 
 status += [
+        '',
         'enabled features: @0@'.format(', '.join(found)),
-        'disabled features: @0@'.format(', '.join(missing))]
+        '',
+        'disabled features: @0@'.format(', '.join(missing)),
+        '']
 message('\n         '.join(status))
