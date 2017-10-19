@@ -35,6 +35,7 @@ $1.UMask,                        config_parse_mode,                  0,         
 $1.Environment,                  config_parse_environ,               0,                             offsetof($1, exec_context.environment)
 $1.EnvironmentFile,              config_parse_unit_env_file,         0,                             offsetof($1, exec_context.environment_files)
 $1.PassEnvironment,              config_parse_pass_environ,          0,                             offsetof($1, exec_context.pass_environment)
+$1.UnsetEnvironment,             config_parse_unset_environ,         0,                             offsetof($1, exec_context.unset_environment)
 $1.DynamicUser,                  config_parse_bool,                  true,                          offsetof($1, exec_context.dynamic_user)
 $1.StandardInput,                config_parse_exec_input,            0,                             offsetof($1, exec_context)
 $1.StandardOutput,               config_parse_exec_output,           0,                             offsetof($1, exec_context)
@@ -53,6 +54,7 @@ $1.CapabilityBoundingSet,        config_parse_capability_set,        0,         
 $1.AmbientCapabilities,          config_parse_capability_set,        0,                             offsetof($1, exec_context.capability_ambient_set)
 $1.TimerSlackNSec,               config_parse_nsec,                  0,                             offsetof($1, exec_context.timer_slack_nsec)
 $1.NoNewPrivileges,              config_parse_no_new_privileges,     0,                             offsetof($1, exec_context)
+$1.KeyringMode,                  config_parse_exec_keyring_mode,     0,                             offsetof($1, exec_context.keyring_mode)
 m4_ifdef(`HAVE_SECCOMP',
 `$1.SystemCallFilter,            config_parse_syscall_filter,        0,                             offsetof($1, exec_context)
 $1.SystemCallArchitectures,      config_parse_syscall_archs,         0,                             offsetof($1, exec_context.syscall_archs)
@@ -129,7 +131,7 @@ m4_ifdef(`HAVE_SELINUX',
 m4_ifdef(`HAVE_APPARMOR',
 `$1.AppArmorProfile,             config_parse_exec_apparmor_profile, 0,                             offsetof($1, exec_context)',
 `$1.AppArmorProfile,             config_parse_warn_compat,           DISABLED_CONFIGURATION,        0')
-m4_ifdef(`HAVE_SMACK',
+m4_ifdef(`ENABLE_SMACK',
 `$1.SmackProcessLabel,           config_parse_exec_smack_process_label, 0,                          offsetof($1, exec_context)',
 `$1.SmackProcessLabel,           config_parse_warn_compat,           DISABLED_CONFIGURATION,        0')'
 )m4_dnl
@@ -172,6 +174,9 @@ $1.BlockIOWriteBandwidth,        config_parse_blockio_bandwidth,     0,         
 $1.TasksAccounting,              config_parse_bool,                  0,                             offsetof($1, cgroup_context.tasks_accounting)
 $1.TasksMax,                     config_parse_tasks_max,             0,                             offsetof($1, cgroup_context.tasks_max)
 $1.Delegate,                     config_parse_bool,                  0,                             offsetof($1, cgroup_context.delegate)
+$1.IPAccounting,                 config_parse_bool,                  0,                             offsetof($1, cgroup_context.ip_accounting)
+$1.IPAddressAllow,               config_parse_ip_address_access,     0,                             offsetof($1, cgroup_context.ip_address_allow)
+$1.IPAddressDeny,                config_parse_ip_address_access,     0,                             offsetof($1, cgroup_context.ip_address_deny)
 $1.NetClass,                     config_parse_warn_compat,           DISABLED_LEGACY,               0'
 )m4_dnl
 Unit.Description,                config_parse_unit_string_printf,    0,                             offsetof(Unit, description)
@@ -204,8 +209,8 @@ Unit.OnFailureJobMode,           config_parse_job_mode,              0,         
 Unit.OnFailureIsolate,           config_parse_job_mode_isolate,      0,                             offsetof(Unit, on_failure_job_mode)
 Unit.IgnoreOnIsolate,            config_parse_bool,                  0,                             offsetof(Unit, ignore_on_isolate)
 Unit.IgnoreOnSnapshot,           config_parse_warn_compat,           DISABLED_LEGACY,               0
-Unit.JobTimeoutSec,              config_parse_sec_fix_0,             0,                             offsetof(Unit, job_timeout)
-Unit.JobRunningTimeoutSec,       config_parse_sec_fix_0,             0,                             offsetof(Unit, job_running_timeout)
+Unit.JobTimeoutSec,              config_parse_job_timeout_sec,       0,                             0
+Unit.JobRunningTimeoutSec,       config_parse_job_running_timeout_sec, 0,                           0
 Unit.JobTimeoutAction,           config_parse_emergency_action,      0,                             offsetof(Unit, job_timeout_action)
 Unit.JobTimeoutRebootArgument,   config_parse_unit_string_printf,    0,                             offsetof(Unit, job_timeout_reboot_arg)
 Unit.StartLimitIntervalSec,      config_parse_sec,                   0,                             offsetof(Unit, start_limit.interval)
@@ -351,7 +356,7 @@ Socket.FileDescriptorName,       config_parse_fdname,                0,         
 Socket.Service,                  config_parse_socket_service,        0,                             0
 Socket.TriggerLimitIntervalSec,  config_parse_sec,                   0,                             offsetof(Socket, trigger_limit.interval)
 Socket.TriggerLimitBurst,        config_parse_unsigned,              0,                             offsetof(Socket, trigger_limit.burst)
-m4_ifdef(`HAVE_SMACK',
+m4_ifdef(`ENABLE_SMACK',
 `Socket.SmackLabel,              config_parse_unit_string_printf,    0,                             offsetof(Socket, smack)
 Socket.SmackLabelIPIn,           config_parse_unit_string_printf,    0,                             offsetof(Socket, smack_ip_in)
 Socket.SmackLabelIPOut,          config_parse_unit_string_printf,    0,                             offsetof(Socket, smack_ip_out)',

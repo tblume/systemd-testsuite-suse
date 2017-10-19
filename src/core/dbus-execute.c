@@ -19,7 +19,7 @@
 
 #include <sys/prctl.h>
 
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
 #include <seccomp.h>
 #endif
 
@@ -42,7 +42,7 @@
 #include "path-util.h"
 #include "process-util.h"
 #include "rlimit-util.h"
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
 #include "seccomp-util.h"
 #endif
 #include "securebits-util.h"
@@ -53,12 +53,11 @@
 #include "utf8.h"
 
 BUS_DEFINE_PROPERTY_GET_ENUM(bus_property_get_exec_output, exec_output, ExecOutput);
-
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_exec_input, exec_input, ExecInput);
 
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_exec_utmp_mode, exec_utmp_mode, ExecUtmpMode);
-
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_exec_preserve_mode, exec_preserve_mode, ExecPreserveMode);
+static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_exec_keyring_mode, exec_keyring_mode, ExecKeyringMode);
 
 static BUS_DEFINE_PROPERTY_GET_ENUM(bus_property_get_protect_home, protect_home, ProtectHome);
 static BUS_DEFINE_PROPERTY_GET_ENUM(bus_property_get_protect_system, protect_system, ProtectSystem);
@@ -377,7 +376,7 @@ static int property_get_syscall_filter(
         _cleanup_strv_free_ char **l = NULL;
         int r;
 
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
         Iterator i;
         void *id;
 #endif
@@ -394,7 +393,7 @@ static int property_get_syscall_filter(
         if (r < 0)
                 return r;
 
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
         SET_FOREACH(id, c->syscall_filter, i) {
                 char *name;
 
@@ -430,7 +429,7 @@ static int property_get_syscall_archs(
         _cleanup_strv_free_ char **l = NULL;
         int r;
 
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
         Iterator i;
         void *id;
 #endif
@@ -439,7 +438,7 @@ static int property_get_syscall_archs(
         assert(reply);
         assert(c);
 
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
         SET_FOREACH(id, c->syscall_archs, i) {
                 const char *name;
 
@@ -758,6 +757,7 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("Environment", "as", NULL, offsetof(ExecContext, environment), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("EnvironmentFiles", "a(sb)", property_get_environment_files, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("PassEnvironment", "as", NULL, offsetof(ExecContext, pass_environment), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("UnsetEnvironment", "as", NULL, offsetof(ExecContext, unset_environment), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("UMask", "u", bus_property_get_mode, offsetof(ExecContext, umask), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("LimitCPU", "t", bus_property_get_rlimit, offsetof(ExecContext, rlimit[RLIMIT_CPU]), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("LimitCPUSoft", "t", bus_property_get_rlimit, offsetof(ExecContext, rlimit[RLIMIT_CPU]), SD_BUS_VTABLE_PROPERTY_CONST),
@@ -872,6 +872,7 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("BindPaths", "a(ssbt)", property_get_bind_paths, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("BindReadOnlyPaths", "a(ssbt)", property_get_bind_paths, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("MountAPIVFS", "b", bus_property_get_bool, offsetof(ExecContext, mount_apivfs), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("KeyringMode", "s", property_get_exec_keyring_mode, offsetof(ExecContext, keyring_mode), SD_BUS_VTABLE_PROPERTY_CONST),
 
         /* Obsolete/redundant properties: */
         SD_BUS_PROPERTY("Capabilities", "s", property_get_empty_string, 0, SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN),
@@ -1184,7 +1185,7 @@ int bus_exec_context_set_transient_property(
 
                 return 1;
 
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
 
         } else if (streq(name, "SystemCallFilter")) {
                 int whitelist;
@@ -1816,12 +1817,12 @@ int bus_exec_context_set_transient_property(
                 if (r < 0)
                         return r;
 
-                if (!strv_env_is_valid(l))
-                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid environment block.");
-
                 r = unit_full_printf_strv(u, l, &q);
                 if (r < 0)
                         return r;
+
+                if (!strv_env_is_valid(q))
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid environment block.");
 
                 if (mode != UNIT_CHECK) {
                         if (strv_length(q) == 0) {
@@ -1839,11 +1840,52 @@ int bus_exec_context_set_transient_property(
                                 c->environment = e;
 
                                 /* We write just the new settings out to file, with unresolved specifiers */
-                                joined = strv_join_quoted(q);
+                                joined = strv_join_quoted(l);
                                 if (!joined)
                                         return -ENOMEM;
 
                                 unit_write_drop_in_private_format(u, mode, name, "Environment=%s", joined);
+                        }
+                }
+
+                return 1;
+
+        } else if (streq(name, "UnsetEnvironment")) {
+
+                _cleanup_strv_free_ char **l = NULL, **q = NULL;
+
+                r = sd_bus_message_read_strv(message, &l);
+                if (r < 0)
+                        return r;
+
+                r = unit_full_printf_strv(u, l, &q);
+                if (r < 0)
+                        return r;
+
+                if (!strv_env_name_or_assignment_is_valid(q))
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid UnsetEnvironment= list.");
+
+                if (mode != UNIT_CHECK) {
+                        if (strv_length(q) == 0) {
+                                c->unset_environment = strv_free(c->unset_environment);
+                                unit_write_drop_in_private_format(u, mode, name, "UnsetEnvironment=");
+                        } else {
+                                _cleanup_free_ char *joined = NULL;
+                                char **e;
+
+                                e = strv_env_merge(2, c->unset_environment, q);
+                                if (!e)
+                                        return -ENOMEM;
+
+                                strv_free(c->unset_environment);
+                                c->unset_environment = e;
+
+                                /* We write just the new settings out to file, with unresolved specifiers */
+                                joined = strv_join_quoted(l);
+                                if (!joined)
+                                        return -ENOMEM;
+
+                                unit_write_drop_in_private_format(u, mode, name, "UnsetEnvironment=%s", joined);
                         }
                 }
 
@@ -1917,7 +1959,7 @@ int bus_exec_context_set_transient_property(
                                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Path %s is not absolute.", path);
 
                         if (mode != UNIT_CHECK) {
-                                char *buf = NULL;
+                                char *buf;
 
                                 buf = strjoin(b ? "-" : "", path);
                                 if (!buf)
@@ -1958,14 +2000,18 @@ int bus_exec_context_set_transient_property(
 
         } else if (streq(name, "PassEnvironment")) {
 
-                _cleanup_strv_free_ char **l = NULL;
+                _cleanup_strv_free_ char **l = NULL, **q = NULL;
 
                 r = sd_bus_message_read_strv(message, &l);
                 if (r < 0)
                         return r;
 
-                if (!strv_env_name_is_valid(l))
-                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid PassEnvironment block.");
+                r = unit_full_printf_strv(u, l, &q);
+                if (r < 0)
+                        return r;
+
+                if (!strv_env_name_is_valid(q))
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid PassEnvironment= block.");
 
                 if (mode != UNIT_CHECK) {
                         if (strv_isempty(l)) {
@@ -1974,11 +2020,12 @@ int bus_exec_context_set_transient_property(
                         } else {
                                 _cleanup_free_ char *joined = NULL;
 
-                                r = strv_extend_strv(&c->pass_environment, l, true);
+                                r = strv_extend_strv(&c->pass_environment, q, true);
                                 if (r < 0)
                                         return r;
 
-                                joined = strv_join_quoted(c->pass_environment);
+                                /* We write just the new settings out to file, with unresolved specifiers. */
+                                joined = strv_join_quoted(l);
                                 if (!joined)
                                         return -ENOMEM;
 
@@ -2092,6 +2139,27 @@ int bus_exec_context_set_transient_property(
 
                 return 1;
 
+        } else if (streq(name, "KeyringMode")) {
+
+                const char *s;
+                ExecKeyringMode m;
+
+                r = sd_bus_message_read(message, "s", &s);
+                if (r < 0)
+                        return r;
+
+                m = exec_keyring_mode_from_string(s);
+                if (m < 0)
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid keyring mode");
+
+                if (mode != UNIT_CHECK) {
+                        c->keyring_mode = m;
+
+                        unit_write_drop_in_private_format(u, mode, name, "KeyringMode=%s", exec_keyring_mode_to_string(m));
+                }
+
+                return 1;
+
         } else if (streq(name, "RuntimeDirectoryPreserve")) {
                 const char *s;
                 ExecPreserveMode m;
@@ -2125,7 +2193,7 @@ int bus_exec_context_set_transient_property(
                         if (streq(name, "UMask"))
                                 c->umask = m;
                         else
-                                for (i = 0; i < _EXEC_DIRECTORY_MAX; i++)
+                                for (i = 0; i < _EXEC_DIRECTORY_TYPE_MAX; i++)
                                         if (startswith(name, exec_directory_type_to_string(i))) {
                                                 c->directories[i].mode = m;
                                                 break;
@@ -2145,8 +2213,8 @@ int bus_exec_context_set_transient_property(
                         return r;
 
                 STRV_FOREACH(p, l) {
-                        if (!filename_is_valid(*p))
-                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "%s is not valid %s", name, *p);
+                        if (!path_is_safe(*p) || path_is_absolute(*p))
+                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "%s= path is not valid: %s", name, *p);
                 }
 
                 if (mode != UNIT_CHECK) {
@@ -2154,7 +2222,7 @@ int bus_exec_context_set_transient_property(
                         char ***dirs = NULL;
                         ExecDirectoryType i;
 
-                        for (i = 0; i < _EXEC_DIRECTORY_MAX; i++)
+                        for (i = 0; i < _EXEC_DIRECTORY_TYPE_MAX; i++)
                                 if (streq(name, exec_directory_type_to_string(i))) {
                                         dirs = &c->directories[i].paths;
                                         break;
@@ -2167,7 +2235,6 @@ int bus_exec_context_set_transient_property(
                                 unit_write_drop_in_private_format(u, mode, name, "%s=", name);
                         } else {
                                 r = strv_extend_strv(dirs, l, true);
-
                                 if (r < 0)
                                         return -ENOMEM;
 

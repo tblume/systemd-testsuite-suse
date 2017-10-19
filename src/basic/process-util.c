@@ -34,7 +34,7 @@
 #include <sys/wait.h>
 #include <syslog.h>
 #include <unistd.h>
-#ifdef HAVE_VALGRIND_VALGRIND_H
+#if HAVE_VALGRIND_VALGRIND_H
 #include <valgrind/valgrind.h>
 #endif
 
@@ -392,7 +392,7 @@ int is_kernel_thread(pid_t pid) {
         bool eof;
         FILE *f;
 
-        if (pid == 0 || pid == 1 || pid == getpid_cached()) /* pid 1, and we ourselves certainly aren't a kernel thread */
+        if (IN_SET(pid, 0, 1) || pid == getpid_cached()) /* pid 1, and we ourselves certainly aren't a kernel thread */
                 return 0;
 
         assert(pid > 1);
@@ -688,8 +688,7 @@ int wait_for_terminate_and_warn(const char *name, pid_t pid, bool check_exit_cod
                         log_debug("%s succeeded.", name);
 
                 return status.si_status;
-        } else if (status.si_code == CLD_KILLED ||
-                   status.si_code == CLD_DUMPED) {
+        } else if (IN_SET(status.si_code, CLD_KILLED, CLD_DUMPED)) {
 
                 log_warning("%s terminated by signal %s.", name, signal_to_string(status.si_status));
                 return -EPROTO;
@@ -818,7 +817,7 @@ bool pid_is_alive(pid_t pid) {
                 return true;
 
         r = get_process_state(pid);
-        if (r == -ESRCH || r == 'Z')
+        if (IN_SET(r, -ESRCH, 'Z'))
                 return false;
 
         return true;
@@ -904,6 +903,28 @@ const char* personality_to_string(unsigned long p) {
         return architecture_to_string(architecture);
 }
 
+int safe_personality(unsigned long p) {
+        int ret;
+
+        /* So here's the deal, personality() is weirdly defined by glibc. In some cases it returns a failure via errno,
+         * and in others as negative return value containing an errno-like value. Let's work around this: this is a
+         * wrapper that uses errno if it is set, and uses the return value otherwise. And then it sets both errno and
+         * the return value indicating the same issue, so that we are definitely on the safe side.
+         *
+         * See https://github.com/systemd/systemd/issues/6737 */
+
+        errno = 0;
+        ret = personality(p);
+        if (ret < 0) {
+                if (errno != 0)
+                        return -errno;
+
+                errno = -ret;
+        }
+
+        return ret;
+}
+
 int opinionated_personality(unsigned long *ret) {
         int current;
 
@@ -911,9 +932,9 @@ int opinionated_personality(unsigned long *ret) {
          * opinionated though, and ignores all the finer-grained bits and exotic personalities, only distinguishing the
          * two most relevant personalities: PER_LINUX and PER_LINUX32. */
 
-        current = personality(PERSONALITY_INVALID);
+        current = safe_personality(PERSONALITY_INVALID);
         if (current < 0)
-                return -errno;
+                return current;
 
         if (((unsigned long) current & 0xffff) == PER_LINUX32)
                 *ret = PER_LINUX32;
@@ -924,7 +945,7 @@ int opinionated_personality(unsigned long *ret) {
 }
 
 void valgrind_summary_hack(void) {
-#ifdef HAVE_VALGRIND_VALGRIND_H
+#if HAVE_VALGRIND_VALGRIND_H
         if (getpid_cached() == 1 && RUNNING_ON_VALGRIND) {
                 pid_t pid;
                 pid = raw_clone(SIGCHLD);
@@ -1001,7 +1022,7 @@ pid_t getpid_cached(void) {
          * objects were used across fork()s. With this caching the old behaviour is somewhat restored.
          *
          * https://bugzilla.redhat.com/show_bug.cgi?id=1443976
-         * https://sourceware.org/git/gitweb.cgi?p=glibc.git;h=1d2bc2eae969543b89850e35e532f3144122d80a
+         * https://sourceware.org/git/gitweb.cgi?p=glibc.git;h=c579f48edba88380635ab98cb612030e3ed8691e
          */
 
         current_value = __sync_val_compare_and_swap(&cached_pid, CACHED_PID_UNSET, CACHED_PID_BUSY);

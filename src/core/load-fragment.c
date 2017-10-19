@@ -22,7 +22,7 @@
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <linux/oom.h>
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
 #include <seccomp.h>
 #endif
 #include <sched.h>
@@ -54,7 +54,7 @@
 #include "path-util.h"
 #include "process-util.h"
 #include "rlimit-util.h"
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
 #include "seccomp-util.h"
 #endif
 #include "securebits.h"
@@ -282,6 +282,11 @@ int config_parse_unit_path_strv_printf(
         assert(lvalue);
         assert(rvalue);
         assert(u);
+
+        if (isempty(rvalue)) {
+                *x = strv_free(*x);
+                return 0;
+        }
 
         for (p = rvalue;;) {
                 _cleanup_free_ char *word = NULL, *k = NULL;
@@ -1174,14 +1179,16 @@ int config_parse_capability_set(
                 return 0;
         }
 
-        sum = invert ? ~sum : sum;
-
         if (sum == 0 || *capability_set == initial)
-                /* "" or uninitialized data -> replace */
-                *capability_set = sum;
-        else
+                /* "", "~" or uninitialized data -> replace */
+                *capability_set = invert ? ~sum : sum;
+        else {
                 /* previous data -> merge */
-                *capability_set |= sum;
+                if (invert)
+                        *capability_set &= ~sum;
+                else
+                        *capability_set |= sum;
+        }
 
         return 0;
 }
@@ -1227,7 +1234,7 @@ int config_parse_limit(
         return 0;
 }
 
-#ifdef HAVE_SYSV_COMPAT
+#if HAVE_SYSV_COMPAT
 int config_parse_sysv_priority(const char *unit,
                                const char *filename,
                                unsigned line,
@@ -1949,15 +1956,7 @@ int config_parse_user_group_strv(
         assert(u);
 
         if (isempty(rvalue)) {
-                char **empty;
-
-                empty = new0(char*, 1);
-                if (!empty)
-                        return log_oom();
-
-                strv_free(*users);
-                *users = empty;
-
+                *users = strv_free(*users);
                 return 0;
         }
 
@@ -2106,16 +2105,17 @@ int config_parse_unit_env_file(const char *unit,
         return 0;
 }
 
-int config_parse_environ(const char *unit,
-                         const char *filename,
-                         unsigned line,
-                         const char *section,
-                         unsigned section_line,
-                         const char *lvalue,
-                         int ltype,
-                         const char *rvalue,
-                         void *data,
-                         void *userdata) {
+int config_parse_environ(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
 
         Unit *u = userdata;
         char ***env = data;
@@ -2151,7 +2151,7 @@ int config_parse_environ(const char *unit,
                         r = unit_full_printf(u, word, &k);
                         if (r < 0) {
                                 log_syntax(unit, LOG_ERR, filename, line, r,
-                                           "Failed to resolve specifiers, ignoring: %s", k);
+                                           "Failed to resolve specifiers, ignoring: %s", word);
                                 continue;
                         }
                 } else {
@@ -2168,25 +2168,28 @@ int config_parse_environ(const char *unit,
                 r = strv_env_replace(env, k);
                 if (r < 0)
                         return log_oom();
+
                 k = NULL;
         }
 }
 
-int config_parse_pass_environ(const char *unit,
-                              const char *filename,
-                              unsigned line,
-                              const char *section,
-                              unsigned section_line,
-                              const char *lvalue,
-                              int ltype,
-                              const char *rvalue,
-                              void *data,
-                              void *userdata) {
+int config_parse_pass_environ(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
 
         const char *whole_rvalue = rvalue;
-        char*** passenv = data;
         _cleanup_strv_free_ char **n = NULL;
         size_t nlen = 0, nbufsize = 0;
+        char*** passenv = data;
+        Unit *u = userdata;
         int r;
 
         assert(filename);
@@ -2201,7 +2204,7 @@ int config_parse_pass_environ(const char *unit,
         }
 
         for (;;) {
-                _cleanup_free_ char *word = NULL;
+                _cleanup_free_ char *word = NULL, *k = NULL;
 
                 r = extract_first_word(&rvalue, &word, NULL, EXTRACT_QUOTES);
                 if (r == 0)
@@ -2214,21 +2217,113 @@ int config_parse_pass_environ(const char *unit,
                         break;
                 }
 
-                if (!env_name_is_valid(word)) {
-                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                                   "Invalid environment name for %s, ignoring: %s", lvalue, word);
+                if (u) {
+                        r = unit_full_printf(u, word, &k);
+                        if (r < 0) {
+                                log_syntax(unit, LOG_ERR, filename, line, r,
+                                           "Failed to resolve specifiers, ignoring: %s", word);
+                                continue;
+                        }
+                } else {
+                        k = word;
+                        word = NULL;
+                }
+
+                if (!env_name_is_valid(k)) {
+                        log_syntax(unit, LOG_ERR, filename, line, 0,
+                                   "Invalid environment name for %s, ignoring: %s", lvalue, k);
                         continue;
                 }
 
                 if (!GREEDY_REALLOC(n, nbufsize, nlen + 2))
                         return log_oom();
-                n[nlen++] = word;
+
+                n[nlen++] = k;
                 n[nlen] = NULL;
-                word = NULL;
+                k = NULL;
         }
 
         if (n) {
                 r = strv_extend_strv(passenv, n, true);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
+}
+
+int config_parse_unset_environ(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        _cleanup_strv_free_ char **n = NULL;
+        const char *whole_rvalue = rvalue;
+        size_t nlen = 0, nbufsize = 0;
+        char*** unsetenv = data;
+        Unit *u = userdata;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                /* Empty assignment resets the list */
+                *unsetenv = strv_free(*unsetenv);
+                return 0;
+        }
+
+        for (;;) {
+                _cleanup_free_ char *word = NULL, *k = NULL;
+
+                r = extract_first_word(&rvalue, &word, NULL, EXTRACT_QUOTES);
+                if (r == 0)
+                        break;
+                if (r == -ENOMEM)
+                        return log_oom();
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r,
+                                   "Trailing garbage in %s, ignoring: %s", lvalue, whole_rvalue);
+                        break;
+                }
+
+                if (u) {
+                        r = unit_full_printf(u, word, &k);
+                        if (r < 0) {
+                                log_syntax(unit, LOG_ERR, filename, line, r,
+                                           "Failed to resolve specifiers, ignoring: %s", word);
+                                continue;
+                        }
+                } else {
+                        k = word;
+                        word = NULL;
+                }
+
+                if (!env_assignment_is_valid(k) && !env_name_is_valid(k)) {
+                        log_syntax(unit, LOG_ERR, filename, line, 0,
+                                   "Invalid environment name or assignment %s, ignoring: %s", lvalue, k);
+                        continue;
+                }
+
+                if (!GREEDY_REALLOC(n, nbufsize, nlen + 2))
+                        return log_oom();
+
+                n[nlen++] = k;
+                n[nlen] = NULL;
+                k = NULL;
+        }
+
+        if (n) {
+                r = strv_extend_strv(unsetenv, n, true);
                 if (r < 0)
                         return r;
         }
@@ -2528,7 +2623,7 @@ int config_parse_documentation(const char *unit,
         return r;
 }
 
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
 
 static int syscall_filter_parse_one(
                 const char *unit,
@@ -3603,8 +3698,6 @@ int config_parse_exec_directories(
                 _cleanup_free_ char *word = NULL, *k = NULL;
 
                 r = extract_first_word(&p, &word, NULL, EXTRACT_QUOTES);
-                if (r == 0)
-                        return 0;
                 if (r == -ENOMEM)
                         return log_oom();
                 if (r < 0) {
@@ -3612,6 +3705,8 @@ int config_parse_exec_directories(
                                    "Invalid syntax, ignoring: %s", rvalue);
                         return 0;
                 }
+                if (r == 0)
+                        return 0;
 
                 r = unit_full_printf(u, word, &k);
                 if (r < 0) {
@@ -3622,7 +3717,7 @@ int config_parse_exec_directories(
 
                 if (!path_is_safe(k) || path_is_absolute(k)) {
                         log_syntax(unit, LOG_ERR, filename, line, 0,
-                                   "%s is not valid, ignoring assignment: %s", lvalue, rvalue);
+                                   "%s= path is not valid, ignoring assignment: %s", lvalue, rvalue);
                         continue;
                 }
 
@@ -4048,6 +4143,80 @@ int config_parse_protect_system(
         return 0;
 }
 
+DEFINE_CONFIG_PARSE_ENUM(config_parse_exec_keyring_mode, exec_keyring_mode, ExecKeyringMode, "Failed to parse keyring mode");
+
+int config_parse_job_timeout_sec(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Unit *u = data;
+        usec_t usec;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(u);
+
+        r = parse_sec_fix_0(rvalue, &usec);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse JobTimeoutSec= parameter, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        /* If the user explicitly changed JobTimeoutSec= also change JobRunningTimeoutSec=, for compatibility with old
+         * versions. If JobRunningTimeoutSec= was explicitly set, avoid this however as whatever the user picked should
+         * count. */
+
+        if (!u->job_running_timeout_set)
+                u->job_running_timeout = usec;
+
+        u->job_timeout = usec;
+
+        return 0;
+}
+
+int config_parse_job_running_timeout_sec(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        Unit *u = data;
+        usec_t usec;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(u);
+
+        r = parse_sec_fix_0(rvalue, &usec);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse JobRunningTimeoutSec= parameter, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        u->job_running_timeout = usec;
+        u->job_running_timeout_set = true;
+
+        return 0;
+}
+
 #define FOLLOW_MAX 8
 
 static int open_follow(char **filename, FILE **_f, Set *names, char **_final) {
@@ -4387,7 +4556,7 @@ void unit_dump_config_items(FILE *f) {
                 const ConfigParserCallback callback;
                 const char *rvalue;
         } table[] = {
-#if !defined(HAVE_SYSV_COMPAT) || !defined(HAVE_SECCOMP) || !defined(HAVE_PAM) || !defined(HAVE_SELINUX) || !defined(HAVE_SMACK) || !defined(HAVE_APPARMOR)
+#if !HAVE_SYSV_COMPAT || !HAVE_SECCOMP || !HAVE_PAM || !HAVE_SELINUX || !ENABLE_SMACK || !HAVE_APPARMOR
                 { config_parse_warn_compat,           "NOTSUPPORTED" },
 #endif
                 { config_parse_int,                   "INTEGER" },
@@ -4420,7 +4589,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_exec,                  "PATH [ARGUMENT [...]]" },
                 { config_parse_service_type,          "SERVICETYPE" },
                 { config_parse_service_restart,       "SERVICERESTART" },
-#ifdef HAVE_SYSV_COMPAT
+#if HAVE_SYSV_COMPAT
                 { config_parse_sysv_priority,         "SYSVPRIORITY" },
 #endif
                 { config_parse_kill_mode,             "KILLMODE" },
@@ -4450,7 +4619,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_set_status,            "STATUS" },
                 { config_parse_service_sockets,       "SOCKETS" },
                 { config_parse_environ,               "ENVIRON" },
-#ifdef HAVE_SECCOMP
+#if HAVE_SECCOMP
                 { config_parse_syscall_filter,        "SYSCALLS" },
                 { config_parse_syscall_archs,         "ARCHS" },
                 { config_parse_syscall_errno,         "ERRNO" },
@@ -4470,7 +4639,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_blockio_device_weight, "DEVICEWEIGHT" },
                 { config_parse_long,                  "LONG" },
                 { config_parse_socket_service,        "SERVICE" },
-#ifdef HAVE_SELINUX
+#if HAVE_SELINUX
                 { config_parse_exec_selinux_context,  "LABEL" },
 #endif
                 { config_parse_job_mode,              "MODE" },

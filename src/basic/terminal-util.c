@@ -246,7 +246,6 @@ int ask_string(char **ret, const char *text, ...) {
 int reset_terminal_fd(int fd, bool switch_to_text) {
         struct termios termios;
         _cleanup_free_ char *utf8 = NULL;
-        int kb;
         int r = 0;
 
         /* Set terminal to some sane defaults */
@@ -265,11 +264,7 @@ int reset_terminal_fd(int fd, bool switch_to_text) {
                 (void) ioctl(fd, KDSETMODE, KD_TEXT);
 
         /* Set default keyboard mode */
-        if (read_one_line_file("/sys/module/vt/parameters/default_utf8", &utf8) >= 0 && parse_boolean(utf8) == 0)
-                kb = K_XLATE;
-        else
-                kb = K_UNICODE;
-        (void) ioctl(fd, KDSKBMODE, kb);
+        (void) vt_reset_keyboard(fd);
 
         if (tcgetattr(fd, &termios) < 0) {
                 r = -errno;
@@ -481,7 +476,7 @@ int acquire_terminal(
 
                         l = read(notify, &buffer, sizeof(buffer));
                         if (l < 0) {
-                                if (errno == EINTR || errno == EAGAIN)
+                                if (IN_SET(errno, EINTR, EAGAIN))
                                         continue;
 
                                 r = -errno;
@@ -1231,4 +1226,45 @@ bool colors_enabled(void) {
         }
 
         return enabled;
+}
+
+bool underline_enabled(void) {
+        static int enabled = -1;
+
+        if (enabled < 0) {
+
+                /* The Linux console doesn't support underlining, turn it off, but only there. */
+
+                if (!colors_enabled())
+                        enabled = false;
+                else
+                        enabled = !streq_ptr(getenv("TERM"), "linux");
+        }
+
+        return enabled;
+}
+
+int vt_default_utf8(void) {
+        _cleanup_free_ char *b = NULL;
+        int r;
+
+        /* Read the default VT UTF8 setting from the kernel */
+
+        r = read_one_line_file("/sys/module/vt/parameters/default_utf8", &b);
+        if (r < 0)
+                return r;
+
+        return parse_boolean(b);
+}
+
+int vt_reset_keyboard(int fd) {
+        int kb;
+
+        /* If we can't read the default, then default to unicode. It's 2017 after all. */
+        kb = vt_default_utf8() != 0 ? K_UNICODE : K_XLATE;
+
+        if (ioctl(fd, KDSKBMODE, kb) < 0)
+                return -errno;
+
+        return 0;
 }

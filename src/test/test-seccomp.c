@@ -584,49 +584,62 @@ static void test_lock_personality(void) {
         if (pid == 0) {
                 assert_se(seccomp_lock_personality(current) >= 0);
 
-                assert_se((unsigned long) personality(current) == current);
+                assert_se((unsigned long) safe_personality(current) == current);
 
-                errno = EUCLEAN;
-                assert_se(personality(PER_LINUX | ADDR_NO_RANDOMIZE) == -1 && errno == EPERM);
+                /* Note, we also test that safe_personality() works correctly, by checkig whether errno is properly
+                 * set, in addition to the return value */
+                errno = 0;
+                assert_se(safe_personality(PER_LINUX | ADDR_NO_RANDOMIZE) == -EPERM);
+                assert_se(errno == EPERM);
 
-                errno = EUCLEAN;
-                assert_se(personality(PER_LINUX | MMAP_PAGE_ZERO) == -1 && errno == EPERM);
+                assert_se(safe_personality(PER_LINUX | MMAP_PAGE_ZERO) == -EPERM);
+                assert_se(safe_personality(PER_LINUX | ADDR_COMPAT_LAYOUT) == -EPERM);
+                assert_se(safe_personality(PER_LINUX | READ_IMPLIES_EXEC) == -EPERM);
+                assert_se(safe_personality(PER_LINUX_32BIT) == -EPERM);
+                assert_se(safe_personality(PER_SVR4) == -EPERM);
+                assert_se(safe_personality(PER_BSD) == -EPERM);
+                assert_se(safe_personality(current == PER_LINUX ? PER_LINUX32 : PER_LINUX) == -EPERM);
+                assert_se(safe_personality(PER_LINUX32_3GB) == -EPERM);
+                assert_se(safe_personality(PER_UW7) == -EPERM);
+                assert_se(safe_personality(0x42) == -EPERM);
 
-                errno = EUCLEAN;
-                assert_se(personality(PER_LINUX | ADDR_COMPAT_LAYOUT) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(PER_LINUX | READ_IMPLIES_EXEC) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(PER_LINUX_32BIT) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(PER_SVR4) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(PER_BSD) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(current == PER_LINUX ? PER_LINUX32 : PER_LINUX) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(PER_LINUX32_3GB) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(PER_UW7) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(0x42) == -1 && errno == EPERM);
-
-                errno = EUCLEAN;
-                assert_se(personality(PERSONALITY_INVALID) == -1 && errno == EPERM); /* maybe remove this later */
+                assert_se(safe_personality(PERSONALITY_INVALID) == -EPERM); /* maybe remove this later */
 
                 assert_se((unsigned long) personality(current) == current);
                 _exit(EXIT_SUCCESS);
         }
 
         assert_se(wait_for_terminate_and_warn("lockpersonalityseccomp", pid, true) == EXIT_SUCCESS);
+}
+
+static void test_filter_sets_ordered(void) {
+        size_t i;
+
+        /* Ensure "@default" always remains at the beginning of the list */
+        assert_se(SYSCALL_FILTER_SET_DEFAULT == 0);
+        assert_se(streq(syscall_filter_sets[0].name, "@default"));
+
+        for (i = 0; i < _SYSCALL_FILTER_SET_MAX; i++) {
+                const char *k, *p = NULL;
+
+                /* Make sure each group has a description */
+                assert_se(!isempty(syscall_filter_sets[0].help));
+
+                /* Make sure the groups are ordered alphabetically, except for the first entry */
+                assert_se(i < 2 || strcmp(syscall_filter_sets[i-1].name, syscall_filter_sets[i].name) < 0);
+
+                NULSTR_FOREACH(k, syscall_filter_sets[i].value) {
+
+                        /* Ensure each syscall list is in itself ordered, but groups before names */
+                        assert_se(!p ||
+                                  (*p == '@' && *k != '@') ||
+                                  (((*p == '@' && *k == '@') ||
+                                    (*p != '@' && *k != '@')) &&
+                                   strcmp(p, k) < 0));
+
+                        p = k;
+                }
+        }
 }
 
 int main(int argc, char *argv[]) {
@@ -646,6 +659,7 @@ int main(int argc, char *argv[]) {
         test_restrict_archs();
         test_load_syscall_filter_set_raw();
         test_lock_personality();
+        test_filter_sets_ordered();
 
         return 0;
 }

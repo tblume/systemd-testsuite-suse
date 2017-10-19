@@ -183,7 +183,7 @@ static int server_process_entry(
                         break;
                 }
 
-                if (*p == '.' || *p == '#') {
+                if (IN_SET(*p, '.', '#')) {
                         /* Ignore control commands for now, and
                          * comments too. */
                         *remaining -= (e - p) + 1;
@@ -282,7 +282,7 @@ static int server_process_entry(
         }
 
         tn = n++;
-        IOVEC_SET_STRING(iovec[tn], "_TRANSPORT=journal");
+        iovec[tn] = IOVEC_MAKE_STRING("_TRANSPORT=journal");
         entry_size += strlen("_TRANSPORT=journal");
 
         if (entry_size + n + 1 > ENTRY_SIZE_MAX) { /* data + separators + trailer */
@@ -521,7 +521,7 @@ int server_open_native_socket(Server*s) {
         if (r < 0)
                 return log_error_errno(errno, "SO_PASSCRED failed: %m");
 
-#ifdef HAVE_SELINUX
+#if HAVE_SELINUX
         if (mac_selinux_use()) {
                 r = setsockopt(s->native_fd, SOL_SOCKET, SO_PASSSEC, &one, sizeof(one));
                 if (r < 0)

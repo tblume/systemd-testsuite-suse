@@ -27,6 +27,7 @@
 #include "bus-error.h"
 #include "bus-kernel.h"
 #include "bus-match.h"
+#include "def.h"
 #include "hashmap.h"
 #include "list.h"
 #include "prioq.h"
@@ -52,7 +53,6 @@ struct filter_callback {
 struct match_callback {
         sd_bus_message_handler_t callback;
 
-        uint64_t cookie;
         unsigned last_iteration;
 
         char *match_string;
@@ -286,8 +286,6 @@ struct sd_bus {
         uint64_t hello_flags;
         uint64_t attach_flags;
 
-        uint64_t match_cookie;
-
         sd_event_source *input_io_event_source;
         sd_event_source *output_io_event_source;
         sd_event_source *time_event_source;
@@ -307,16 +305,18 @@ struct sd_bus {
 
         char *description;
 
-        size_t bloom_size;
-        unsigned bloom_n_hash;
-
         sd_bus_track *track_queue;
 
         LIST_HEAD(sd_bus_slot, slots);
         LIST_HEAD(sd_bus_track, tracks);
 };
 
+/* For method calls we time-out at 25s, like in the D-Bus reference implementation */
 #define BUS_DEFAULT_TIMEOUT ((usec_t) (25 * USEC_PER_SEC))
+
+/* For the authentication phase we grant 90s, to provide extra room during boot, when RNGs and such are not filled up
+ * with enough entropy yet and might delay the boot */
+#define BUS_AUTH_TIMEOUT ((usec_t) DEFAULT_TIMEOUT_USEC)
 
 #define BUS_WQUEUE_MAX (192*1024)
 #define BUS_RQUEUE_MAX (192*1024)

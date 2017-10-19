@@ -707,7 +707,7 @@ char **replace_env_argv(char **argv, char **env) {
         STRV_FOREACH(i, argv) {
 
                 /* If $FOO appears as single word, replace it by the split up variable */
-                if ((*i)[0] == '$' && (*i)[1] != '{' && (*i)[1] != '$') {
+                if ((*i)[0] == '$' && !IN_SET((*i)[1], '{', '$')) {
                         char *e;
                         char **w, **m = NULL;
                         unsigned q;
@@ -769,6 +769,16 @@ int getenv_bool(const char *p) {
         return parse_boolean(e);
 }
 
+int getenv_bool_secure(const char *p) {
+        const char *e;
+
+        e = secure_getenv(p);
+        if (!e)
+                return -ENXIO;
+
+        return parse_boolean(e);
+}
+
 int serialize_environment(FILE *f, char **environment) {
         char **e;
 
@@ -795,14 +805,9 @@ int deserialize_environment(char ***environment, const char *line) {
         assert(environment);
 
         assert(startswith(line, "env="));
-        r = cunescape(line + 4, UNESCAPE_RELAX, &uce);
+        r = cunescape(line + 4, 0, &uce);
         if (r < 0)
                 return r;
-
-        if (!env_assignment_is_valid(uce)) {
-                free(uce);
-                return -EINVAL;
-        }
 
         return strv_env_replace(environment, uce);
 }

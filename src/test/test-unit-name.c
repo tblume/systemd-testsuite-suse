@@ -211,7 +211,7 @@ static int test_unit_printf(void) {
         assert_se(get_home_dir(&home) >= 0);
         assert_se(get_shell(&shell) >= 0);
 
-        r = manager_new(UNIT_FILE_USER, true, &m);
+        r = manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_MINIMAL, &m);
         if (MANAGER_SKIP_TEST(r)) {
                 log_notice_errno(r, "Skipping test: manager_new: %m");
                 return EXIT_TEST_SKIP;
@@ -237,7 +237,8 @@ static int test_unit_printf(void) {
         /* general tests */
         expect(u, "%%", "%");
         expect(u, "%%s", "%s");
-        expect(u, "%", "");    // REALLY?
+        expect(u, "%,", "%,");
+        expect(u, "%", "%");
 
         /* normal unit */
         expect(u, "%n", "blah.service");
@@ -464,12 +465,16 @@ static void test_unit_name_path_unescape(void) {
 
 int main(int argc, char* argv[]) {
         _cleanup_(rm_rf_physical_and_freep) char *runtime_dir = NULL;
-        int rc = 0;
+        int r, rc = 0;
 
         log_parse_environment();
         log_open();
 
-        enter_cgroup_subroot();
+        r = enter_cgroup_subroot();
+        if (r == -ENOMEDIUM) {
+                log_notice_errno(r, "Skipping test: cgroupfs not available");
+                return EXIT_TEST_SKIP;
+        }
 
         assert_se(runtime_dir = setup_fake_runtime_dir());
 

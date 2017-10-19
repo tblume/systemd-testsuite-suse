@@ -55,7 +55,7 @@ static int test_unit_file_get_set(void) {
 
         r = unit_file_get_list(UNIT_FILE_SYSTEM, NULL, h, NULL, NULL);
 
-        if (r == -EPERM || r == -EACCES) {
+        if (IN_SET(r, -EPERM, -EACCES)) {
                 log_notice_errno(r, "Skipping test: unit_file_get_list: %m");
                 return EXIT_TEST_SKIP;
         }
@@ -115,7 +115,7 @@ static void test_config_parse_exec(void) {
         Manager *m = NULL;
         Unit *u = NULL;
 
-        r = manager_new(UNIT_FILE_USER, true, &m);
+        r = manager_new(UNIT_FILE_USER, MANAGER_TEST_RUN_MINIMAL, &m);
         if (MANAGER_SKIP_TEST(r)) {
                 log_notice_errno(r, "Skipping test: manager_new: %m");
                 return;
@@ -670,6 +670,12 @@ static void test_config_parse_capability_set(void) {
         assert_se(capability_bounding_set == (make_cap(CAP_NET_RAW) | make_cap(CAP_NET_ADMIN)));
 
         r = config_parse_capability_set(NULL, "fake", 1, "section", 1,
+                              "CapabilityBoundingSet", 0, "~CAP_NET_ADMIN",
+                              &capability_bounding_set, NULL);
+        assert_se(r >= 0);
+        assert_se(capability_bounding_set == make_cap(CAP_NET_RAW));
+
+        r = config_parse_capability_set(NULL, "fake", 1, "section", 1,
                               "CapabilityBoundingSet", 0, "",
                               &capability_bounding_set, NULL);
         assert_se(r >= 0);
@@ -852,7 +858,11 @@ int main(int argc, char *argv[]) {
         log_parse_environment();
         log_open();
 
-        enter_cgroup_subroot();
+        r = enter_cgroup_subroot();
+        if (r == -ENOMEDIUM) {
+                log_notice_errno(r, "Skipping test: cgroupfs not available");
+                return EXIT_TEST_SKIP;
+        }
 
         assert_se(runtime_dir = setup_fake_runtime_dir());
 

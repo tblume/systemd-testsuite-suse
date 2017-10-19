@@ -56,7 +56,7 @@
 #define log_debug_bus_message(m)                                         \
         do {                                                             \
                 sd_bus_message *_mm = (m);                               \
-                log_debug("Got message type=%s sender=%s destination=%s object=%s interface=%s member=%s cookie=%" PRIu64 " reply_cookie=%" PRIu64 " error=%s", \
+                log_debug("Got message type=%s sender=%s destination=%s object=%s interface=%s member=%s cookie=%" PRIu64 " reply_cookie=%" PRIu64 " error-name=%s error-message=%s", \
                           bus_message_type_to_string(_mm->header->type), \
                           strna(sd_bus_message_get_sender(_mm)),         \
                           strna(sd_bus_message_get_destination(_mm)),    \
@@ -65,6 +65,7 @@
                           strna(sd_bus_message_get_member(_mm)),         \
                           BUS_MESSAGE_COOKIE(_mm),                       \
                           _mm->reply_cookie,                             \
+                          strna(_mm->error.name),                        \
                           strna(_mm->error.message));                    \
         } while (false)
 
@@ -382,7 +383,7 @@ static int hello_callback(sd_bus_message *reply, void *userdata, sd_bus_error *e
         assert(reply);
         bus = reply->bus;
         assert(bus);
-        assert(bus->state == BUS_HELLO || bus->state == BUS_CLOSING);
+        assert(IN_SET(bus->state, BUS_HELLO, BUS_CLOSING));
 
         r = sd_bus_message_get_errno(reply);
         if (r > 0)
@@ -463,7 +464,7 @@ static int parse_address_key(const char **p, const char *key, char **value) {
         } else
                 a = *p;
 
-        while (*a != ';' && *a != ',' && *a != 0) {
+        while (!IN_SET(*a, ';', ',', 0)) {
                 char c;
 
                 if (*a == '%') {
@@ -532,7 +533,7 @@ static int parse_unix_address(sd_bus *b, const char **p, char **guid) {
         assert(*p);
         assert(guid);
 
-        while (**p != 0 && **p != ';') {
+        while (!IN_SET(**p, 0, ';')) {
                 r = parse_address_key(p, "guid", guid);
                 if (r < 0)
                         return r;
@@ -597,7 +598,7 @@ static int parse_tcp_address(sd_bus *b, const char **p, char **guid) {
         assert(*p);
         assert(guid);
 
-        while (**p != 0 && **p != ';') {
+        while (!IN_SET(**p, 0, ';')) {
                 r = parse_address_key(p, "guid", guid);
                 if (r < 0)
                         return r;
@@ -665,7 +666,7 @@ static int parse_exec_address(sd_bus *b, const char **p, char **guid) {
         assert(*p);
         assert(guid);
 
-        while (**p != 0 && **p != ';') {
+        while (!IN_SET(**p, 0, ';')) {
                 r = parse_address_key(p, "guid", guid);
                 if (r < 0)
                         goto fail;
@@ -755,7 +756,7 @@ static int parse_container_unix_address(sd_bus *b, const char **p, char **guid) 
         assert(*p);
         assert(guid);
 
-        while (**p != 0 && **p != ';') {
+        while (!IN_SET(**p, 0, ';')) {
                 r = parse_address_key(p, "guid", guid);
                 if (r < 0)
                         return r;
@@ -1186,7 +1187,7 @@ int bus_set_address_system_remote(sd_bus *b, const char *host) {
                         if (!e)
                                 return -ENOMEM;
 
-                        c = strjoina(",argv4=--machine=", m);
+                        c = strjoina(",argv5=--machine=", m);
                 }
         }
 
@@ -1196,7 +1197,7 @@ int bus_set_address_system_remote(sd_bus *b, const char *host) {
                         return -ENOMEM;
         }
 
-        b->address = strjoin("unixexec:path=ssh,argv1=-xT,argv2=", e, ",argv3=systemd-stdio-bridge", c);
+        b->address = strjoin("unixexec:path=ssh,argv1=-xT,argv2=--,argv3=", e, ",argv4=systemd-stdio-bridge", c);
         if (!b->address)
                 return -ENOMEM;
 
@@ -1319,10 +1320,7 @@ _public_ sd_bus* sd_bus_flush_close_unref(sd_bus *bus) {
 static void bus_enter_closing(sd_bus *bus) {
         assert(bus);
 
-        if (bus->state != BUS_OPENING &&
-            bus->state != BUS_AUTHENTICATING &&
-            bus->state != BUS_HELLO &&
-            bus->state != BUS_RUNNING)
+        if (!IN_SET(bus->state, BUS_OPENING, BUS_AUTHENTICATING, BUS_HELLO, BUS_RUNNING))
                 return;
 
         bus->state = BUS_CLOSING;
@@ -1468,7 +1466,7 @@ static int bus_write_message(sd_bus *bus, sd_bus_message *m, bool hint_sync_call
                 return r;
 
         if (*idx >= BUS_MESSAGE_SIZE(m))
-                log_debug("Sent message type=%s sender=%s destination=%s object=%s interface=%s member=%s cookie=%" PRIu64 " reply_cookie=%" PRIu64 " error=%s",
+                log_debug("Sent message type=%s sender=%s destination=%s object=%s interface=%s member=%s cookie=%" PRIu64 " reply_cookie=%" PRIu64 " error-name=%s error-message=%s",
                           bus_message_type_to_string(m->header->type),
                           strna(sd_bus_message_get_sender(m)),
                           strna(sd_bus_message_get_destination(m)),
@@ -1477,6 +1475,7 @@ static int bus_write_message(sd_bus *bus, sd_bus_message *m, bool hint_sync_call
                           strna(sd_bus_message_get_member(m)),
                           BUS_MESSAGE_COOKIE(m),
                           m->reply_cookie,
+                          strna(m->error.name),
                           strna(m->error.message));
 
         return r;
@@ -1486,7 +1485,7 @@ static int dispatch_wqueue(sd_bus *bus) {
         int r, ret = 0;
 
         assert(bus);
-        assert(bus->state == BUS_RUNNING || bus->state == BUS_HELLO);
+        assert(IN_SET(bus->state, BUS_RUNNING, BUS_HELLO));
 
         while (bus->wqueue_size > 0) {
 
@@ -1542,7 +1541,7 @@ static int dispatch_rqueue(sd_bus *bus, bool hint_priority, int64_t priority, sd
 
         assert(bus);
         assert(m);
-        assert(bus->state == BUS_RUNNING || bus->state == BUS_HELLO);
+        assert(IN_SET(bus->state, BUS_RUNNING, BUS_HELLO));
 
         /* Note that the priority logic is only available on kdbus,
          * where the rqueue is unused. We check the rqueue here
@@ -1611,7 +1610,7 @@ static int bus_send_internal(sd_bus *bus, sd_bus_message *_m, uint64_t *cookie, 
         if (m->dont_send)
                 goto finish;
 
-        if ((bus->state == BUS_RUNNING || bus->state == BUS_HELLO) && bus->wqueue_size <= 0) {
+        if (IN_SET(bus->state, BUS_RUNNING, BUS_HELLO) && bus->wqueue_size <= 0) {
                 size_t idx = 0;
 
                 r = bus_write_message(bus, m, hint_sync_call, &idx);
@@ -1788,7 +1787,7 @@ int bus_ensure_running(sd_bus *bus) {
 
         assert(bus);
 
-        if (bus->state == BUS_UNSET || bus->state == BUS_CLOSED || bus->state == BUS_CLOSING)
+        if (IN_SET(bus->state, BUS_UNSET, BUS_CLOSED, BUS_CLOSING))
                 return -ENOTCONN;
         if (bus->state == BUS_RUNNING)
                 return 1;
@@ -1992,7 +1991,7 @@ _public_ int sd_bus_get_events(sd_bus *bus) {
 
                 flags |= POLLIN;
 
-        } else if (bus->state == BUS_RUNNING || bus->state == BUS_HELLO) {
+        } else if (IN_SET(bus->state, BUS_RUNNING, BUS_HELLO)) {
                 if (bus->rqueue_size <= 0)
                         flags |= POLLIN;
                 if (bus->wqueue_size > 0)
@@ -2027,7 +2026,7 @@ _public_ int sd_bus_get_timeout(sd_bus *bus, uint64_t *timeout_usec) {
                 return 1;
         }
 
-        if (bus->state != BUS_RUNNING && bus->state != BUS_HELLO) {
+        if (!IN_SET(bus->state, BUS_RUNNING, BUS_HELLO)) {
                 *timeout_usec = (uint64_t) -1;
                 return 0;
         }
@@ -2124,8 +2123,7 @@ static int process_hello(sd_bus *bus, sd_bus_message *m) {
          * here (we leave that to the usual handling), we just verify
          * we don't let any earlier msg through. */
 
-        if (m->header->type != SD_BUS_MESSAGE_METHOD_RETURN &&
-            m->header->type != SD_BUS_MESSAGE_METHOD_ERROR)
+        if (!IN_SET(m->header->type, SD_BUS_MESSAGE_METHOD_RETURN, SD_BUS_MESSAGE_METHOD_ERROR))
                 return -EIO;
 
         if (m->reply_cookie != 1)
@@ -2144,8 +2142,7 @@ static int process_reply(sd_bus *bus, sd_bus_message *m) {
         assert(bus);
         assert(m);
 
-        if (m->header->type != SD_BUS_MESSAGE_METHOD_RETURN &&
-            m->header->type != SD_BUS_MESSAGE_METHOD_ERROR)
+        if (!IN_SET(m->header->type, SD_BUS_MESSAGE_METHOD_RETURN, SD_BUS_MESSAGE_METHOD_ERROR))
                 return 0;
 
         if (m->destination && bus->unique_name && !streq_ptr(m->destination, bus->unique_name))
@@ -2414,7 +2411,7 @@ static int process_running(sd_bus *bus, bool hint_priority, int64_t priority, sd
         int r;
 
         assert(bus);
-        assert(bus->state == BUS_RUNNING || bus->state == BUS_HELLO);
+        assert(IN_SET(bus->state, BUS_RUNNING, BUS_HELLO));
 
         r = process_timeout(bus);
         if (r != 0)
@@ -2861,7 +2858,6 @@ _public_ int sd_bus_add_match(
         }
 
         s->match_callback.callback = callback;
-        s->match_callback.cookie = ++bus->match_cookie;
 
         if (bus->bus_client) {
                 enum bus_match_scope scope;
@@ -2881,7 +2877,7 @@ _public_ int sd_bus_add_match(
                                 goto finish;
                         }
 
-                        r = bus_add_match_internal(bus, s->match_callback.match_string, components, n_components, s->match_callback.cookie);
+                        r = bus_add_match_internal(bus, s->match_callback.match_string, components, n_components);
                         if (r < 0)
                                 goto finish;
 

@@ -93,7 +93,7 @@ int seat_save(Seat *s) {
         if (!s->started)
                 return 0;
 
-        r = mkdir_safe_label("/run/systemd/seats", 0755, 0, 0);
+        r = mkdir_safe_label("/run/systemd/seats", 0755, 0, 0, false);
         if (r < 0)
                 goto fail;
 
@@ -663,8 +663,7 @@ static bool seat_name_valid_char(char c) {
                 (c >= 'a' && c <= 'z') ||
                 (c >= 'A' && c <= 'Z') ||
                 (c >= '0' && c <= '9') ||
-                c == '-' ||
-                c == '_';
+                IN_SET(c, '-', '_');
 }
 
 bool seat_name_is_valid(const char *name) {

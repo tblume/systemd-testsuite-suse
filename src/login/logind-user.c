@@ -141,7 +141,7 @@ static int user_save_internal(User *u) {
         assert(u);
         assert(u->state_file);
 
-        r = mkdir_safe_label("/run/systemd/users", 0755, 0, 0);
+        r = mkdir_safe_label("/run/systemd/users", 0755, 0, 0, false);
         if (r < 0)
                 goto fail;
 
@@ -334,7 +334,7 @@ static int user_mkdir_runtime_path(User *u) {
 
         assert(u);
 
-        r = mkdir_safe_label("/run/user", 0755, 0, 0);
+        r = mkdir_safe_label("/run/user", 0755, 0, 0, false);
         if (r < 0)
                 return log_error_errno(r, "Failed to create /run/user: %m");
 
@@ -354,7 +354,7 @@ static int user_mkdir_runtime_path(User *u) {
 
                 r = mount("tmpfs", u->runtime_path, "tmpfs", MS_NODEV|MS_NOSUID, t);
                 if (r < 0) {
-                        if (errno != EPERM && errno != EACCES) {
+                        if (!IN_SET(errno, EPERM, EACCES)) {
                                 r = log_error_errno(errno, "Failed to mount per-user tmpfs directory %s: %m", u->runtime_path);
                                 goto fail;
                         }
@@ -547,7 +547,7 @@ static int user_remove_runtime_path(User *u) {
          * quite possible, if we lacked the permissions to mount
          * something */
         r = umount2(u->runtime_path, MNT_DETACH);
-        if (r < 0 && errno != EINVAL && errno != ENOENT)
+        if (r < 0 && !IN_SET(errno, EINVAL, ENOENT))
                 log_error_errno(errno, "Failed to unmount user runtime directory %s: %m", u->runtime_path);
 
         r = rm_rf(u->runtime_path, REMOVE_ROOT);

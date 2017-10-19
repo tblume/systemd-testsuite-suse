@@ -453,7 +453,7 @@ int address_remove(
         int r;
 
         assert(address);
-        assert(address->family == AF_INET || address->family == AF_INET6);
+        assert(IN_SET(address->family, AF_INET, AF_INET6));
         assert(link);
         assert(link->ifindex > 0);
         assert(link->manager);
@@ -553,7 +553,7 @@ int address_configure(
         int r;
 
         assert(address);
-        assert(address->family == AF_INET || address->family == AF_INET6);
+        assert(IN_SET(address->family, AF_INET, AF_INET6));
         assert(link);
         assert(link->ifindex > 0);
         assert(link->manager);
@@ -768,7 +768,7 @@ int config_parse_address(const char *unit,
         }
 
         if (!e && f == AF_INET) {
-                r = in_addr_default_prefixlen(&buffer.in, &n->prefixlen);
+                r = in4_addr_default_prefixlen(&buffer.in, &n->prefixlen);
                 if (r < 0) {
                         log_syntax(unit, LOG_ERR, filename, line, r, "Prefix length not specified, and a default one can not be deduced for '%s', ignoring assignment", address);
                         return 0;

@@ -30,7 +30,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#ifdef HAVE_AUDIT
+#if HAVE_AUDIT
 #include <libaudit.h>
 #endif
 
@@ -358,7 +358,7 @@ static int manager_setup_time_change(Manager *m) {
         assert(m);
         assert_cc(sizeof(time_t) == sizeof(TIME_T_MAX));
 
-        if (m->test_run)
+        if (m->test_run_flags)
                 return 0;
 
         /* Uses TFD_TIMER_CANCEL_ON_SET to get notifications whenever
@@ -390,13 +390,13 @@ static int enable_special_signals(Manager *m) {
 
         assert(m);
 
-        if (m->test_run)
+        if (m->test_run_flags)
                 return 0;
 
         /* Enable that we get SIGINT on control-alt-del. In containers
          * this will fail with EPERM (older) or EINVAL (newer), so
          * ignore that. */
-        if (reboot(RB_DISABLE_CAD) < 0 && errno != EPERM && errno != EINVAL)
+        if (reboot(RB_DISABLE_CAD) < 0 && !IN_SET(errno, EPERM, EINVAL))
                 log_warning_errno(errno, "Failed to enable ctrl-alt-del handling: %m");
 
         fd = open_terminal("/dev/tty0", O_RDWR|O_NOCTTY|O_CLOEXEC);
@@ -564,7 +564,7 @@ static int manager_setup_prefix(Manager *m) {
                 const char *suffix;
         };
 
-        static const struct table_entry paths_system[_EXEC_DIRECTORY_MAX] = {
+        static const struct table_entry paths_system[_EXEC_DIRECTORY_TYPE_MAX] = {
                 [EXEC_DIRECTORY_RUNTIME] = { SD_PATH_SYSTEM_RUNTIME, NULL },
                 [EXEC_DIRECTORY_STATE] = { SD_PATH_SYSTEM_STATE_PRIVATE, NULL },
                 [EXEC_DIRECTORY_CACHE] = { SD_PATH_SYSTEM_STATE_CACHE, NULL },
@@ -572,12 +572,12 @@ static int manager_setup_prefix(Manager *m) {
                 [EXEC_DIRECTORY_CONFIGURATION] = { SD_PATH_SYSTEM_CONFIGURATION, NULL },
         };
 
-        static const struct table_entry paths_user[_EXEC_DIRECTORY_MAX] = {
+        static const struct table_entry paths_user[_EXEC_DIRECTORY_TYPE_MAX] = {
                 [EXEC_DIRECTORY_RUNTIME] = { SD_PATH_USER_RUNTIME, NULL },
                 [EXEC_DIRECTORY_STATE] = { SD_PATH_USER_CONFIGURATION, NULL },
-                [EXEC_DIRECTORY_CACHE] = { SD_PATH_SYSTEM_STATE_CACHE, NULL },
-                [EXEC_DIRECTORY_LOGS] = { SD_PATH_SYSTEM_CONFIGURATION, "log" },
-                [EXEC_DIRECTORY_CONFIGURATION] = { SD_PATH_SYSTEM_CONFIGURATION, NULL },
+                [EXEC_DIRECTORY_CACHE] = { SD_PATH_USER_STATE_CACHE, NULL },
+                [EXEC_DIRECTORY_LOGS] = { SD_PATH_USER_CONFIGURATION, "log" },
+                [EXEC_DIRECTORY_CONFIGURATION] = { SD_PATH_USER_CONFIGURATION, NULL },
         };
 
         const struct table_entry *p;
@@ -591,7 +591,7 @@ static int manager_setup_prefix(Manager *m) {
         else
                 p = paths_user;
 
-        for (i = 0; i < _EXEC_DIRECTORY_MAX; i++) {
+        for (i = 0; i < _EXEC_DIRECTORY_TYPE_MAX; i++) {
                 r = sd_path_home(p[i].type, p[i].suffix, &m->prefix[i]);
                 if (r < 0)
                         return r;
@@ -600,7 +600,7 @@ static int manager_setup_prefix(Manager *m) {
         return 0;
 }
 
-int manager_new(UnitFileScope scope, bool test_run, Manager **_m) {
+int manager_new(UnitFileScope scope, unsigned test_run_flags, Manager **_m) {
         Manager *m;
         int r;
 
@@ -616,8 +616,11 @@ int manager_new(UnitFileScope scope, bool test_run, Manager **_m) {
         m->default_timer_accuracy_usec = USEC_PER_MINUTE;
         m->default_tasks_accounting = true;
         m->default_tasks_max = UINT64_MAX;
+        m->default_timeout_start_usec = DEFAULT_TIMEOUT_USEC;
+        m->default_timeout_stop_usec = DEFAULT_TIMEOUT_USEC;
+        m->default_restart_usec = DEFAULT_RESTART_USEC;
 
-#ifdef ENABLE_EFI
+#if ENABLE_EFI
         if (MANAGER_IS_SYSTEM(m) && detect_container() <= 0)
                 boot_timestamps(&m->userspace_timestamp, &m->firmware_timestamp, &m->loader_timestamp);
 #endif
@@ -628,13 +631,13 @@ int manager_new(UnitFileScope scope, bool test_run, Manager **_m) {
                 m->unit_log_format_string = "UNIT=%s";
 
                 m->invocation_log_field = "INVOCATION_ID=";
-                m->invocation_log_format_string = "INVOCATION_ID=" SD_ID128_FORMAT_STR;
+                m->invocation_log_format_string = "INVOCATION_ID=%s";
         } else {
                 m->unit_log_field = "USER_UNIT=";
                 m->unit_log_format_string = "USER_UNIT=%s";
 
                 m->invocation_log_field = "USER_INVOCATION_ID=";
-                m->invocation_log_format_string = "USER_INVOCATION_ID=" SD_ID128_FORMAT_STR;
+                m->invocation_log_format_string = "USER_INVOCATION_ID=%s";
         }
 
         m->idle_pipe[0] = m->idle_pipe[1] = m->idle_pipe[2] = m->idle_pipe[3] = -1;
@@ -650,7 +653,7 @@ int manager_new(UnitFileScope scope, bool test_run, Manager **_m) {
         m->have_ask_password = -EINVAL; /* we don't know */
         m->first_boot = -1;
 
-        m->test_run = test_run;
+        m->test_run_flags = test_run_flags;
 
         /* Reboot immediately if the user hits C-A-D more often than 7x per 2s */
         RATELIMIT_INIT(m->ctrl_alt_del_ratelimit, 2 * USEC_PER_SEC, 7);
@@ -731,7 +734,7 @@ fail:
 static int manager_setup_notify(Manager *m) {
         int r;
 
-        if (m->test_run)
+        if (m->test_run_flags)
                 return 0;
 
         if (m->notify_fd < 0) {
@@ -811,7 +814,7 @@ static int manager_setup_cgroups_agent(Manager *m) {
          * to it. The system instance hence listens on this special socket, but the user instances listen on the system
          * bus for these messages. */
 
-        if (m->test_run)
+        if (m->test_run_flags)
                 return 0;
 
         if (!MANAGER_IS_SYSTEM(m))
@@ -856,7 +859,7 @@ static int manager_setup_cgroups_agent(Manager *m) {
                  * SIGCHLD signals, so that a cgroup running empty is always just the last safety net of notification,
                  * and we collected the metadata the notification and SIGCHLD stuff offers first. Also see handling of
                  * cgroup inotify for the unified cgroup stuff. */
-                r = sd_event_source_set_priority(m->cgroups_agent_event_source, SD_EVENT_PRIORITY_NORMAL-5);
+                r = sd_event_source_set_priority(m->cgroups_agent_event_source, SD_EVENT_PRIORITY_NORMAL-4);
                 if (r < 0)
                         return log_error_errno(r, "Failed to set priority of cgroups agent event source: %m");
 
@@ -921,15 +924,19 @@ static int manager_setup_user_lookup_fd(Manager *m) {
 
 static int manager_connect_bus(Manager *m, bool reexecuting) {
         bool try_bus_connect;
+        Unit *u = NULL;
 
         assert(m);
 
-        if (m->test_run)
+        if (m->test_run_flags)
                 return 0;
 
+        u = manager_get_unit(m, SPECIAL_DBUS_SERVICE);
+
         try_bus_connect =
-                reexecuting ||
-                (MANAGER_IS_USER(m) && getenv("DBUS_SESSION_BUS_ADDRESS"));
+                (u && UNIT_IS_ACTIVE_OR_RELOADING(unit_active_state(u))) &&
+                (reexecuting ||
+                 (MANAGER_IS_USER(m) && getenv("DBUS_SESSION_BUS_ADDRESS")));
 
         /* Try to connect to the buses, if possible. */
         return bus_init(m, try_bus_connect);
@@ -978,10 +985,8 @@ static void unit_gc_sweep(Unit *u, unsigned gc_marker) {
 
         assert(u);
 
-        if (u->gc_marker == gc_marker + GC_OFFSET_GOOD ||
-            u->gc_marker == gc_marker + GC_OFFSET_BAD ||
-            u->gc_marker == gc_marker + GC_OFFSET_UNSURE ||
-            u->gc_marker == gc_marker + GC_OFFSET_IN_PATH)
+        if (IN_SET(u->gc_marker - gc_marker,
+                   GC_OFFSET_GOOD, GC_OFFSET_BAD, GC_OFFSET_UNSURE, GC_OFFSET_IN_PATH))
                 return;
 
         if (u->in_cleanup_queue)
@@ -1048,8 +1053,8 @@ static unsigned manager_dispatch_gc_unit_queue(Manager *m) {
 
                 n++;
 
-                if (u->gc_marker == gc_marker + GC_OFFSET_BAD ||
-                    u->gc_marker == gc_marker + GC_OFFSET_UNSURE) {
+                if (IN_SET(u->gc_marker - gc_marker,
+                           GC_OFFSET_BAD, GC_OFFSET_UNSURE)) {
                         if (u->id)
                                 log_unit_debug(u, "Collecting.");
                         u->gc_marker = gc_marker + GC_OFFSET_BAD;
@@ -1123,8 +1128,7 @@ Manager* manager_free(Manager *m) {
                 if (unit_vtable[c]->shutdown)
                         unit_vtable[c]->shutdown(m);
 
-        /* If we reexecute ourselves, we keep the root cgroup
-         * around */
+        /* If we reexecute ourselves, we keep the root cgroup around */
         manager_shutdown_cgroup(m, m->exit_code != MANAGER_REEXECUTE);
 
         lookup_paths_flush_generator(&m->lookup_paths);
@@ -1185,7 +1189,7 @@ Manager* manager_free(Manager *m) {
         hashmap_free(m->uid_refs);
         hashmap_free(m->gid_refs);
 
-        for (dt = 0; dt < _EXEC_DIRECTORY_MAX; dt++)
+        for (dt = 0; dt < _EXEC_DIRECTORY_TYPE_MAX; dt++)
                 m->prefix[dt] = mfree(m->prefix[dt]);
 
         return mfree(m);
@@ -1307,7 +1311,11 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
 
         assert(m);
 
-        r = lookup_paths_init(&m->lookup_paths, m->unit_file_scope, 0, NULL);
+        /* If we are running in test mode, we still want to run the generators,
+         * but we should not touch the real generator directories. */
+        r = lookup_paths_init(&m->lookup_paths, m->unit_file_scope,
+                              m->test_run_flags ? LOOKUP_PATHS_TEMPORARY_GENERATED : 0,
+                              NULL);
         if (r < 0)
                 return r;
 
@@ -1315,12 +1323,11 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
         if (r < 0)
                 return r;
 
-        /* Make sure the transient directory always exists, so that it remains in the search path */
-        if (!m->test_run) {
-                r = mkdir_p_label(m->lookup_paths.transient, 0755);
-                if (r < 0)
-                        return r;
-        }
+        /* Make sure the transient directory always exists, so that it remains
+         * in the search path */
+        r = mkdir_p_label(m->lookup_paths.transient, 0755);
+        if (r < 0)
+                return r;
 
         dual_timestamp_get(&m->generators_start_timestamp);
         r = manager_run_generators(m);
@@ -1328,7 +1335,10 @@ int manager_startup(Manager *m, FILE *serialization, FDSet *fds) {
         if (r < 0)
                 return r;
 
-        if (m->first_boot && m->unit_file_scope == UNIT_FILE_SYSTEM) {
+        if (m->first_boot > 0 &&
+            m->unit_file_scope == UNIT_FILE_SYSTEM &&
+            !m->test_run_flags) {
+
                 q = unit_file_preset_all(UNIT_FILE_SYSTEM, 0, NULL, UNIT_FILE_PRESET_ENABLE_ONLY, NULL, 0);
                 if (q < 0)
                         log_full_errno(q == -EEXIST ? LOG_NOTICE : LOG_WARNING, q, "Failed to populate /etc with preset unit settings, ignoring: %m");
@@ -1430,7 +1440,7 @@ int manager_add_job(Manager *m, JobType type, Unit *unit, JobMode mode, sd_bus_e
                 return -ENOMEM;
 
         r = transaction_add_job_and_dependencies(tr, type, unit, NULL, true, false,
-                                                 mode == JOB_IGNORE_DEPENDENCIES || mode == JOB_IGNORE_REQUIREMENTS,
+                                                 IN_SET(mode, JOB_IGNORE_DEPENDENCIES, JOB_IGNORE_REQUIREMENTS),
                                                  mode == JOB_IGNORE_DEPENDENCIES, e);
         if (r < 0)
                 goto tr_abort;
@@ -1780,7 +1790,7 @@ static int manager_dispatch_cgroups_agent_fd(sd_event_source *source, int fd, ui
         buf[n] = 0;
 
         manager_notify_cgroup_empty(m, buf);
-        bus_forward_agent_released(m, buf);
+        (void) bus_forward_agent_released(m, buf);
 
         return 0;
 }
@@ -1973,7 +1983,7 @@ static int manager_dispatch_sigchld(Manager *m) {
                 if (si.si_pid <= 0)
                         break;
 
-                if (si.si_code == CLD_EXITED || si.si_code == CLD_KILLED || si.si_code == CLD_DUMPED) {
+                if (IN_SET(si.si_code, CLD_EXITED, CLD_KILLED, CLD_DUMPED)) {
                         _cleanup_free_ char *name = NULL;
                         Unit *u1, *u2, *u3;
 
@@ -2012,7 +2022,7 @@ static int manager_dispatch_sigchld(Manager *m) {
         return 0;
 }
 
-static int manager_start_target(Manager *m, const char *name, JobMode mode) {
+static void manager_start_target(Manager *m, const char *name, JobMode mode) {
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
@@ -2021,8 +2031,6 @@ static int manager_start_target(Manager *m, const char *name, JobMode mode) {
         r = manager_add_job_by_name(m, JOB_START, name, mode, &error, NULL);
         if (r < 0)
                 log_error("Failed to enqueue %s job: %s", name, bus_error_message(&error, r));
-
-        return r;
 }
 
 static void manager_handle_ctrl_alt_del(Manager *m) {
@@ -2092,17 +2100,11 @@ static int manager_dispatch_signal_fd(sd_event_source *source, int fd, uint32_t 
                         /* Fall through */
 
                 case SIGINT:
-                        if (MANAGER_IS_SYSTEM(m)) {
+                        if (MANAGER_IS_SYSTEM(m))
                                 manager_handle_ctrl_alt_del(m);
-                                break;
-                        }
-
-                        /* Run the exit target if there is one, if not, just exit. */
-                        if (manager_start_target(m, SPECIAL_EXIT_TARGET, JOB_REPLACE) < 0) {
-                                m->exit_code = MANAGER_EXIT;
-                                return 0;
-                        }
-
+                        else
+                                manager_start_target(m, SPECIAL_EXIT_TARGET,
+                                                        JOB_REPLACE_IRREVERSIBLY);
                         break;
 
                 case SIGWINCH:
@@ -2170,14 +2172,17 @@ static int manager_dispatch_signal_fd(sd_event_source *source, int fd, uint32_t 
                 default: {
 
                         /* Starting SIGRTMIN+0 */
-                        static const char * const target_table[] = {
-                                [0] = SPECIAL_DEFAULT_TARGET,
-                                [1] = SPECIAL_RESCUE_TARGET,
-                                [2] = SPECIAL_EMERGENCY_TARGET,
-                                [3] = SPECIAL_HALT_TARGET,
-                                [4] = SPECIAL_POWEROFF_TARGET,
-                                [5] = SPECIAL_REBOOT_TARGET,
-                                [6] = SPECIAL_KEXEC_TARGET
+                        static const struct {
+                                const char *target;
+                                JobMode mode;
+                        } target_table[] = {
+                                [0] = { SPECIAL_DEFAULT_TARGET,   JOB_ISOLATE },
+                                [1] = { SPECIAL_RESCUE_TARGET,    JOB_ISOLATE },
+                                [2] = { SPECIAL_EMERGENCY_TARGET, JOB_ISOLATE },
+                                [3] = { SPECIAL_HALT_TARGET,      JOB_REPLACE_IRREVERSIBLY },
+                                [4] = { SPECIAL_POWEROFF_TARGET,  JOB_REPLACE_IRREVERSIBLY },
+                                [5] = { SPECIAL_REBOOT_TARGET,    JOB_REPLACE_IRREVERSIBLY },
+                                [6] = { SPECIAL_KEXEC_TARGET,     JOB_REPLACE_IRREVERSIBLY }
                         };
 
                         /* Starting SIGRTMIN+13, so that target halt and system halt are 10 apart */
@@ -2191,8 +2196,8 @@ static int manager_dispatch_signal_fd(sd_event_source *source, int fd, uint32_t 
                         if ((int) sfsi.ssi_signo >= SIGRTMIN+0 &&
                             (int) sfsi.ssi_signo < SIGRTMIN+(int) ELEMENTSOF(target_table)) {
                                 int idx = (int) sfsi.ssi_signo - SIGRTMIN;
-                                manager_start_target(m, target_table[idx],
-                                                     (idx == 1 || idx == 2) ? JOB_ISOLATE : JOB_REPLACE);
+                                manager_start_target(m, target_table[idx].target,
+                                                        target_table[idx].mode);
                                 break;
                         }
 
@@ -2360,7 +2365,7 @@ int manager_loop(Manager *m) {
                 if (manager_dispatch_cleanup_queue(m) > 0)
                         continue;
 
-                if (manager_dispatch_cgroup_queue(m) > 0)
+                if (manager_dispatch_cgroup_realize_queue(m) > 0)
                         continue;
 
                 if (manager_dispatch_dbus_queue(m) > 0)
@@ -2450,7 +2455,7 @@ int manager_get_job_from_dbus_path(Manager *m, const char *s, Job **_j) {
 
 void manager_send_unit_audit(Manager *m, Unit *u, int type, bool success) {
 
-#ifdef HAVE_AUDIT
+#if HAVE_AUDIT
         _cleanup_free_ char *p = NULL;
         const char *msg;
         int audit_fd, r;
@@ -2506,9 +2511,7 @@ void manager_send_unit_plymouth(Manager *m, Unit *u) {
         if (detect_container() > 0)
                 return;
 
-        if (u->type != UNIT_SERVICE &&
-            u->type != UNIT_MOUNT &&
-            u->type != UNIT_SWAP)
+        if (!IN_SET(u->type, UNIT_SERVICE, UNIT_MOUNT, UNIT_SWAP))
                 return;
 
         /* We set SOCK_NONBLOCK here so that we rather drop the
@@ -2999,7 +3002,7 @@ static void manager_notify_finished(Manager *m) {
         char userspace[FORMAT_TIMESPAN_MAX], initrd[FORMAT_TIMESPAN_MAX], kernel[FORMAT_TIMESPAN_MAX], sum[FORMAT_TIMESPAN_MAX];
         usec_t firmware_usec, loader_usec, kernel_usec, initrd_usec, userspace_usec, total_usec;
 
-        if (m->test_run)
+        if (m->test_run_flags)
                 return;
 
         if (MANAGER_IS_SYSTEM(m) && detect_container() <= 0) {
@@ -3144,7 +3147,7 @@ static int manager_run_environment_generators(Manager *m) {
         const char **paths;
         void* args[] = {&tmp, &tmp, &m->environment};
 
-        if (m->test_run)
+        if (m->test_run_flags && !(m->test_run_flags & MANAGER_TEST_RUN_ENV_GENERATORS))
                 return 0;
 
         paths = MANAGER_IS_SYSTEM(m) ? system_env_generator_binary_paths : user_env_generator_binary_paths;
@@ -3162,7 +3165,7 @@ static int manager_run_generators(Manager *m) {
 
         assert(m);
 
-        if (m->test_run)
+        if (m->test_run_flags && !(m->test_run_flags & MANAGER_TEST_RUN_GENERATORS))
                 return 0;
 
         paths = generator_binary_paths(m->unit_file_scope);
@@ -3742,7 +3745,7 @@ int manager_dispatch_user_lookup_fd(sd_event_source *source, int fd, uint32_t re
 
         l = recv(fd, &buffer, sizeof(buffer), MSG_DONTWAIT);
         if (l < 0) {
-                if (errno == EINTR || errno == EAGAIN)
+                if (IN_SET(errno, EINTR, EAGAIN))
                         return 0;
 
                 return log_error_errno(errno, "Failed to read from user lookup fd: %m");

@@ -61,7 +61,7 @@ int main(int argc, char *argv[]) {
         }
 
         /* Always create the directory where resolv.conf will live */
-        r = mkdir_safe_label("/run/systemd/resolve", 0755, uid, gid);
+        r = mkdir_safe_label("/run/systemd/resolve", 0755, uid, gid, false);
         if (r < 0) {
                 log_error_errno(r, "Could not create runtime directory: %m");
                 goto finish;
@@ -80,7 +80,7 @@ int main(int argc, char *argv[]) {
                         goto finish;
         }
 
-        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT, SIGUSR1, SIGUSR2, -1) >= 0);
+        assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGTERM, SIGINT, SIGUSR1, SIGUSR2, SIGRTMIN+1, -1) >= 0);
 
         r = manager_new(&m);
         if (r < 0) {

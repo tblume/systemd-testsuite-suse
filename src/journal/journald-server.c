@@ -17,7 +17,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#ifdef HAVE_SELINUX
+#if HAVE_SELINUX
 #include <selinux/selinux.h>
 #endif
 #include <sys/ioctl.h>
@@ -87,6 +87,10 @@
 
 /* The period to insert between posting changes for coalescing */
 #define POST_CHANGE_TIMER_INTERVAL_USEC (250*USEC_PER_MSEC)
+
+/* Pick a good default that is likely to fit into AF_UNIX and AF_INET SOCK_DGRAM datagrams, and even leaves some room
+ * for a bit of additional metadata. */
+#define DEFAULT_LINE_MAX (48*1024)
 
 static int determine_path_usage(Server *s, const char *path, uint64_t *ret_used, uint64_t *ret_free) {
         _cleanup_closedir_ DIR *d = NULL;
@@ -236,12 +240,12 @@ void server_space_usage_message(Server *s, JournalStorage *storage) {
 }
 
 static void server_add_acls(JournalFile *f, uid_t uid) {
-#ifdef HAVE_ACL
+#if HAVE_ACL
         int r;
 #endif
         assert(f);
 
-#ifdef HAVE_ACL
+#if HAVE_ACL
         if (uid <= SYSTEM_UID_MAX)
                 return;
 
@@ -313,7 +317,7 @@ static int system_journal_open(Server *s, bool flush_requested) {
                         (void) cache_space_refresh(s, &s->system_storage);
                         patch_min_use(&s->system_storage);
                 } else if (r < 0) {
-                        if (r != -ENOENT && r != -EROFS)
+                        if (!IN_SET(r, -ENOENT, -EROFS))
                                 log_warning_errno(r, "Failed to open system journal: %m");
 
                         r = 0;
@@ -720,14 +724,14 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, unsigned
                 char *k;                                                \
                 k = newa(char, strlen(field "=") + DECIMAL_STR_MAX(type) + 1); \
                 sprintf(k, field "=" format, value);                    \
-                IOVEC_SET_STRING(iovec[n++], k);                        \
+                iovec[n++] = IOVEC_MAKE_STRING(k);                      \
         }
 
 #define IOVEC_ADD_STRING_FIELD(iovec, n, value, field)                  \
         if (!isempty(value)) {                                          \
                 char *k;                                                \
                 k = strjoina(field "=", value);                         \
-                IOVEC_SET_STRING(iovec[n++], k);                        \
+                iovec[n++] = IOVEC_MAKE_STRING(k);                      \
         }
 
 #define IOVEC_ADD_ID128_FIELD(iovec, n, value, field)                   \
@@ -735,7 +739,7 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, unsigned
                 char *k;                                                \
                 k = newa(char, strlen(field "=") + SD_ID128_STRING_MAX); \
                 sd_id128_to_string(value, stpcpy(k, field "="));        \
-                IOVEC_SET_STRING(iovec[n++], k);                        \
+                iovec[n++] = IOVEC_MAKE_STRING(k);                      \
         }
 
 #define IOVEC_ADD_SIZED_FIELD(iovec, n, value, value_size, field)       \
@@ -743,7 +747,7 @@ static void write_to_journal(Server *s, uid_t uid, struct iovec *iovec, unsigned
                 char *k;                                                \
                 k = newa(char, strlen(field "=") + value_size + 1);     \
                 *((char*) mempcpy(stpcpy(k, field "="), value, value_size)) = 0; \
-                IOVEC_SET_STRING(iovec[n++], k);                        \
+                iovec[n++] = IOVEC_MAKE_STRING(k);                      \
         }                                                               \
 
 static void dispatch_message_real(
@@ -822,20 +826,20 @@ static void dispatch_message_real(
 
         if (tv) {
                 sprintf(source_time, "_SOURCE_REALTIME_TIMESTAMP=" USEC_FMT, timeval_load(tv));
-                IOVEC_SET_STRING(iovec[n++], source_time);
+                iovec[n++] = IOVEC_MAKE_STRING(source_time);
         }
 
         /* Note that strictly speaking storing the boot id here is
          * redundant since the entry includes this in-line
          * anyway. However, we need this indexed, too. */
         if (!isempty(s->boot_id_field))
-                IOVEC_SET_STRING(iovec[n++], s->boot_id_field);
+                iovec[n++] = IOVEC_MAKE_STRING(s->boot_id_field);
 
         if (!isempty(s->machine_id_field))
-                IOVEC_SET_STRING(iovec[n++], s->machine_id_field);
+                iovec[n++] = IOVEC_MAKE_STRING(s->machine_id_field);
 
         if (!isempty(s->hostname_field))
-                IOVEC_SET_STRING(iovec[n++], s->hostname_field);
+                iovec[n++] = IOVEC_MAKE_STRING(s->hostname_field);
 
         assert(n <= m);
 
@@ -866,15 +870,15 @@ void server_driver_message(Server *s, const char *message_id, const char *format
         assert(format);
 
         assert_cc(3 == LOG_FAC(LOG_DAEMON));
-        IOVEC_SET_STRING(iovec[n++], "SYSLOG_FACILITY=3");
-        IOVEC_SET_STRING(iovec[n++], "SYSLOG_IDENTIFIER=systemd-journald");
+        iovec[n++] = IOVEC_MAKE_STRING("SYSLOG_FACILITY=3");
+        iovec[n++] = IOVEC_MAKE_STRING("SYSLOG_IDENTIFIER=systemd-journald");
 
-        IOVEC_SET_STRING(iovec[n++], "_TRANSPORT=driver");
+        iovec[n++] = IOVEC_MAKE_STRING("_TRANSPORT=driver");
         assert_cc(6 == LOG_INFO);
-        IOVEC_SET_STRING(iovec[n++], "PRIORITY=6");
+        iovec[n++] = IOVEC_MAKE_STRING("PRIORITY=6");
 
         if (message_id)
-                IOVEC_SET_STRING(iovec[n++], message_id);
+                iovec[n++] = IOVEC_MAKE_STRING(message_id);
         m = n;
 
         va_start(ap, format);
@@ -895,8 +899,8 @@ void server_driver_message(Server *s, const char *message_id, const char *format
                 xsprintf(buf, "MESSAGE=Entry printing failed: %s", strerror(-r));
 
                 n = 3;
-                IOVEC_SET_STRING(iovec[n++], "PRIORITY=4");
-                IOVEC_SET_STRING(iovec[n++], buf);
+                iovec[n++] = IOVEC_MAKE_STRING("PRIORITY=4");
+                iovec[n++] = IOVEC_MAKE_STRING(buf);
                 dispatch_message_real(s, iovec, n, ELEMENTSOF(iovec), s->my_context, NULL, LOG_INFO, 0);
         }
 }
@@ -1107,7 +1111,7 @@ int server_process_datagram(sd_event_source *es, int fd, uint32_t revents, void 
 
         n = recvmsg(fd, &msghdr, MSG_DONTWAIT|MSG_CMSG_CLOEXEC);
         if (n < 0) {
-                if (errno == EINTR || errno == EAGAIN)
+                if (IN_SET(errno, EINTR, EAGAIN))
                         return 0;
 
                 return log_error_errno(errno, "recvmsg() failed: %m");
@@ -1616,7 +1620,7 @@ static int server_connect_notify(Server *s) {
         if (!e)
                 return 0;
 
-        if ((e[0] != '@' && e[0] != '/') || e[1] == 0) {
+        if (!IN_SET(e[0], '@', '/') || e[1] == 0) {
                 log_error("NOTIFY_SOCKET set to an invalid value: %s", e);
                 return -EINVAL;
         }
@@ -1688,6 +1692,8 @@ int server_init(Server *s) {
         s->max_level_kmsg = LOG_NOTICE;
         s->max_level_console = LOG_INFO;
         s->max_level_wall = LOG_EMERG;
+
+        s->line_max = DEFAULT_LINE_MAX;
 
         journal_reset_metrics(&s->system_storage.metrics);
         journal_reset_metrics(&s->runtime_storage.metrics);
@@ -1862,7 +1868,7 @@ int server_init(Server *s) {
 }
 
 void server_maybe_append_tags(Server *s) {
-#ifdef HAVE_GCRYPT
+#if HAVE_GCRYPT
         JournalFile *f;
         Iterator i;
         usec_t n;
@@ -1963,3 +1969,55 @@ static const char* const split_mode_table[_SPLIT_MAX] = {
 
 DEFINE_STRING_TABLE_LOOKUP(split_mode, SplitMode);
 DEFINE_CONFIG_PARSE_ENUM(config_parse_split_mode, split_mode, SplitMode, "Failed to parse split mode setting");
+
+int config_parse_line_max(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        size_t *sz = data;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue))
+                /* Empty assignment means default */
+                *sz = DEFAULT_LINE_MAX;
+        else {
+                uint64_t v;
+
+                r = parse_size(rvalue, 1024, &v);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse LineMax= value, ignoring: %s", rvalue);
+                        return 0;
+                }
+
+                if (v < 79) {
+                        /* Why specify 79 here as minimum line length? Simply, because the most common traditional
+                         * terminal size is 80ch, and it might make sense to break one character before the natural
+                         * line break would occur on that. */
+                        log_syntax(unit, LOG_WARNING, filename, line, 0, "LineMax= too small, clamping to 79: %s", rvalue);
+                        *sz = 79;
+                } else if (v > (uint64_t) (SSIZE_MAX-1)) {
+                        /* So, why specify SSIZE_MAX-1 here? Because that's one below the largest size value read()
+                         * can return, and we need one extra byte for the trailing NUL byte. Of course IRL such large
+                         * memory allocations will fail anyway, hence this limit is mostly theoretical anyway, as we'll
+                         * fail much earlier anyway. */
+                        log_syntax(unit, LOG_WARNING, filename, line, 0, "LineMax= too large, clamping to %" PRIu64 ": %s", (uint64_t) (SSIZE_MAX-1), rvalue);
+                        *sz = SSIZE_MAX-1;
+                } else
+                        *sz = (size_t) v;
+        }
+
+        return 0;
+}

@@ -33,6 +33,7 @@
 #include "networkd-manager.h"
 #include "networkd-ndisc.h"
 #include "networkd-radv.h"
+#include "networkd-routing-policy-rule.h"
 #include "set.h"
 #include "socket-util.h"
 #include "stdio-util.h"
@@ -223,6 +224,9 @@ static bool link_ipv6_accept_ra_enabled(Link *link) {
                 return false;
 
         if (!link->network)
+                return false;
+
+        if (!link_ipv6ll_enabled(link))
                 return false;
 
         /* If unset use system default (enabled if local forwarding is disabled.
@@ -497,8 +501,8 @@ static int link_new(Manager *manager, sd_netlink_message *message, Link **ret) {
 
 static void link_free(Link *link) {
         Address *address;
-        Iterator i;
         Link *carrier;
+        Iterator i;
 
         if (!link)
                 return;
@@ -1014,6 +1018,7 @@ static int link_set_bridge_fdb(Link *link) {
 }
 
 static int link_enter_set_addresses(Link *link) {
+        RoutingPolicyRule *rule, *rrule = NULL;
         AddressLabel *label;
         Address *ad;
         int r;
@@ -1049,6 +1054,26 @@ static int link_enter_set_addresses(Link *link) {
 
                 link->link_messages++;
         }
+
+        LIST_FOREACH(rules, rule, link->network->rules) {
+                r = routing_policy_rule_get(link->manager, rule->family, &rule->from, rule->from_prefixlen, &rule->to,
+                                            rule->to_prefixlen, rule->tos, rule->fwmark, rule->table, &rrule);
+                if (r == 1) {
+                        (void) routing_policy_rule_make_local(link->manager, rrule);
+                        continue;
+                }
+
+                r = routing_policy_rule_configure(rule, link, link_routing_policy_rule_handler, false);
+                if (r < 0) {
+                        log_link_warning_errno(link, r, "Could not set routing policy rules: %m");
+                        link_enter_failed(link);
+                        return r;
+                }
+
+                link->link_messages++;
+        }
+
+        routing_policy_rule_purge(link->manager, link);
 
         /* now that we can figure out a default address for the dhcp server,
            start it */
@@ -2138,7 +2163,7 @@ static int link_joined(Link *link) {
         /* Skip setting up addresses until it gets carrier,
            or it would try to set addresses twice,
            which is bad for non-idempotent steps. */
-        if (!link_has_carrier(link))
+        if (!link_has_carrier(link) && !link->network->configure_without_carrier)
                 return 0;
 
         return link_enter_set_addresses(link);
@@ -2647,7 +2672,7 @@ static int link_configure(Link *link) {
                         return r;
         }
 
-        if (link_has_carrier(link)) {
+        if (link_has_carrier(link) || link->network->configure_without_carrier) {
                 r = link_acquire_conf(link);
                 if (r < 0)
                         return r;
@@ -2916,7 +2941,7 @@ network_file_fail:
                         goto dhcp4_address_fail;
                 }
 
-                r = sd_dhcp_client_new(&link->dhcp_client);
+                r = sd_dhcp_client_new(&link->dhcp_client, link->network->dhcp_anonymize);
                 if (r < 0)
                         return log_link_error_errno(link, r, "Failed to create DHCPv4 client: %m");
 
@@ -3060,7 +3085,8 @@ static int link_carrier_lost(Link *link) {
                 return r;
         }
 
-        (void) sd_dhcp_server_stop(link->dhcp_server);
+        if (link_dhcp4_server_enabled(link))
+                (void) sd_dhcp_server_stop(link->dhcp_server);
 
         r = link_drop_config(link);
         if (r < 0)

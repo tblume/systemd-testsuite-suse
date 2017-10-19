@@ -11,6 +11,7 @@ want_html = want_html != 'false' and xsltproc.found()
 xsltproc_flags = [
         '--nonet',
         '--xinclude',
+        '--maxdepth', '9000',
         '--stringparam', 'man.output.quietly', '1',
         '--stringparam', 'funcsynopsis.style', 'ansi',
         '--stringparam', 'man.authors.section.enabled', '0',
@@ -50,7 +51,7 @@ foreach tuple : manpages
 
         mandirn = join_paths(get_option('mandir'), 'man' + section)
 
-        if condition == '' or conf.get(condition, false)
+        if condition == '' or conf.get(condition) == 1
                 p1 = custom_target(
                         man,
                         input : xml,
