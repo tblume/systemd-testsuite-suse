@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -232,7 +233,7 @@ void job_shutdown_magic(Job *j);
 
 int job_get_timeout(Job *j, usec_t *timeout) _pure_;
 
-bool job_check_gc(Job *j);
+bool job_may_gc(Job *j);
 void job_add_to_gc_queue(Job *j);
 
 int job_get_before(Job *j, Job*** ret);

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -121,6 +122,8 @@ typedef struct JournalFile {
         pthread_t offline_thread;
         volatile OfflineState offline_state;
 
+        unsigned last_seen_generation;
+
 #if HAVE_XZ || HAVE_LZ4
         void *compress_buffer;
         size_t compress_buffer_size;
@@ -160,7 +163,6 @@ int journal_file_open(
 int journal_file_set_offline(JournalFile *f, bool wait);
 bool journal_file_is_offlining(JournalFile *f);
 JournalFile* journal_file_close(JournalFile *j);
-void journal_file_close_set(Set *s);
 
 int journal_file_open_reliably(
                 const char *fname,

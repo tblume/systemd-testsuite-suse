@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -32,6 +33,7 @@
 #include "chattr-util.h"
 #include "compress.h"
 #include "fd-util.h"
+#include "fs-util.h"
 #include "journal-authenticate.h"
 #include "journal-def.h"
 #include "journal-file.h"
@@ -41,6 +43,7 @@
 #include "random-util.h"
 #include "sd-event.h"
 #include "set.h"
+#include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "xattr-util.h"
@@ -90,6 +93,10 @@
 /* The mmap context to use for the header we pick as one above the last defined typed */
 #define CONTEXT_HEADER _OBJECT_TYPE_MAX
 
+#ifdef __clang__
+#  pragma GCC diagnostic ignored "-Waddress-of-packed-member"
+#endif
+
 /* This may be called from a separate thread to prevent blocking the caller for the duration of fsync().
  * As a result we use atomic operations on f->offline_state for inter-thread communications with
  * journal_file_set_offline() and journal_file_set_online(). */
@@ -128,8 +135,7 @@ static void journal_file_set_offline_internal(JournalFile *f) {
                 case OFFLINE_OFFLINING:
                         if (!__sync_bool_compare_and_swap(&f->offline_state, OFFLINE_OFFLINING, OFFLINE_DONE))
                                 continue;
-                        /* fall through */
-
+                        _fallthrough_;
                 case OFFLINE_DONE:
                         return;
 
@@ -142,6 +148,8 @@ static void journal_file_set_offline_internal(JournalFile *f) {
 
 static void * journal_file_set_offline_thread(void *arg) {
         JournalFile *f = arg;
+
+        (void) pthread_setname_np(pthread_self(), "journal-offline");
 
         journal_file_set_offline_internal(f);
 
@@ -241,11 +249,25 @@ int journal_file_set_offline(JournalFile *f, bool wait) {
         if (wait) /* Without using a thread if waiting. */
                 journal_file_set_offline_internal(f);
         else {
+                sigset_t ss, saved_ss;
+                int k;
+
+                if (sigfillset(&ss) < 0)
+                        return -errno;
+
+                r = pthread_sigmask(SIG_BLOCK, &ss, &saved_ss);
+                if (r > 0)
+                        return -r;
+
                 r = pthread_create(&f->offline_thread, NULL, journal_file_set_offline_thread, f);
+
+                k = pthread_sigmask(SIG_SETMASK, &saved_ss, NULL);
                 if (r > 0) {
                         f->offline_state = OFFLINE_JOINED;
                         return -r;
                 }
+                if (k > 0)
+                        return -k;
         }
 
         return 0;
@@ -285,8 +307,7 @@ static int journal_file_set_online(JournalFile *f) {
                         if (!__sync_bool_compare_and_swap(&f->offline_state, OFFLINE_AGAIN_FROM_OFFLINING, OFFLINE_CANCEL))
                                 continue;
                         /* Canceled restart from offlining, must wait for offlining to complete however. */
-
-                        /* fall through */
+                        _fallthrough_;
                 default: {
                         int r;
 
@@ -397,15 +418,6 @@ JournalFile* journal_file_close(JournalFile *f) {
         return mfree(f);
 }
 
-void journal_file_close_set(Set *s) {
-        JournalFile *f;
-
-        assert(s);
-
-        while ((f = set_steal_first(s)))
-                (void) journal_file_close(f);
-}
-
 static int journal_file_init_header(JournalFile *f, JournalFile *template) {
         Header h = {};
         ssize_t k;
@@ -439,39 +451,6 @@ static int journal_file_init_header(JournalFile *f, JournalFile *template) {
 
         if (k != sizeof(h))
                 return -EIO;
-
-        return 0;
-}
-
-static int fsync_directory_of_file(int fd) {
-        _cleanup_free_ char *path = NULL, *dn = NULL;
-        _cleanup_close_ int dfd = -1;
-        struct stat st;
-        int r;
-
-        if (fstat(fd, &st) < 0)
-                return -errno;
-
-        if (!S_ISREG(st.st_mode))
-                return -EBADFD;
-
-        r = fd_get_path(fd, &path);
-        if (r < 0)
-                return r;
-
-        if (!path_is_absolute(path))
-                return -EINVAL;
-
-        dn = dirname_malloc(path);
-        if (!dn)
-                return -ENOMEM;
-
-        dfd = open(dn, O_RDONLY|O_CLOEXEC|O_DIRECTORY);
-        if (dfd < 0)
-                return -errno;
-
-        if (fsync(dfd) < 0)
-                return -errno;
 
         return 0;
 }
@@ -633,6 +612,8 @@ static int journal_file_verify_header(JournalFile *f) {
 }
 
 static int journal_file_fstat(JournalFile *f) {
+        int r;
+
         assert(f);
         assert(f->fd >= 0);
 
@@ -640,6 +621,11 @@ static int journal_file_fstat(JournalFile *f) {
                 return -errno;
 
         f->last_stat_usec = now(CLOCK_MONOTONIC);
+
+        /* Refuse dealing with with files that aren't regular */
+        r = stat_verify_regular(&f->last_stat);
+        if (r < 0)
+                return r;
 
         /* Refuse appending to files that are already deleted */
         if (f->last_stat.st_nlink <= 0)
@@ -2578,7 +2564,7 @@ static int find_data_object_by_boot_id(
                 Object **o,
                 uint64_t *b) {
 
-        char t[sizeof("_BOOT_ID=")-1 + 32 + 1] = "_BOOT_ID=";
+        char t[STRLEN("_BOOT_ID=") + 32 + 1] = "_BOOT_ID=";
 
         sd_id128_to_string(boot_id, t + 9);
         return journal_file_find_data_object(f, t, sizeof(t) - 1, o, b);
@@ -3243,11 +3229,8 @@ int journal_file_open(
         if (!IN_SET((flags & O_ACCMODE), O_RDONLY, O_RDWR))
                 return -EINVAL;
 
-        if (fname) {
-                if (!endswith(fname, ".journal") &&
-                    !endswith(fname, ".journal~"))
-                        return -EINVAL;
-        }
+        if (fname && (flags & O_CREAT) && !endswith(fname, ".journal"))
+                return -EINVAL;
 
         f = new0(JournalFile, 1);
         if (!f)
@@ -3285,6 +3268,8 @@ int journal_file_open(
                         goto fail;
                 }
         } else {
+                assert(fd >= 0);
+
                 /* If we don't know the path, fill in something explanatory and vaguely useful */
                 if (asprintf(&f->path, "/proc/self/%i", fd) < 0) {
                         r = -ENOMEM;
@@ -3299,7 +3284,11 @@ int journal_file_open(
         }
 
         if (f->fd < 0) {
-                f->fd = open(f->path, f->flags|O_CLOEXEC, f->mode);
+                /* We pass O_NONBLOCK here, so that in case somebody pointed us to some character device node or FIFO
+                 * or so, we likely fail quickly than block for long. For regular files O_NONBLOCK has no effect, hence
+                 * it doesn't hurt in that case. */
+
+                f->fd = open(f->path, f->flags|O_CLOEXEC|O_NONBLOCK, f->mode);
                 if (f->fd < 0) {
                         r = -errno;
                         goto fail;
@@ -3307,6 +3296,10 @@ int journal_file_open(
 
                 /* fds we opened here by us should also be closed by us. */
                 f->close_fd = true;
+
+                r = fd_nonblock(f->fd, false);
+                if (r < 0)
+                        goto fail;
         }
 
         f->cache_fd = mmap_cache_add_fd(f->mmap, f->fd);
@@ -3323,17 +3316,12 @@ int journal_file_open(
 
                 (void) journal_file_warn_btrfs(f);
 
-                /* Let's attach the creation time to the journal file,
-                 * so that the vacuuming code knows the age of this
-                 * file even if the file might end up corrupted one
-                 * day... Ideally we'd just use the creation time many
-                 * file systems maintain for each file, but there is
-                 * currently no usable API to query this, hence let's
-                 * emulate this via extended attributes. If extended
-                 * attributes are not supported we'll just skip this,
-                 * and rely solely on mtime/atime/ctime of the file. */
-
-                fd_setcrtime(f->fd, 0);
+                /* Let's attach the creation time to the journal file, so that the vacuuming code knows the age of this
+                 * file even if the file might end up corrupted one day... Ideally we'd just use the creation time many
+                 * file systems maintain for each file, but the API to query this is very new, hence let's emulate this
+                 * via extended attributes. If extended attributes are not supported we'll just skip this, and rely
+                 * solely on mtime/atime/ctime of the file. */
+                (void) fd_setcrtime(f->fd, 0);
 
 #if HAVE_GCRYPT
                 /* Try to load the FSPRG state, and if we can't, then
@@ -3368,8 +3356,7 @@ int journal_file_open(
         f->header = h;
 
         if (!newly_created) {
-                if (deferred_closes)
-                        journal_file_close_set(deferred_closes);
+                set_clear_with_destructor(deferred_closes, journal_file_close);
 
                 r = journal_file_verify_header(f);
                 if (r < 0)
@@ -3685,7 +3672,7 @@ void journal_default_metrics(JournalMetrics *m, int fd) {
         if (fstatvfs(fd, &ss) >= 0)
                 fs_size = ss.f_frsize * ss.f_blocks;
         else {
-                log_debug_errno(errno, "Failed to detremine disk size: %m");
+                log_debug_errno(errno, "Failed to determine disk size: %m");
                 fs_size = 0;
         }
 

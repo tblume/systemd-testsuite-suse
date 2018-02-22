@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -126,6 +127,7 @@ struct CGroupContext {
         uint64_t tasks_max;
 
         bool delegate;
+        CGroupMask delegate_controllers;
 };
 
 /* Used when querying IP accounting data */
@@ -153,8 +155,9 @@ void cgroup_context_free_blockio_device_weight(CGroupContext *c, CGroupBlockIODe
 void cgroup_context_free_blockio_device_bandwidth(CGroupContext *c, CGroupBlockIODeviceBandwidth *b);
 
 CGroupMask unit_get_own_mask(Unit *u);
-CGroupMask unit_get_siblings_mask(Unit *u);
+CGroupMask unit_get_delegate_mask(Unit *u);
 CGroupMask unit_get_members_mask(Unit *u);
+CGroupMask unit_get_siblings_mask(Unit *u);
 CGroupMask unit_get_subtree_mask(Unit *u);
 
 CGroupMask unit_get_target_mask(Unit *u);
@@ -164,8 +167,10 @@ bool unit_get_needs_bpf(Unit *u);
 
 void unit_update_cgroup_members_masks(Unit *u);
 
+const char *unit_get_realized_cgroup_path(Unit *u, CGroupMask mask);
 char *unit_default_cgroup_path(Unit *u);
 int unit_set_cgroup_path(Unit *u, const char *path);
+int unit_pick_cgroup_path(Unit *u);
 
 int unit_realize_cgroup(Unit *u);
 void unit_release_cgroup(Unit *u);
@@ -174,7 +179,7 @@ int unit_watch_cgroup(Unit *u);
 
 void unit_add_to_cgroup_empty_queue(Unit *u);
 
-int unit_attach_pids_to_cgroup(Unit *u);
+int unit_attach_pids_to_cgroup(Unit *u, Set *pids, const char *suffix_path);
 
 int manager_setup_cgroup(Manager *m);
 void manager_shutdown_cgroup(Manager *m, bool delete);
@@ -187,6 +192,8 @@ Unit* manager_get_unit_by_pid(Manager *m, pid_t pid);
 
 int unit_search_main_pid(Unit *u, pid_t *ret);
 int unit_watch_all_pids(Unit *u);
+
+int unit_synthesize_cgroup_empty_event(Unit *u);
 
 int unit_get_memory_current(Unit *u, uint64_t *ret);
 int unit_get_tasks_current(Unit *u, uint64_t *ret);
@@ -202,6 +209,8 @@ int unit_reset_ip_accounting(Unit *u);
         cc ? cc->name : false;                          \
         })
 
+bool unit_has_root_cgroup(Unit *u);
+
 int manager_notify_cgroup_empty(Manager *m, const char *group);
 
 void unit_invalidate_cgroup(Unit *u, CGroupMask m);
@@ -211,3 +220,5 @@ void manager_invalidate_startup_units(Manager *m);
 
 const char* cgroup_device_policy_to_string(CGroupDevicePolicy i) _const_;
 CGroupDevicePolicy cgroup_device_policy_from_string(const char *s) _pure_;
+
+bool unit_cgroup_delegate(Unit *u);

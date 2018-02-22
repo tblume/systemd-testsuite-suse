@@ -3,6 +3,8 @@
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
 
 <!--
+  SPDX-License-Identifier: LGPL-2.1+
+
   This file is part of systemd.
 
   Copyright 2010 Lennart Poettering
@@ -276,17 +278,6 @@
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term><filename>getty-pre.target</filename></term>
-        <listitem>
-          <para>A special passive target unit. Users of this target
-          are expected to pull it in the boot transaction via
-          a dependency (e.g. <varname>Wants=</varname>). Order your
-          unit before this unit if you want to make use of the console
-          just before <filename>getty</filename> is started.
-          </para>
-        </listitem>
-      </varlistentry>
-      <varlistentry>
         <term><filename>graphical.target</filename></term>
         <listitem>
           <para>A special target unit for setting up a graphical login
@@ -350,6 +341,29 @@
           found in <filename>/etc/fstab</filename> that have
           <option>x-initrd.mount</option> and not have
           <option>noauto</option> mount options set.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><filename>initrd-root-device.target</filename></term>
+        <listitem>
+          <para>A special initrd target unit that is reached when the root filesystem device is available, but before
+          it has been mounted.
+          <citerefentry><refentrytitle>systemd-fstab-generator</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+          and
+          <citerefentry><refentrytitle>systemd-gpt-auto-generator</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+          automatically setup the appropriate dependencies to make this happen.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><filename>initrd-root-fs.target</filename></term>
+        <listitem>
+          <para><citerefentry><refentrytitle>systemd-fstab-generator</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+          automatically adds dependencies of type
+          <varname>Before=</varname> to the
+          <filename>sysroot.mount</filename> unit, which is generated
+          from the kernel command line.
+          </para>
         </listitem>
       </varlistentry>
       <varlistentry>
@@ -443,6 +457,10 @@
           it. Note that networking daemons that simply provide
           functionality to other hosts generally do not need to pull
           this in.</para>
+
+          <para>Note that this unit is only useful during the original system start-up logic. After the system has
+          completed booting up, it will not track the online state of the system anymore. Due to this it cannot be used
+          as a network connection monitor concept, it is purely a one-time system start-up concept.</para>
           </listitem>
       </varlistentry>
       <varlistentry>
@@ -465,7 +483,7 @@
           <para>A special target unit for shutting down and powering
           off the system.</para>
 
-          <para>Applications wanting to reboot the system should not start this unit
+          <para>Applications wanting to power off the system should not start this unit
           directly, but should instead execute <command>systemctl poweroff</command>
           (possibly with the <option>--no-block</option> option) or call
           <citerefentry><refentrytitle>systemd-logind</refentrytitle><manvolnum>8</manvolnum></citerefentry>'s
@@ -521,7 +539,8 @@
           shell. Isolate to this target in order to administer the system in single-user mode with all file systems
           mounted but with no services running, except for the most basic. Compare with
           <filename>emergency.target</filename>, which is much more reduced and does not provide the file systems or
-          most basic services.</para>
+          most basic services. Compare with <filename>multi-user.target</filename>, this target could be seen as
+          <filename>single-user.target</filename>.</para>
 
           <para><filename>runlevel1.target</filename> is an alias for this target unit, for compatibility with
           SysV.</para>
@@ -529,29 +548,6 @@
           <para>Use the <literal>systemd.unit=rescue.target</literal> kernel command line option to boot into this
           mode. A short alias for this kernel command line option is <literal>1</literal>, for compatibility with
           SysV.</para>
-        </listitem>
-      </varlistentry>
-      <varlistentry>
-        <term><filename>initrd-root-device.target</filename></term>
-        <listitem>
-          <para>A special initrd target unit that is reached when the root filesystem device is available, but before
-          it has been mounted.
-          <citerefentry><refentrytitle>systemd-fstab-generator</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-          and
-          <citerefentry><refentrytitle>systemd-gpt-auto-generator</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-          automatically setup the appropriate dependencies to make this happen.
-          </para>
-        </listitem>
-      </varlistentry>
-      <varlistentry>
-        <term><filename>initrd-root-fs.target</filename></term>
-        <listitem>
-          <para><citerefentry><refentrytitle>systemd-fstab-generator</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-          automatically adds dependencies of type
-          <varname>Before=</varname> to the
-          <filename>sysroot.mount</filename> unit, which is generated
-          from the kernel command line.
-          </para>
         </listitem>
       </varlistentry>
       <varlistentry>
@@ -814,6 +810,17 @@
         </listitem>
       </varlistentry>
       <varlistentry>
+        <term><filename>getty-pre.target</filename></term>
+        <listitem>
+          <para>A special passive target unit. Users of this target
+          are expected to pull it in the boot transaction via
+          a dependency (e.g. <varname>Wants=</varname>). Order your
+          unit before this unit if you want to make use of the console
+          just before <filename>getty</filename> is started.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
         <term><filename>local-fs-pre.target</filename></term>
         <listitem>
           <para>This target unit is
@@ -1065,7 +1072,7 @@ PartOf=graphical-session.target
         <citerefentry><refentrytitle>systemd.socket</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
         <citerefentry><refentrytitle>systemd.target</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
         <citerefentry><refentrytitle>systemd.slice</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
-        <citerefentry project='man-pages'><refentrytitle>bootup</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
+        <citerefentry><refentrytitle>bootup</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
         <citerefentry><refentrytitle>systemd-fstab-generator</refentrytitle><manvolnum>8</manvolnum></citerefentry>
       </para>
   </refsect1>

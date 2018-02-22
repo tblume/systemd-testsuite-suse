@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -27,6 +28,7 @@
 #include "glob-util.h"
 #include "hexdecoct.h"
 #include "path-util.h"
+#include "special.h"
 #include "string-util.h"
 #include "strv.h"
 #include "unit-name.h"
@@ -382,19 +384,14 @@ int unit_name_path_escape(const char *f, char **ret) {
         if (STR_IN_SET(p, "/", ""))
                 s = strdup("-");
         else {
-                char *e;
-
-                if (!path_is_safe(p))
+                if (!path_is_normalized(p))
                         return -EINVAL;
 
                 /* Truncate trailing slashes */
-                e = endswith(p, "/");
-                if (e)
-                        *e = 0;
+                delete_trailing_chars(p, "/");
 
                 /* Truncate leading slashes */
-                if (p[0] == '/')
-                        p++;
+                p = skip_leading_chars(p, "/");
 
                 s = unit_name_escape(p);
         }
@@ -437,7 +434,7 @@ int unit_name_path_unescape(const char *f, char **ret) {
                 if (!s)
                         return -ENOMEM;
 
-                if (!path_is_safe(s)) {
+                if (!path_is_normalized(s)) {
                         free(s);
                         return -EINVAL;
                 }
@@ -677,7 +674,7 @@ int slice_build_parent_slice(const char *slice, char **ret) {
         if (!slice_name_is_valid(slice))
                 return -EINVAL;
 
-        if (streq(slice, "-.slice")) {
+        if (streq(slice, SPECIAL_ROOT_SLICE)) {
                 *ret = NULL;
                 return 0;
         }
@@ -690,7 +687,7 @@ int slice_build_parent_slice(const char *slice, char **ret) {
         if (dash)
                 strcpy(dash, ".slice");
         else {
-                r = free_and_strdup(&s, "-.slice");
+                r = free_and_strdup(&s, SPECIAL_ROOT_SLICE);
                 if (r < 0) {
                         free(s);
                         return r;
@@ -714,7 +711,7 @@ int slice_build_subslice(const char *slice, const char*name, char **ret) {
         if (!unit_prefix_is_valid(name))
                 return -EINVAL;
 
-        if (streq(slice, "-.slice"))
+        if (streq(slice, SPECIAL_ROOT_SLICE))
                 subslice = strappend(name, ".slice");
         else {
                 char *e;
@@ -739,7 +736,7 @@ bool slice_name_is_valid(const char *name) {
         if (!unit_name_is_valid(name, UNIT_NAME_PLAIN))
                 return false;
 
-        if (streq(name, "-.slice"))
+        if (streq(name, SPECIAL_ROOT_SLICE))
                 return true;
 
         e = endswith(name, ".slice");

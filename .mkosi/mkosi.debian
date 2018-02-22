@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-2.1+
+#
 # This file is part of systemd.
 #
 # Copyright 2016 Daniel Rusek
@@ -35,10 +37,10 @@ BuildPackages=
         docbook-xml
         docbook-xsl
         gcc
+        gettext
         git
         gnu-efi
         gperf
-        intltool
         iptables-dev
         libacl1-dev
         libaudit-dev

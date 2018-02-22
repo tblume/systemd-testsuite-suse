@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -415,9 +416,9 @@ int sd_dhcp_client_set_hostname(
 
         assert_return(client, -EINVAL);
 
-        /* Refuse hostnames that neither qualify as DNS nor as Linux hosntames */
+        /* Make sure hostnames qualify as DNS and as Linux hostnames */
         if (hostname &&
-            !(hostname_is_valid(hostname, false) || dns_name_is_valid(hostname) > 0))
+            !(hostname_is_valid(hostname, false) && dns_name_is_valid(hostname) > 0))
                 return -EINVAL;
 
         return free_and_strdup(&client->hostname, hostname);
@@ -828,7 +829,6 @@ static int client_send_request(sd_dhcp_client *client) {
                    client’s IP address.
                 */
 
-                /* fall through */
         case DHCP_STATE_REBINDING:
                 /* ’server identifier’ MUST NOT be filled in, ’requested IP address’
                    option MUST NOT be filled in, ’ciaddr’ MUST be filled in with
@@ -1260,9 +1260,9 @@ static int client_handle_offer(sd_dhcp_client *client, DHCPMessage *offer, size_
         if (!lease->have_subnet_mask) {
                 r = dhcp_lease_set_default_subnet_mask(lease);
                 if (r < 0) {
-                        log_dhcp_client(client, "received lease lacks subnet "
-                                        "mask, and a fallback one can not be "
-                                        "generated, ignoring");
+                        log_dhcp_client(client,
+                                        "received lease lacks subnet mask, "
+                                        "and a fallback one cannot be generated, ignoring");
                         return -ENOMSG;
                 }
         }
@@ -1331,9 +1331,9 @@ static int client_handle_ack(sd_dhcp_client *client, DHCPMessage *ack, size_t le
         if (lease->subnet_mask == INADDR_ANY) {
                 r = dhcp_lease_set_default_subnet_mask(lease);
                 if (r < 0) {
-                        log_dhcp_client(client, "received lease lacks subnet "
-                                        "mask, and a fallback one can not be "
-                                        "generated, ignoring");
+                        log_dhcp_client(client,
+                                        "received lease lacks subnet mask, "
+                                        "and a fallback one cannot be generated, ignoring");
                         return -ENOMSG;
                 }
         }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -38,7 +39,7 @@
 #include "user-util.h"
 #include "util.h"
 
-static int user_runtime_dir(char **ret, const char *suffix) {
+int xdg_user_runtime_dir(char **ret, const char *suffix) {
         const char *e;
         char *j;
 
@@ -57,7 +58,7 @@ static int user_runtime_dir(char **ret, const char *suffix) {
         return 0;
 }
 
-static int user_config_dir(char **ret, const char *suffix) {
+int xdg_user_config_dir(char **ret, const char *suffix) {
         const char *e;
         char *j;
         int r;
@@ -84,7 +85,7 @@ static int user_config_dir(char **ret, const char *suffix) {
         return 0;
 }
 
-static int user_data_dir(char **ret, const char *suffix) {
+int xdg_user_data_dir(char **ret, const char *suffix) {
         const char *e;
         char *j;
         int r;
@@ -130,9 +131,46 @@ static const char* const user_config_unit_paths[] = {
         NULL
 };
 
+int xdg_user_dirs(char ***ret_config_dirs, char ***ret_data_dirs) {
+        /* Implement the mechanisms defined in
+         *
+         * http://standards.freedesktop.org/basedir-spec/basedir-spec-0.6.html
+         *
+         * We look in both the config and the data dirs because we
+         * want to encourage that distributors ship their unit files
+         * as data, and allow overriding as configuration.
+         */
+        const char *e;
+        _cleanup_strv_free_ char **config_dirs = NULL, **data_dirs = NULL;
+
+        e = getenv("XDG_CONFIG_DIRS");
+        if (e) {
+                config_dirs = strv_split(e, ":");
+                if (!config_dirs)
+                        return -ENOMEM;
+        }
+
+        e = getenv("XDG_DATA_DIRS");
+        if (e)
+                data_dirs = strv_split(e, ":");
+        else
+                data_dirs = strv_new("/usr/local/share",
+                                     "/usr/share",
+                                     NULL);
+        if (!data_dirs)
+                return -ENOMEM;
+
+        *ret_config_dirs = config_dirs;
+        *ret_data_dirs = data_dirs;
+        config_dirs = data_dirs = NULL;
+        return 0;
+}
+
 static char** user_dirs(
                 const char *persistent_config,
                 const char *runtime_config,
+                const char *global_persistent_config,
+                const char *global_runtime_config,
                 const char *generator,
                 const char *generator_early,
                 const char *generator_late,
@@ -143,38 +181,15 @@ static char** user_dirs(
         _cleanup_strv_free_ char **config_dirs = NULL, **data_dirs = NULL;
         _cleanup_free_ char *data_home = NULL;
         _cleanup_strv_free_ char **res = NULL;
-        const char *e;
         char **tmp;
         int r;
 
-        /* Implement the mechanisms defined in
-         *
-         * http://standards.freedesktop.org/basedir-spec/basedir-spec-0.6.html
-         *
-         * We look in both the config and the data dirs because we
-         * want to encourage that distributors ship their unit files
-         * as data, and allow overriding as configuration.
-         */
-
-        e = getenv("XDG_CONFIG_DIRS");
-        if (e) {
-                config_dirs = strv_split(e, ":");
-                if (!config_dirs)
-                        return NULL;
-        }
-
-        r = user_data_dir(&data_home, "/systemd/user");
-        if (r < 0 && r != -ENXIO)
+        r = xdg_user_dirs(&config_dirs, &data_dirs);
+        if (r < 0)
                 return NULL;
 
-        e = getenv("XDG_DATA_DIRS");
-        if (e)
-                data_dirs = strv_split(e, ":");
-        else
-                data_dirs = strv_new("/usr/local/share",
-                                     "/usr/share",
-                                     NULL);
-        if (!data_dirs)
+        r = xdg_user_data_dir(&data_home, "/systemd/user");
+        if (r < 0 && r != -ENXIO)
                 return NULL;
 
         /* Now merge everything we found. */
@@ -196,10 +211,17 @@ static char** user_dirs(
         if (strv_extend(&res, persistent_config) < 0)
                 return NULL;
 
+        /* global config has lower priority than the user config of the same type */
+        if (strv_extend(&res, global_persistent_config) < 0)
+                return NULL;
+
         if (strv_extend_strv(&res, (char**) user_config_unit_paths, false) < 0)
                 return NULL;
 
         if (strv_extend(&res, runtime_config) < 0)
+                return NULL;
+
+        if (strv_extend(&res, global_runtime_config) < 0)
                 return NULL;
 
         if (strv_extend(&res, generator) < 0)
@@ -245,7 +267,6 @@ static int acquire_generator_dirs(
                 char **generator_early,
                 char **generator_late) {
 
-        _cleanup_(rmdir_and_freep) char *t = NULL;
         _cleanup_free_ char *x = NULL, *y = NULL, *z = NULL;
         const char *prefix;
 
@@ -311,7 +332,7 @@ static int acquire_transient_dir(
         else if (scope == UNIT_FILE_SYSTEM)
                 transient = strdup("/run/systemd/transient");
         else
-                return user_runtime_dir(ret, "/systemd/transient");
+                return xdg_user_runtime_dir(ret, "/systemd/transient");
 
         if (!transient)
                 return -ENOMEM;
@@ -339,11 +360,11 @@ static int acquire_config_dirs(UnitFileScope scope, char **persistent, char **ru
                 break;
 
         case UNIT_FILE_USER:
-                r = user_config_dir(&a, "/systemd/user");
+                r = xdg_user_config_dir(&a, "/systemd/user");
                 if (r < 0 && r != -ENXIO)
                         return r;
 
-                r = user_runtime_dir(runtime, "/systemd/user");
+                r = xdg_user_runtime_dir(runtime, "/systemd/user");
                 if (r < 0) {
                         if (r != -ENXIO)
                                 return r;
@@ -399,11 +420,11 @@ static int acquire_control_dirs(UnitFileScope scope, char **persistent, char **r
         }
 
         case UNIT_FILE_USER:
-                r = user_config_dir(&a, "/systemd/system.control");
+                r = xdg_user_config_dir(&a, "/systemd/user.control");
                 if (r < 0 && r != -ENXIO)
                         return r;
 
-                r = user_runtime_dir(runtime, "/systemd/system.control");
+                r = xdg_user_runtime_dir(runtime, "/systemd/user.control");
                 if (r < 0) {
                         if (r != -ENXIO)
                                 return r;
@@ -472,6 +493,7 @@ int lookup_paths_init(
         _cleanup_free_ char
                 *root = NULL,
                 *persistent_config = NULL, *runtime_config = NULL,
+                *global_persistent_config = NULL, *global_runtime_config = NULL,
                 *generator = NULL, *generator_early = NULL, *generator_late = NULL,
                 *transient = NULL,
                 *persistent_control = NULL, *runtime_control = NULL;
@@ -509,6 +531,12 @@ int lookup_paths_init(
         r = acquire_config_dirs(scope, &persistent_config, &runtime_config);
         if (r < 0)
                 return r;
+
+        if (scope == UNIT_FILE_USER) {
+                r = acquire_config_dirs(UNIT_FILE_GLOBAL, &global_persistent_config, &global_runtime_config);
+                if (r < 0)
+                        return r;
+        }
 
         if ((flags & LOOKUP_PATHS_EXCLUDE_GENERATED) == 0) {
                 /* Note: if XDG_RUNTIME_DIR is not set, this will fail completely with ENXIO */
@@ -598,20 +626,21 @@ int lookup_paths_init(
                                         runtime_config,
                                         "/run/systemd/user",
                                         STRV_IFNOTNULL(generator),
-                                        "/usr/local/lib/systemd/user",
                                         "/usr/local/share/systemd/user",
+                                        "/usr/share/systemd/user",
+                                        "/usr/local/lib/systemd/user",
                                         USER_DATA_UNIT_PATH,
                                         "/usr/lib/systemd/user",
-                                        "/usr/share/systemd/user",
                                         STRV_IFNOTNULL(generator_late),
                                         NULL);
                         break;
 
                 case UNIT_FILE_USER:
                         add = user_dirs(persistent_config, runtime_config,
+                                        global_persistent_config, global_runtime_config,
                                         generator, generator_early, generator_late,
                                         transient,
-                                        persistent_config, runtime_control);
+                                        persistent_control, runtime_control);
                         break;
 
                 default:
@@ -735,6 +764,14 @@ int lookup_paths_reduce(LookupPaths *p) {
         while (p->search_path[c]) {
                 struct stat st;
                 unsigned k;
+
+                /* Never strip the transient and control directories from the path */
+                if (path_equal_ptr(p->search_path[c], p->transient) ||
+                    path_equal_ptr(p->search_path[c], p->persistent_control) ||
+                    path_equal_ptr(p->search_path[c], p->runtime_control)) {
+                        c++;
+                        continue;
+                }
 
                 if (p->root_dir)
                         r = lstat(p->search_path[c], &st);

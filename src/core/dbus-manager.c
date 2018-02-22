@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -26,7 +27,6 @@
 #include "architecture.h"
 #include "build.h"
 #include "bus-common-errors.h"
-#include "clock-util.h"
 #include "dbus-execute.h"
 #include "dbus-job.h"
 #include "dbus-manager.h"
@@ -139,27 +139,18 @@ static int property_get_tainted(
                 void *userdata,
                 sd_bus_error *error) {
 
-        char buf[sizeof("split-usr:cgroups-missing:local-hwclock:")] = "", *e = buf;
+        _cleanup_free_ char *s = NULL;
         Manager *m = userdata;
 
         assert(bus);
         assert(reply);
         assert(m);
 
-        if (m->taint_usr)
-                e = stpcpy(e, "split-usr:");
+        s = manager_taint_string(m);
+        if (!s)
+                return log_oom();
 
-        if (access("/proc/cgroups", F_OK) < 0)
-                e = stpcpy(e, "cgroups-missing:");
-
-        if (clock_is_localtime(NULL) > 0)
-                e = stpcpy(e, "local-hwclock:");
-
-        /* remove the last ':' */
-        if (e != buf)
-                e[-1] = 0;
-
-        return sd_bus_message_append(reply, "s", buf);
+        return sd_bus_message_append(reply, "s", s);
 }
 
 static int property_get_log_target(
@@ -316,7 +307,7 @@ static int property_get_progress(
         assert(reply);
         assert(m);
 
-        if (dual_timestamp_is_set(&m->finish_timestamp))
+        if (MANAGER_IS_FINISHED(m))
                 d = 1.0;
         else
                 d = 1.0 - ((double) hashmap_size(m->jobs) / (double) m->n_installed_jobs);
@@ -381,21 +372,16 @@ static int property_get_timer_slack_nsec(
         return sd_bus_message_append(reply, "t", (uint64_t) prctl(PR_GET_TIMERSLACK));
 }
 
-static int method_get_unit(sd_bus_message *message, void *userdata, sd_bus_error *error) {
-        _cleanup_free_ char *path = NULL;
-        Manager *m = userdata;
-        const char *name;
+static int bus_get_unit_by_name(Manager *m, sd_bus_message *message, const char *name, Unit **ret_unit, sd_bus_error *error) {
         Unit *u;
         int r;
 
-        assert(message);
         assert(m);
+        assert(message);
+        assert(ret_unit);
 
-        /* Anyone can call this method */
-
-        r = sd_bus_message_read(message, "s", &name);
-        if (r < 0)
-                return r;
+        /* More or less a wrapper around manager_get_unit() that generates nice errors and has one trick up its sleeve:
+         * if the name is specified empty we use the client's unit. */
 
         if (isempty(name)) {
                 _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
@@ -417,6 +403,43 @@ static int method_get_unit(sd_bus_message *message, void *userdata, sd_bus_error
                 if (!u)
                         return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Unit %s not loaded.", name);
         }
+
+        *ret_unit = u;
+        return 0;
+}
+
+static int bus_load_unit_by_name(Manager *m, sd_bus_message *message, const char *name, Unit **ret_unit, sd_bus_error *error) {
+        assert(m);
+        assert(message);
+        assert(ret_unit);
+
+        /* Pretty much the same as bus_get_unit_by_name(), but we also load the unit if necessary. */
+
+        if (isempty(name))
+                return bus_get_unit_by_name(m, message, name, ret_unit, error);
+
+        return manager_load_unit(m, name, NULL, error, ret_unit);
+}
+
+static int method_get_unit(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        _cleanup_free_ char *path = NULL;
+        Manager *m = userdata;
+        const char *name;
+        Unit *u;
+        int r;
+
+        assert(message);
+        assert(m);
+
+        /* Anyone can call this method */
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         r = mac_selinux_unit_access_check(u, message, "status", error);
         if (r < 0)
@@ -550,26 +573,9 @@ static int method_load_unit(sd_bus_message *message, void *userdata, sd_bus_erro
         if (r < 0)
                 return r;
 
-        if (isempty(name)) {
-                _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
-                pid_t pid;
-
-                r = sd_bus_query_sender_creds(message, SD_BUS_CREDS_PID, &creds);
-                if (r < 0)
-                        return r;
-
-                r = sd_bus_creds_get_pid(creds, &pid);
-                if (r < 0)
-                        return r;
-
-                u = manager_get_unit_by_pid(m, pid);
-                if (!u)
-                        return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Client not member of any unit.");
-        } else {
-                r = manager_load_unit(m, name, NULL, error, &u);
-                if (r < 0)
-                        return r;
-        }
+        r = bus_load_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         r = mac_selinux_unit_access_check(u, message, "status", error);
         if (r < 0)
@@ -642,8 +648,10 @@ static int method_start_unit_replace(sd_bus_message *message, void *userdata, sd
         if (r < 0)
                 return r;
 
-        u = manager_get_unit(m, old_name);
-        if (!u || !u->job || u->job->type != JOB_START)
+        r = bus_get_unit_by_name(m, message, old_name, &u, error);
+        if (r < 0)
+                return r;
+        if (!u->job || u->job->type != JOB_START)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_JOB, "No job queued for unit %s", old_name);
 
         return method_start_unit_generic(message, m, JOB_START, false, error);
@@ -662,9 +670,9 @@ static int method_kill_unit(sd_bus_message *message, void *userdata, sd_bus_erro
         if (r < 0)
                 return r;
 
-        u = manager_get_unit(m, name);
-        if (!u)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Unit %s is not loaded.", name);
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         return bus_unit_method_kill(message, u, error);
 }
@@ -682,9 +690,9 @@ static int method_reset_failed_unit(sd_bus_message *message, void *userdata, sd_
         if (r < 0)
                 return r;
 
-        u = manager_get_unit(m, name);
-        if (!u)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Unit %s is not loaded.", name);
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         return bus_unit_method_reset_failed(message, u, error);
 }
@@ -702,7 +710,7 @@ static int method_set_unit_properties(sd_bus_message *message, void *userdata, s
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(m, name, NULL, error, &u);
+        r = bus_load_unit_by_name(m, message, name, &u, error);
         if (r < 0)
                 return r;
 
@@ -726,7 +734,7 @@ static int method_ref_unit(sd_bus_message *message, void *userdata, sd_bus_error
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(m, name, NULL, error, &u);
+        r = bus_load_unit_by_name(m, message, name, &u, error);
         if (r < 0)
                 return r;
 
@@ -750,7 +758,7 @@ static int method_unref_unit(sd_bus_message *message, void *userdata, sd_bus_err
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(m, name, NULL, error, &u);
+        r = bus_load_unit_by_name(m, message, name, &u, error);
         if (r < 0)
                 return r;
 
@@ -819,7 +827,7 @@ static int method_list_units_by_names(sd_bus_message *message, void *userdata, s
                 if (!unit_name_is_valid(*unit, UNIT_NAME_ANY))
                         continue;
 
-                r = manager_load_unit(m, *unit, NULL, error, &u);
+                r = bus_load_unit_by_name(m, message, *unit, &u, error);
                 if (r < 0)
                         return r;
 
@@ -848,11 +856,31 @@ static int method_get_unit_processes(sd_bus_message *message, void *userdata, sd
         if (r < 0)
                 return r;
 
-        u = manager_get_unit(m, name);
-        if (!u)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_UNIT, "Unit %s not loaded.", name);
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
 
         return bus_unit_method_get_processes(message, u, error);
+}
+
+static int method_attach_processes_to_unit(sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = userdata;
+        const char *name;
+        Unit *u;
+        int r;
+
+        assert(message);
+        assert(m);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        r = bus_get_unit_by_name(m, message, name, &u, error);
+        if (r < 0)
+                return r;
+
+        return bus_unit_method_attach_processes(message, u, error);
 }
 
 static int transient_unit_from_message(
@@ -1282,9 +1310,7 @@ static int method_unsubscribe(sd_bus_message *message, void *userdata, sd_bus_er
 
 static int method_dump(sd_bus_message *message, void *userdata, sd_bus_error *error) {
         _cleanup_free_ char *dump = NULL;
-        _cleanup_fclose_ FILE *f = NULL;
         Manager *m = userdata;
-        size_t size;
         int r;
 
         assert(message);
@@ -1296,14 +1322,7 @@ static int method_dump(sd_bus_message *message, void *userdata, sd_bus_error *er
         if (r < 0)
                 return r;
 
-        f = open_memstream(&dump, &size);
-        if (!f)
-                return -ENOMEM;
-
-        manager_dump_units(m, f, NULL);
-        manager_dump_jobs(m, f, NULL);
-
-        r = fflush_and_check(f);
+        r = manager_get_dump_string(m, &dump);
         if (r < 0)
                 return r;
 
@@ -2406,18 +2425,18 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_PROPERTY("Virtualization", "s", property_get_virtualization, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Architecture", "s", property_get_architecture, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Tainted", "s", property_get_tainted, 0, SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("FirmwareTimestamp", offsetof(Manager, firmware_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("LoaderTimestamp", offsetof(Manager, loader_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("KernelTimestamp", offsetof(Manager, kernel_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("InitRDTimestamp", offsetof(Manager, initrd_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("UserspaceTimestamp", offsetof(Manager, userspace_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("FinishTimestamp", offsetof(Manager, finish_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("SecurityStartTimestamp", offsetof(Manager, security_start_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("SecurityFinishTimestamp", offsetof(Manager, security_finish_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("GeneratorsStartTimestamp", offsetof(Manager, generators_start_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("GeneratorsFinishTimestamp", offsetof(Manager, generators_finish_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("UnitsLoadStartTimestamp", offsetof(Manager, units_load_start_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
-        BUS_PROPERTY_DUAL_TIMESTAMP("UnitsLoadFinishTimestamp", offsetof(Manager, units_load_finish_timestamp), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("FirmwareTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_FIRMWARE]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("LoaderTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_LOADER]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("KernelTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_KERNEL]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("InitRDTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_INITRD]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("UserspaceTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_USERSPACE]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("FinishTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_FINISH]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("SecurityStartTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_SECURITY_START]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("SecurityFinishTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_SECURITY_FINISH]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("GeneratorsStartTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_GENERATORS_START]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("GeneratorsFinishTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_GENERATORS_FINISH]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("UnitsLoadStartTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_UNITS_LOAD_START]), SD_BUS_VTABLE_PROPERTY_CONST),
+        BUS_PROPERTY_DUAL_TIMESTAMP("UnitsLoadFinishTimestamp", offsetof(Manager, timestamps[MANAGER_TIMESTAMP_UNITS_LOAD_FINISH]), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_WRITABLE_PROPERTY("LogLevel", "s", property_get_log_level, property_set_log_level, 0, 0),
         SD_BUS_WRITABLE_PROPERTY("LogTarget", "s", property_get_log_target, property_set_log_target, 0, 0),
         SD_BUS_PROPERTY("NNames", "u", property_get_n_names, 0, 0),
@@ -2434,6 +2453,7 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_PROPERTY("DefaultStandardError", "s", bus_property_get_exec_output, offsetof(Manager, default_std_output), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_WRITABLE_PROPERTY("RuntimeWatchdogUSec", "t", bus_property_get_usec, property_set_runtime_watchdog, offsetof(Manager, runtime_watchdog), 0),
         SD_BUS_WRITABLE_PROPERTY("ShutdownWatchdogUSec", "t", bus_property_get_usec, bus_property_set_usec, offsetof(Manager, shutdown_watchdog), 0),
+        SD_BUS_WRITABLE_PROPERTY("ServiceWatchdogs", "b", bus_property_get_bool, bus_property_set_bool, offsetof(Manager, service_watchdogs), 0),
         SD_BUS_PROPERTY("ControlGroup", "s", NULL, offsetof(Manager, cgroup_root), 0),
         SD_BUS_PROPERTY("SystemState", "s", property_get_system_state, 0, 0),
         SD_BUS_PROPERTY("ExitCode", "y", bus_property_get_unsigned, offsetof(Manager, return_value), 0),
@@ -2441,8 +2461,10 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_PROPERTY("DefaultTimeoutStartUSec", "t", bus_property_get_usec, offsetof(Manager, default_timeout_start_usec), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DefaultTimeoutStopUSec", "t", bus_property_get_usec, offsetof(Manager, default_timeout_stop_usec), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DefaultRestartUSec", "t", bus_property_get_usec, offsetof(Manager, default_restart_usec), SD_BUS_VTABLE_PROPERTY_CONST),
-        SD_BUS_PROPERTY("DefaultStartLimitIntervalSec", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST),
-        SD_BUS_PROPERTY("DefaultStartLimitInterval", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN), /* obsolete alias name */
+        SD_BUS_PROPERTY("DefaultStartLimitIntervalUSec", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST),
+        /* The following two items are obsolete alias */
+        SD_BUS_PROPERTY("DefaultStartLimitIntervalSec", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN),
+        SD_BUS_PROPERTY("DefaultStartLimitInterval", "t", bus_property_get_usec, offsetof(Manager, default_start_limit_interval), SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN),
         SD_BUS_PROPERTY("DefaultStartLimitBurst", "u", bus_property_get_unsigned, offsetof(Manager, default_start_limit_burst), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DefaultCPUAccounting", "b", bus_property_get_bool, offsetof(Manager, default_cpu_accounting), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("DefaultBlockIOAccounting", "b", bus_property_get_bool, offsetof(Manager, default_blockio_accounting), SD_BUS_VTABLE_PROPERTY_CONST),
@@ -2502,6 +2524,7 @@ const sd_bus_vtable bus_manager_vtable[] = {
         SD_BUS_METHOD("UnrefUnit", "s", NULL, method_unref_unit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("StartTransientUnit", "ssa(sv)a(sa(sv))", "o", method_start_transient_unit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetUnitProcesses", "s", "a(sus)", method_get_unit_processes, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("AttachProcessesToUnit", "ssau", NULL, method_attach_processes_to_unit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetJob", "u", "o", method_get_job, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetJobAfter", "u", "a(usssoo)", method_get_job_waiting, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetJobBefore", "u", "a(usssoo)", method_get_job_waiting, SD_BUS_VTABLE_UNPRIVILEGED),

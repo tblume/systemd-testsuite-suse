@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -305,18 +306,19 @@ void job_dump(Job *j, FILE*f, const char *prefix) {
         assert(j);
         assert(f);
 
-        if (!prefix)
-                prefix = "";
+        prefix = strempty(prefix);
 
         fprintf(f,
                 "%s-> Job %u:\n"
                 "%s\tAction: %s -> %s\n"
                 "%s\tState: %s\n"
-                "%s\tIrreversible: %s\n",
+                "%s\tIrreversible: %s\n"
+                "%s\tMay GC: %s\n",
                 prefix, j->id,
                 prefix, j->unit->id, job_type_to_string(j->type),
                 prefix, job_state_to_string(j->state),
-                prefix, yes_no(j->irreversible));
+                prefix, yes_no(j->irreversible),
+                prefix, yes_no(job_may_gc(j)));
 }
 
 /*
@@ -437,6 +439,7 @@ int job_type_merge_and_collapse(JobType *a, JobType b, Unit *u) {
 static bool job_is_runnable(Job *j) {
         Iterator i;
         Unit *other;
+        void *v;
 
         assert(j);
         assert(j->installed);
@@ -459,13 +462,12 @@ static bool job_is_runnable(Job *j) {
                 return true;
 
         if (IN_SET(j->type, JOB_START, JOB_VERIFY_ACTIVE, JOB_RELOAD)) {
-
                 /* Immediate result is that the job is or might be
                  * started. In this case let's wait for the
                  * dependencies, regardless whether they are
                  * starting or stopping something. */
 
-                SET_FOREACH(other, j->unit->dependencies[UNIT_AFTER], i)
+                HASHMAP_FOREACH_KEY(v, other, j->unit->dependencies[UNIT_AFTER], i)
                         if (other->job)
                                 return false;
         }
@@ -473,7 +475,7 @@ static bool job_is_runnable(Job *j) {
         /* Also, if something else is being stopped and we should
          * change state after it, then let's wait. */
 
-        SET_FOREACH(other, j->unit->dependencies[UNIT_BEFORE], i)
+        HASHMAP_FOREACH_KEY(v, other, j->unit->dependencies[UNIT_BEFORE], i)
                 if (other->job &&
                     IN_SET(other->job->type, JOB_STOP, JOB_RESTART))
                         return false;
@@ -531,7 +533,7 @@ static int job_perform_on_unit(Job **j) {
 
                 case JOB_RESTART:
                         t = JOB_STOP;
-                        /* fall through */
+                        _fallthrough_;
                 case JOB_STOP:
                         r = unit_stop(u);
                         break;
@@ -774,9 +776,12 @@ static void job_log_status_message(Unit *u, JobType t, JobResult result) {
         if (!format)
                 return;
 
-        /* The description might be longer than the buffer, but that's OK, we'll just truncate it here */
+        /* The description might be longer than the buffer, but that's OK,
+         * we'll just truncate it here. Note that we use snprintf() rather than
+         * xsprintf() on purpose here: we are fine with truncation and don't
+         * consider that an error. */
         DISABLE_WARNING_FORMAT_NONLITERAL;
-        snprintf(buf, sizeof(buf), format, unit_description(u));
+        (void) snprintf(buf, sizeof(buf), format, unit_description(u));
         REENABLE_WARNING;
 
         switch (t) {
@@ -832,10 +837,11 @@ static void job_emit_status_message(Unit *u, JobType t, JobResult result) {
 static void job_fail_dependencies(Unit *u, UnitDependency d) {
         Unit *other;
         Iterator i;
+        void *v;
 
         assert(u);
 
-        SET_FOREACH(other, u->dependencies[d], i) {
+        HASHMAP_FOREACH_KEY(v, other, u->dependencies[d], i) {
                 Job *j = other->job;
 
                 if (!j)
@@ -852,6 +858,7 @@ int job_finish_and_invalidate(Job *j, JobResult result, bool recursive, bool alr
         Unit *other;
         JobType t;
         Iterator i;
+        void *v;
 
         assert(j);
         assert(j->installed);
@@ -868,14 +875,13 @@ int job_finish_and_invalidate(Job *j, JobResult result, bool recursive, bool alr
         if (!already)
                 job_emit_status_message(u, t, result);
 
-        job_add_to_dbus_queue(j);
-
         /* Patch restart jobs so that they become normal start jobs */
         if (result == JOB_DONE && t == JOB_RESTART) {
 
                 job_change_type(j, JOB_START);
                 job_set_state(j, JOB_WAITING);
 
+                job_add_to_dbus_queue(j);
                 job_add_to_run_queue(j);
                 job_add_to_gc_queue(j);
 
@@ -920,12 +926,12 @@ int job_finish_and_invalidate(Job *j, JobResult result, bool recursive, bool alr
 
 finish:
         /* Try to start the next jobs that can be started */
-        SET_FOREACH(other, u->dependencies[UNIT_AFTER], i)
+        HASHMAP_FOREACH_KEY(v, other, u->dependencies[UNIT_AFTER], i)
                 if (other->job) {
                         job_add_to_run_queue(other->job);
                         job_add_to_gc_queue(other->job);
                 }
-        SET_FOREACH(other, u->dependencies[UNIT_BEFORE], i)
+        HASHMAP_FOREACH_KEY(v, other, u->dependencies[UNIT_BEFORE], i)
                 if (other->job) {
                         job_add_to_run_queue(other->job);
                         job_add_to_gc_queue(other->job);
@@ -1242,7 +1248,7 @@ void job_shutdown_magic(Job *j) {
         if (detect_container() > 0)
                 return;
 
-        asynchronous_sync();
+        (void) asynchronous_sync(NULL);
 }
 
 int job_get_timeout(Job *j, usec_t *timeout) {
@@ -1271,20 +1277,22 @@ int job_get_timeout(Job *j, usec_t *timeout) {
         return 1;
 }
 
-bool job_check_gc(Job *j) {
+bool job_may_gc(Job *j) {
         Unit *other;
         Iterator i;
+        void *v;
 
         assert(j);
 
         /* Checks whether this job should be GC'ed away. We only do this for jobs of units that have no effect on their
-         * own and just track external state. For now the only unit type that qualifies for this are .device units. */
+         * own and just track external state. For now the only unit type that qualifies for this are .device units.
+         * Returns true if the job can be collected. */
 
         if (!UNIT_VTABLE(j->unit)->gc_jobs)
-                return true;
+                return false;
 
         if (sd_bus_track_count(j->bus_track) > 0)
-                return true;
+                return false;
 
         /* FIXME: So this is a bit ugly: for now we don't properly track references made via private bus connections
          * (because it's nasty, as sd_bus_track doesn't apply to it). We simply remember that the job was once
@@ -1294,15 +1302,15 @@ bool job_check_gc(Job *j) {
                 if (set_isempty(j->unit->manager->private_buses))
                         j->ref_by_private_bus = false;
                 else
-                        return true;
+                        return false;
         }
 
         if (j->type == JOB_NOP)
-                return true;
+                return false;
 
         /* If a job is ordered after ours, and is to be started, then it needs to wait for us, regardless if we stop or
          * start, hence let's not GC in that case. */
-        SET_FOREACH(other, j->unit->dependencies[UNIT_BEFORE], i) {
+        HASHMAP_FOREACH_KEY(v, other, j->unit->dependencies[UNIT_BEFORE], i) {
                 if (!other->job)
                         continue;
 
@@ -1310,19 +1318,19 @@ bool job_check_gc(Job *j) {
                         continue;
 
                 if (IN_SET(other->job->type, JOB_START, JOB_VERIFY_ACTIVE, JOB_RELOAD))
-                        return true;
+                        return false;
         }
 
         /* If we are going down, but something else is ordered After= us, then it needs to wait for us */
         if (IN_SET(j->type, JOB_STOP, JOB_RESTART))
-                SET_FOREACH(other, j->unit->dependencies[UNIT_AFTER], i) {
+                HASHMAP_FOREACH_KEY(v, other, j->unit->dependencies[UNIT_AFTER], i) {
                         if (!other->job)
                                 continue;
 
                         if (other->job->ignore_order)
                                 continue;
 
-                        return true;
+                        return false;
                 }
 
         /* The logic above is kinda the inverse of the job_is_runnable() logic. Specifically, if the job "we" is
@@ -1342,7 +1350,7 @@ bool job_check_gc(Job *j) {
          *
          */
 
-        return false;
+        return true;
 }
 
 void job_add_to_gc_queue(Job *j) {
@@ -1351,7 +1359,7 @@ void job_add_to_gc_queue(Job *j) {
         if (j->in_gc_queue)
                 return;
 
-        if (job_check_gc(j))
+        if (!job_may_gc(j))
                 return;
 
         LIST_PREPEND(gc_queue, j->unit->manager->gc_job_queue, j);
@@ -1393,6 +1401,7 @@ int job_get_before(Job *j, Job*** ret) {
         size_t n = 0, n_allocated = 0;
         Unit *other = NULL;
         Iterator i;
+        void *v;
 
         /* Returns a list of all pending jobs that need to finish before this job may be started. */
 
@@ -1406,7 +1415,7 @@ int job_get_before(Job *j, Job*** ret) {
 
         if (IN_SET(j->type, JOB_START, JOB_VERIFY_ACTIVE, JOB_RELOAD)) {
 
-                SET_FOREACH(other, j->unit->dependencies[UNIT_AFTER], i) {
+                HASHMAP_FOREACH_KEY(v, other, j->unit->dependencies[UNIT_AFTER], i) {
                         if (!other->job)
                                 continue;
 
@@ -1416,7 +1425,7 @@ int job_get_before(Job *j, Job*** ret) {
                 }
         }
 
-        SET_FOREACH(other, j->unit->dependencies[UNIT_BEFORE], i) {
+        HASHMAP_FOREACH_KEY(v, other, j->unit->dependencies[UNIT_BEFORE], i) {
                 if (!other->job)
                         continue;
 
@@ -1440,6 +1449,7 @@ int job_get_after(Job *j, Job*** ret) {
         _cleanup_free_ Job** list = NULL;
         size_t n = 0, n_allocated = 0;
         Unit *other = NULL;
+        void *v;
         Iterator i;
 
         assert(j);
@@ -1447,7 +1457,7 @@ int job_get_after(Job *j, Job*** ret) {
 
         /* Returns a list of all pending jobs that are waiting for this job to finish. */
 
-        SET_FOREACH(other, j->unit->dependencies[UNIT_BEFORE], i) {
+        HASHMAP_FOREACH_KEY(v, other, j->unit->dependencies[UNIT_BEFORE], i) {
                 if (!other->job)
                         continue;
 
@@ -1464,7 +1474,7 @@ int job_get_after(Job *j, Job*** ret) {
 
         if (IN_SET(j->type, JOB_STOP, JOB_RESTART)) {
 
-                SET_FOREACH(other, j->unit->dependencies[UNIT_AFTER], i) {
+                HASHMAP_FOREACH_KEY(v, other, j->unit->dependencies[UNIT_AFTER], i) {
                         if (!other->job)
                                 continue;
 

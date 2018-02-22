@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -58,30 +59,24 @@ static void slice_set_state(Slice *t, SliceState state) {
 }
 
 static int slice_add_parent_slice(Slice *s) {
-        char *a, *dash;
-        Unit *parent;
+        Unit *u = UNIT(s), *parent;
+        _cleanup_free_ char *a = NULL;
         int r;
 
         assert(s);
 
-        if (UNIT_ISSET(UNIT(s)->slice))
+        if (UNIT_ISSET(u->slice))
                 return 0;
 
-        if (unit_has_name(UNIT(s), SPECIAL_ROOT_SLICE))
-                return 0;
+        r = slice_build_parent_slice(u->id, &a);
+        if (r <= 0) /* 0 means root slice */
+                return r;
 
-        a = strdupa(UNIT(s)->id);
-        dash = strrchr(a, '-');
-        if (dash)
-                strcpy(dash, ".slice");
-        else
-                a = (char*) SPECIAL_ROOT_SLICE;
-
-        r = manager_load_unit(UNIT(s)->manager, a, NULL, NULL, &parent);
+        r = manager_load_unit(u->manager, a, NULL, NULL, &parent);
         if (r < 0)
                 return r;
 
-        unit_ref_set(&UNIT(s)->slice, parent);
+        unit_ref_set(&u->slice, u, parent);
         return 0;
 }
 
@@ -97,7 +92,7 @@ static int slice_add_default_dependencies(Slice *s) {
         r = unit_add_two_dependencies_by_name(
                         UNIT(s),
                         UNIT_BEFORE, UNIT_CONFLICTS,
-                        SPECIAL_SHUTDOWN_TARGET, NULL, true);
+                        SPECIAL_SHUTDOWN_TARGET, NULL, true, UNIT_DEPENDENCY_DEFAULT);
         if (r < 0)
                 return r;
 
@@ -142,10 +137,32 @@ static int slice_load_root_slice(Unit *u) {
          * special semantics we synthesize it here, instead of relying on the unit file on disk. */
 
         u->default_dependencies = false;
-        u->ignore_on_isolate = true;
 
         if (!u->description)
                 u->description = strdup("Root Slice");
+        if (!u->documentation)
+                u->documentation = strv_new("man:systemd.special(7)", NULL);
+
+        return 1;
+}
+
+static int slice_load_system_slice(Unit *u) {
+        assert(u);
+
+        if (!MANAGER_IS_SYSTEM(u->manager))
+                return 0;
+        if (!unit_has_name(u, SPECIAL_SYSTEM_SLICE))
+                return 0;
+
+        u->perpetual = true;
+
+        /* The system slice is a bit special. For example it is always running and cannot be terminated. Because of its
+         * special semantics we synthesize it here, instead of relying on the unit file on disk. */
+
+        u->default_dependencies = false;
+
+        if (!u->description)
+                u->description = strdup("System Slice");
         if (!u->documentation)
                 u->documentation = strv_new("man:systemd.special(7)", NULL);
 
@@ -162,6 +179,10 @@ static int slice_load(Unit *u) {
         r = slice_load_root_slice(u);
         if (r < 0)
                 return r;
+        r = slice_load_system_slice(u);
+        if (r < 0)
+                return r;
+
         r = unit_load_fragment_and_dropin_optional(u);
         if (r < 0)
                 return r;
@@ -292,17 +313,17 @@ _pure_ static const char *slice_sub_state_to_string(Unit *u) {
         return slice_state_to_string(SLICE(u)->state);
 }
 
-static void slice_enumerate(Manager *m) {
+static void slice_enumerate_perpetual(Manager *m, const char *name) {
         Unit *u;
         int r;
 
         assert(m);
 
-        u = manager_get_unit(m, SPECIAL_ROOT_SLICE);
+        u = manager_get_unit(m, name);
         if (!u) {
-                r = unit_new_for_name(m, sizeof(Slice), SPECIAL_ROOT_SLICE, &u);
+                r = unit_new_for_name(m, sizeof(Slice), name, &u);
                 if (r < 0) {
-                        log_error_errno(r, "Failed to allocate the special " SPECIAL_ROOT_SLICE " unit: %m");
+                        log_error_errno(r, "Failed to allocate the special %s unit: %m", name);
                         return;
                 }
         }
@@ -312,6 +333,15 @@ static void slice_enumerate(Manager *m) {
 
         unit_add_to_load_queue(u);
         unit_add_to_dbus_queue(u);
+}
+
+static void slice_enumerate(Manager *m) {
+        assert(m);
+
+        slice_enumerate_perpetual(m, SPECIAL_ROOT_SLICE);
+
+        if (MANAGER_IS_SYSTEM(m))
+                slice_enumerate_perpetual(m, SPECIAL_SYSTEM_SLICE);
 }
 
 const UnitVTable slice_vtable = {

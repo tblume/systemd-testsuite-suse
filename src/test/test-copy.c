@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd
 
@@ -145,7 +146,7 @@ static void test_copy_tree(void) {
                 assert_se((f = strjoin(original_dir, *p)));
                 assert_se((l = strjoin(copy_dir, *link)));
 
-                assert_se(readlink_and_canonicalize(l, NULL, &target) == 0);
+                assert_se(chase_symlinks(l, NULL, 0, &target) == 1);
                 assert_se(path_equal(f, target));
         }
 

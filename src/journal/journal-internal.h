@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -79,6 +80,7 @@ struct Directory {
         char *path;
         int wd;
         bool is_root;
+        unsigned last_seen_generation;
 };
 
 struct sd_journal {
@@ -88,6 +90,7 @@ struct sd_journal {
         char *prefix;
 
         OrderedHashmap *files;
+        IteratedCache *files_cache;
         MMapCache *mmap;
 
         Location current_location;
@@ -102,6 +105,7 @@ struct sd_journal {
         int inotify_fd;
         unsigned current_invalidate_counter, last_invalidate_counter;
         usec_t last_process_usec;
+        unsigned generation;
 
         /* Iterating through unique fields and their data values */
         char *unique_field;

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -19,6 +20,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdio_ext.h>
 #include <sys/prctl.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -100,6 +102,7 @@ enum {
         CONTEXT_SIGNAL,
         CONTEXT_TIMESTAMP,
         CONTEXT_RLIMIT,
+        CONTEXT_HOSTNAME,
         CONTEXT_COMM,
         CONTEXT_EXE,
         CONTEXT_UNIT,
@@ -147,7 +150,7 @@ static int parse_config(void) {
                                         CONF_PATHS_NULSTR("systemd/coredump.conf.d"),
                                         "Coredump\0",
                                         config_item_table_lookup, items,
-                                        false, NULL);
+                                        CONFIG_PARSE_WARN, NULL);
 }
 
 static inline uint64_t storage_size_max(void) {
@@ -164,7 +167,7 @@ static int fix_acl(int fd, uid_t uid) {
 
         assert(fd >= 0);
 
-        if (uid <= SYSTEM_UID_MAX)
+        if (uid_is_system(uid) || uid_is_dynamic(uid) || uid == UID_NOBODY)
                 return 0;
 
         /* Make sure normal users can read (but not write or delete)
@@ -203,6 +206,7 @@ static int fix_xattr(int fd, const char *context[_CONTEXT_MAX]) {
                 [CONTEXT_SIGNAL] = "user.coredump.signal",
                 [CONTEXT_TIMESTAMP] = "user.coredump.timestamp",
                 [CONTEXT_RLIMIT] = "user.coredump.rlimit",
+                [CONTEXT_HOSTNAME] = "user.coredump.hostname",
                 [CONTEXT_COMM] = "user.coredump.comm",
                 [CONTEXT_EXE] = "user.coredump.exe",
         };
@@ -255,6 +259,8 @@ static int fix_permissions(
 
         if (fsync(fd) < 0)
                 return log_error_errno(errno, "Failed to sync coredump %s: %m", coredump_tmpfile_name(filename));
+
+        (void) fsync_directory_of_file(fd);
 
         r = link_tmpfile(fd, filename, target);
         if (r < 0)
@@ -539,6 +545,8 @@ static int compose_open_fds(pid_t pid, char **open_fds) {
         if (!stream)
                 return -ENOMEM;
 
+        (void) __fsetlocking(stream, FSETLOCKING_BYCALLER);
+
         FOREACH_DIRENT(dent, proc_fd_dir, return -errno) {
                 _cleanup_fclose_ FILE *fdinfo = NULL;
                 _cleanup_free_ char *fdname = NULL;
@@ -558,13 +566,13 @@ static int compose_open_fds(pid_t pid, char **open_fds) {
                         continue;
 
                 fdinfo = fdopen(fd, "re");
-                if (fdinfo == NULL) {
-                        close(fd);
+                if (!fdinfo) {
+                        safe_close(fd);
                         continue;
                 }
 
                 FOREACH_LINE(line, fdinfo, break) {
-                        fputs_unlocked(line, stream);
+                        fputs(line, stream);
                         if (!endswith(line, "\n"))
                                 fputc('\n', stream);
                 }
@@ -844,6 +852,7 @@ static void map_context_fields(const struct iovec *iovec, const char* context[])
                 [CONTEXT_SIGNAL] = "COREDUMP_SIGNAL=",
                 [CONTEXT_TIMESTAMP] = "COREDUMP_TIMESTAMP=",
                 [CONTEXT_RLIMIT] = "COREDUMP_RLIMIT=",
+                [CONTEXT_HOSTNAME] = "COREDUMP_HOSTNAME=",
                 [CONTEXT_COMM] = "COREDUMP_COMM=",
                 [CONTEXT_EXE] = "COREDUMP_EXE=",
         };
@@ -977,6 +986,7 @@ static int process_socket(int fd) {
         assert(context[CONTEXT_SIGNAL]);
         assert(context[CONTEXT_TIMESTAMP]);
         assert(context[CONTEXT_RLIMIT]);
+        assert(context[CONTEXT_HOSTNAME]);
         assert(context[CONTEXT_COMM]);
         assert(coredump_fd >= 0);
 
@@ -1063,7 +1073,7 @@ static int send_iovec(const struct iovec iovec[], size_t n_iovec, int input_fd) 
         return 0;
 }
 
-static char* set_iovec_field(struct iovec iovec[27], size_t *n_iovec, const char *field, const char *value) {
+static char* set_iovec_field(struct iovec *iovec, size_t *n_iovec, const char *field, const char *value) {
         char *x;
 
         x = strappend(field, value);
@@ -1072,7 +1082,7 @@ static char* set_iovec_field(struct iovec iovec[27], size_t *n_iovec, const char
         return x;
 }
 
-static char* set_iovec_field_free(struct iovec iovec[27], size_t *n_iovec, const char *field, char *value) {
+static char* set_iovec_field_free(struct iovec *iovec, size_t *n_iovec, const char *field, char *value) {
         char *x;
 
         x = set_iovec_field(iovec, n_iovec, field, value);
@@ -1085,7 +1095,7 @@ static int gather_pid_metadata(
                 char **comm_fallback,
                 struct iovec *iovec, size_t *n_iovec) {
 
-        /* We need 26 empty slots in iovec!
+        /* We need 27 empty slots in iovec!
          *
          * Note that if we fail on oom later on, we do not roll-back changes to the iovec structure. (It remains valid,
          * with the first n_iovec fields initialized.) */
@@ -1122,7 +1132,7 @@ static int gather_pid_metadata(
                 /* If this is PID 1 disable coredump collection, we'll unlikely be able to process it later on. */
                 if (is_pid1_crash((const char**) context)) {
                         log_notice("Due to PID 1 having crashed coredump collection will now be turned off.");
-                        (void) write_string_file("/proc/sys/kernel/core_pattern", "|/bin/false", 0);
+                        disable_coredumps();
                 }
 
                 set_iovec_field(iovec, n_iovec, "COREDUMP_UNIT=", context[CONTEXT_UNIT]);
@@ -1145,6 +1155,9 @@ static int gather_pid_metadata(
                 return log_oom();
 
         if (!set_iovec_field(iovec, n_iovec, "COREDUMP_RLIMIT=", context[CONTEXT_RLIMIT]))
+                return log_oom();
+
+        if (!set_iovec_field(iovec, n_iovec, "COREDUMP_HOSTNAME=", context[CONTEXT_HOSTNAME]))
                 return log_oom();
 
         if (!set_iovec_field(iovec, n_iovec, "COREDUMP_COMM=", context[CONTEXT_COMM]))
@@ -1214,7 +1227,7 @@ static int gather_pid_metadata(
         if (get_process_environ(pid, &t) >= 0)
                 set_iovec_field_free(iovec, n_iovec, "COREDUMP_ENVIRON=", t);
 
-        t = strjoin("COREDUMP_TIMESTAMP=", context[CONTEXT_TIMESTAMP], "000000", NULL);
+        t = strjoin("COREDUMP_TIMESTAMP=", context[CONTEXT_TIMESTAMP], "000000");
         if (t)
                 iovec[(*n_iovec)++] = IOVEC_MAKE_STRING(t);
 
@@ -1227,7 +1240,7 @@ static int gather_pid_metadata(
 static int process_kernel(int argc, char* argv[]) {
 
         char* context[_CONTEXT_MAX] = {};
-        struct iovec iovec[28 + SUBMIT_COREDUMP_FIELDS];
+        struct iovec iovec[29 + SUBMIT_COREDUMP_FIELDS];
         size_t i, n_iovec, n_to_free = 0;
         int r;
 
@@ -1244,6 +1257,7 @@ static int process_kernel(int argc, char* argv[]) {
         context[CONTEXT_SIGNAL]    = argv[1 + CONTEXT_SIGNAL];
         context[CONTEXT_TIMESTAMP] = argv[1 + CONTEXT_TIMESTAMP];
         context[CONTEXT_RLIMIT]    = argv[1 + CONTEXT_RLIMIT];
+        context[CONTEXT_HOSTNAME]  = argv[1 + CONTEXT_HOSTNAME];
 
         r = gather_pid_metadata(context, argv + 1 + CONTEXT_COMM, iovec, &n_to_free);
         if (r < 0)
@@ -1300,9 +1314,10 @@ static int process_backtrace(int argc, char *argv[]) {
         context[CONTEXT_SIGNAL]    = argv[2 + CONTEXT_SIGNAL];
         context[CONTEXT_TIMESTAMP] = argv[2 + CONTEXT_TIMESTAMP];
         context[CONTEXT_RLIMIT]    = argv[2 + CONTEXT_RLIMIT];
+        context[CONTEXT_HOSTNAME]  = argv[2 + CONTEXT_HOSTNAME];
 
-        n_allocated = 33 + COREDUMP_STORAGE_EXTERNAL;
-        /* 25 metadata, 2 static, +unknown input, 4 storage, rounded up */
+        n_allocated = 34 + COREDUMP_STORAGE_EXTERNAL;
+        /* 26 metadata, 2 static, +unknown input, 4 storage, rounded up */
         iovec = new(struct iovec, n_allocated);
         if (!iovec)
                 return log_oom();

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -49,7 +50,7 @@ void server_forward_kmsg(
         _cleanup_free_ char *ident_buf = NULL;
         struct iovec iovec[5];
         char header_priority[DECIMAL_STR_MAX(priority) + 3],
-             header_pid[sizeof("[]: ")-1 + DECIMAL_STR_MAX(pid_t) + 1];
+             header_pid[STRLEN("[]: ") + DECIMAL_STR_MAX(pid_t) + 1];
         int n = 0;
 
         assert(s);
@@ -97,27 +98,30 @@ void server_forward_kmsg(
                 log_debug_errno(errno, "Failed to write to /dev/kmsg for logging: %m");
 }
 
-static bool is_us(const char *pid) {
-        pid_t t;
+static bool is_us(const char *identifier, const char *pid) {
+        pid_t pid_num;
 
-        assert(pid);
-
-        if (parse_pid(pid, &t) < 0)
+        if (!identifier || !pid)
                 return false;
 
-        return t == getpid_cached();
+        if (parse_pid(pid, &pid_num) < 0)
+                return false;
+
+        return pid_num == getpid_cached() &&
+               streq(identifier, program_invocation_short_name);
 }
 
 static void dev_kmsg_record(Server *s, const char *p, size_t l) {
-        struct iovec iovec[N_IOVEC_META_FIELDS + 7 + N_IOVEC_KERNEL_FIELDS + 2 + N_IOVEC_UDEV_FIELDS];
+
         _cleanup_free_ char *message = NULL, *syslog_priority = NULL, *syslog_pid = NULL, *syslog_facility = NULL, *syslog_identifier = NULL, *source_time = NULL, *identifier = NULL, *pid = NULL;
-        int priority, r;
-        unsigned n = 0, z = 0, j;
+        struct iovec iovec[N_IOVEC_META_FIELDS + 7 + N_IOVEC_KERNEL_FIELDS + 2 + N_IOVEC_UDEV_FIELDS];
+        char *kernel_device = NULL;
         unsigned long long usec;
+        size_t n = 0, z = 0, j;
+        int priority, r;
         char *e, *f, *k;
         uint64_t serial;
         size_t pl;
-        char *kernel_device = NULL;
 
         assert(s);
         assert(p);
@@ -134,7 +138,7 @@ static void dev_kmsg_record(Server *s, const char *p, size_t l) {
         if (r < 0 || priority < 0 || priority > 999)
                 return;
 
-        if (s->forward_to_kmsg && (priority & LOG_FACMASK) != LOG_KERN)
+        if (s->forward_to_kmsg && LOG_FAC(priority) != LOG_KERN)
                 return;
 
         l -= (e - p) + 1;
@@ -155,7 +159,7 @@ static void dev_kmsg_record(Server *s, const char *p, size_t l) {
 
                 /* Did we lose any? */
                 if (serial > *s->kernel_seqnum)
-                        server_driver_message(s,
+                        server_driver_message(s, 0,
                                               "MESSAGE_ID=" SD_MESSAGE_JOURNAL_MISSED_STR,
                                               LOG_MESSAGE("Missed %"PRIu64" kernel messages",
                                                           serial - *s->kernel_seqnum),
@@ -283,14 +287,14 @@ static void dev_kmsg_record(Server *s, const char *p, size_t l) {
         if (asprintf(&syslog_facility, "SYSLOG_FACILITY=%i", LOG_FAC(priority)) >= 0)
                 iovec[n++] = IOVEC_MAKE_STRING(syslog_facility);
 
-        if ((priority & LOG_FACMASK) == LOG_KERN)
+        if (LOG_FAC(priority) == LOG_KERN)
                 iovec[n++] = IOVEC_MAKE_STRING("SYSLOG_IDENTIFIER=kernel");
         else {
                 pl -= syslog_parse_identifier((const char**) &p, &identifier, &pid);
 
                 /* Avoid any messages we generated ourselves via
                  * log_info() and friends. */
-                if (pid && is_us(pid))
+                if (is_us(identifier, pid))
                         goto finish;
 
                 if (identifier) {

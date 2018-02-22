@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -117,10 +118,6 @@ int main(int argc, char *argv[]) {
         sd_event_get_exit_code(m->event, &r);
 
 finish:
-        /* systemd-nspawn checks for private resolv.conf to decide whether
-           or not to mount it into the container. So just delete it. */
-        (void) unlink(PRIVATE_RESOLV_CONF);
-
         sd_notify(false,
                   "STOPPING=1\n"
                   "STATUS=Shutting down...");

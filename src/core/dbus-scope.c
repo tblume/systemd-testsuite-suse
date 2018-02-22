@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -25,6 +26,7 @@
 #include "dbus-kill.h"
 #include "dbus-scope.h"
 #include "dbus-unit.h"
+#include "dbus-util.h"
 #include "dbus.h"
 #include "scope.h"
 #include "selinux-access.h"
@@ -60,7 +62,7 @@ static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_result, scope_result, ScopeResu
 
 const sd_bus_vtable bus_scope_vtable[] = {
         SD_BUS_VTABLE_START(0),
-        SD_BUS_PROPERTY("Controller", "s", NULL, offsetof(Scope, controller), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("Controller", "s", NULL, offsetof(Scope, controller), SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
         SD_BUS_PROPERTY("TimeoutStopUSec", "t", bus_property_get_usec, offsetof(Scope, timeout_stop_usec), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Result", "s", property_get_result, offsetof(Scope, result), SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
         SD_BUS_SIGNAL("RequestStop", NULL, 0),
@@ -72,7 +74,7 @@ static int bus_scope_set_transient_property(
                 Scope *s,
                 const char *name,
                 sd_bus_message *message,
-                UnitSetPropertiesMode mode,
+                UnitWriteFlags flags,
                 sd_bus_error *error) {
 
         int r;
@@ -81,20 +83,47 @@ static int bus_scope_set_transient_property(
         assert(name);
         assert(message);
 
+        flags |= UNIT_PRIVATE;
+
+        if (streq(name, "TimeoutStopUSec"))
+                return bus_set_transient_usec(UNIT(s), name, &s->timeout_stop_usec, message, flags, error);
+
         if (streq(name, "PIDs")) {
+                _cleanup_(sd_bus_creds_unrefp) sd_bus_creds *creds = NULL;
                 unsigned n = 0;
-                uint32_t pid;
 
                 r = sd_bus_message_enter_container(message, 'a', "u");
                 if (r < 0)
                         return r;
 
-                while ((r = sd_bus_message_read(message, "u", &pid)) > 0) {
+                for (;;) {
+                        uint32_t upid;
+                        pid_t pid;
 
-                        if (pid <= 1)
-                                return -EINVAL;
+                        r = sd_bus_message_read(message, "u", &upid);
+                        if (r < 0)
+                                return r;
+                        if (r == 0)
+                                break;
 
-                        if (mode != UNIT_CHECK) {
+                        if (upid == 0) {
+                                if (!creds) {
+                                        r = sd_bus_query_sender_creds(message, SD_BUS_CREDS_PID, &creds);
+                                        if (r < 0)
+                                                return r;
+                                }
+
+                                r = sd_bus_creds_get_pid(creds, &pid);
+                                if (r < 0)
+                                        return r;
+                        } else
+                                pid = (uid_t) upid;
+
+                        r = unit_pid_attachable(UNIT(s), pid, error);
+                        if (r < 0)
+                                return r;
+
+                        if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
                                 r = unit_watch_pid(UNIT(s), pid);
                                 if (r < 0 && r != -EEXIST)
                                         return r;
@@ -102,8 +131,6 @@ static int bus_scope_set_transient_property(
 
                         n++;
                 }
-                if (r < 0)
-                        return r;
 
                 r = sd_bus_message_exit_container(message);
                 if (r < 0)
@@ -116,7 +143,11 @@ static int bus_scope_set_transient_property(
 
         } else if (streq(name, "Controller")) {
                 const char *controller;
-                char *c;
+
+                /* We can't support direct connections with this, as direct connections know no service or unique name
+                 * concept, but the Controller field stores exactly that. */
+                if (sd_bus_message_get_bus(message) != UNIT(s)->manager->api_bus)
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_NOT_SUPPORTED, "Sorry, Controller= logic only supported via the bus.");
 
                 r = sd_bus_message_read(message, "s", &controller);
                 if (r < 0)
@@ -125,31 +156,8 @@ static int bus_scope_set_transient_property(
                 if (!isempty(controller) && !service_name_is_valid(controller))
                         return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Controller '%s' is not a valid bus name.", controller);
 
-                if (mode != UNIT_CHECK) {
-                        if (isempty(controller))
-                                c = NULL;
-                        else {
-                                c = strdup(controller);
-                                if (!c)
-                                        return -ENOMEM;
-                        }
-
-                        free(s->controller);
-                        s->controller = c;
-                }
-
-                return 1;
-
-        } else if (streq(name, "TimeoutStopUSec")) {
-
-                if (mode != UNIT_CHECK) {
-                        r = sd_bus_message_read(message, "t", &s->timeout_stop_usec);
-                        if (r < 0)
-                                return r;
-
-                        unit_write_drop_in_private_format(UNIT(s), mode, name, "TimeoutStopSec="USEC_FMT"us", s->timeout_stop_usec);
-                } else {
-                        r = sd_bus_message_skip(message, "t");
+                if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+                        r = free_and_strdup(&s->controller, empty_to_null(controller));
                         if (r < 0)
                                 return r;
                 }
@@ -164,7 +172,7 @@ int bus_scope_set_property(
                 Unit *u,
                 const char *name,
                 sd_bus_message *message,
-                UnitSetPropertiesMode mode,
+                UnitWriteFlags flags,
                 sd_bus_error *error) {
 
         Scope *s = SCOPE(u);
@@ -174,18 +182,18 @@ int bus_scope_set_property(
         assert(name);
         assert(message);
 
-        r = bus_cgroup_set_property(u, &s->cgroup_context, name, message, mode, error);
+        r = bus_cgroup_set_property(u, &s->cgroup_context, name, message, flags, error);
         if (r != 0)
                 return r;
 
         if (u->load_state == UNIT_STUB) {
                 /* While we are created we still accept PIDs */
 
-                r = bus_scope_set_transient_property(s, name, message, mode, error);
+                r = bus_scope_set_transient_property(s, name, message, flags, error);
                 if (r != 0)
                         return r;
 
-                r = bus_kill_context_set_transient_property(u, &s->kill_context, name, message, mode, error);
+                r = bus_kill_context_set_transient_property(u, &s->kill_context, name, message, flags, error);
                 if (r != 0)
                         return r;
         }
@@ -226,4 +234,41 @@ int bus_scope_send_request_stop(Scope *s) {
                 return r;
 
         return sd_bus_send_to(UNIT(s)->manager->api_bus, m, s->controller, NULL);
+}
+
+static int on_controller_gone(sd_bus_track *track, void *userdata) {
+        Scope *s = userdata;
+
+        assert(track);
+
+        if (s->controller) {
+                log_unit_debug(UNIT(s), "Controller %s disappeared from bus.", s->controller);
+                unit_add_to_dbus_queue(UNIT(s));
+                s->controller = mfree(s->controller);
+        }
+
+        s->controller_track = sd_bus_track_unref(s->controller_track);
+
+        return 0;
+}
+
+int bus_scope_track_controller(Scope *s) {
+        int r;
+
+        assert(s);
+
+        if (!s->controller || s->controller_track)
+                return 0;
+
+        r = sd_bus_track_new(UNIT(s)->manager->api_bus, &s->controller_track, on_controller_gone, s);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_track_add_name(s->controller_track, s->controller);
+        if (r < 0) {
+                s->controller_track = sd_bus_track_unref(s->controller_track);
+                return r;
+        }
+
+        return 0;
 }

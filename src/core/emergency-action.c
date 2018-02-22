@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -19,11 +20,12 @@
 ***/
 
 #include <sys/reboot.h>
-#include <linux/reboot.h>
 
 #include "bus-error.h"
 #include "bus-util.h"
 #include "emergency-action.h"
+#include "raw-reboot.h"
+#include "reboot-util.h"
 #include "special.h"
 #include "string-table.h"
 #include "terminal-util.h"
@@ -31,7 +33,7 @@
 static void log_and_status(Manager *m, const char *message, const char *reason) {
         log_warning("%s: %s", message, reason);
         manager_status_printf(m, STATUS_TYPE_EMERGENCY,
-                              ANSI_HIGHLIGHT_RED " !!  " ANSI_NORMAL,
+                              ANSI_HIGHLIGHT_RED "  !!  " ANSI_NORMAL,
                               "%s: %s", message, reason);
 }
 
@@ -47,6 +49,11 @@ int emergency_action(
 
         if (action == EMERGENCY_ACTION_NONE)
                 return -ECANCELED;
+
+        if (!m->service_watchdogs) {
+                log_warning("Watchdog disabled! Not acting on: %s", reason);
+                return -ECANCELED;
+        }
 
         if (!MANAGER_IS_SYSTEM(m)) {
                 /* Downgrade all options to simply exiting if we run
@@ -82,12 +89,12 @@ int emergency_action(
 
                 if (!isempty(reboot_arg)) {
                         log_info("Rebooting with argument '%s'.", reboot_arg);
-                        syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_CMD_RESTART2, reboot_arg);
+                        (void) raw_reboot(LINUX_REBOOT_CMD_RESTART2, reboot_arg);
                         log_warning_errno(errno, "Failed to reboot with parameter, retrying without: %m");
                 }
 
                 log_info("Rebooting.");
-                reboot(RB_AUTOBOOT);
+                (void) reboot(RB_AUTOBOOT);
                 break;
 
         case EMERGENCY_ACTION_POWEROFF:
@@ -106,7 +113,7 @@ int emergency_action(
                 sync();
 
                 log_info("Powering off.");
-                reboot(RB_POWER_OFF);
+                (void) reboot(RB_POWER_OFF);
                 break;
 
         default:

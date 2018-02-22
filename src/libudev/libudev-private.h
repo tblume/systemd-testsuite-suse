@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
+#pragma once
+
 /***
   This file is part of systemd.
 
@@ -16,9 +19,6 @@
   You should have received a copy of the GNU Lesser General Public License
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
-
-#ifndef _LIBUDEV_PRIVATE_H_
-#define _LIBUDEV_PRIVATE_H_
 
 #include <signal.h>
 #include <stdbool.h>
@@ -138,7 +138,6 @@ int udev_queue_export_device_finished(struct udev_queue_export *udev_queue_expor
 #define UDEV_ALLOWED_CHARS_INPUT        "/ $%?,"
 int util_log_priority(const char *priority);
 size_t util_path_encode(const char *src, char *dest, size_t size);
-void util_remove_trailing_chars(char *path, char c);
 int util_replace_whitespace(const char *str, char *to, size_t len);
 int util_replace_chars(char *str, const char *white);
 unsigned int util_string_hash32(const char *key);
@@ -146,5 +145,3 @@ uint64_t util_string_bloom64(const char *str);
 
 /* libudev-util-private.c */
 int util_resolve_subsys_kernel(struct udev *udev, const char *string, char *result, size_t maxsize, int read_value);
-
-#endif

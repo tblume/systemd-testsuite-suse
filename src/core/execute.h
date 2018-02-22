@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
 /***
@@ -24,6 +25,7 @@ typedef struct ExecCommand ExecCommand;
 typedef struct ExecContext ExecContext;
 typedef struct ExecRuntime ExecRuntime;
 typedef struct ExecParameters ExecParameters;
+typedef struct Manager Manager;
 
 #include <sched.h>
 #include <stdbool.h>
@@ -36,6 +38,8 @@ typedef struct ExecParameters ExecParameters;
 #include "missing.h"
 #include "namespace.h"
 #include "nsflags.h"
+
+#define EXEC_STDIN_DATA_MAX (64U*1024U*1024U)
 
 typedef enum ExecUtmpMode {
         EXEC_UTMP_INIT,
@@ -52,6 +56,8 @@ typedef enum ExecInput {
         EXEC_INPUT_TTY_FAIL,
         EXEC_INPUT_SOCKET,
         EXEC_INPUT_NAMED_FD,
+        EXEC_INPUT_DATA,
+        EXEC_INPUT_FILE,
         _EXEC_INPUT_MAX,
         _EXEC_INPUT_INVALID = -1
 } ExecInput;
@@ -68,6 +74,7 @@ typedef enum ExecOutput {
         EXEC_OUTPUT_JOURNAL_AND_CONSOLE,
         EXEC_OUTPUT_SOCKET,
         EXEC_OUTPUT_NAMED_FD,
+        EXEC_OUTPUT_FILE,
         _EXEC_OUTPUT_MAX,
         _EXEC_OUTPUT_INVALID = -1
 } ExecOutput;
@@ -113,6 +120,11 @@ struct ExecCommand {
 
 struct ExecRuntime {
         int n_ref;
+
+        Manager *manager;
+
+        /* unit id of the owner */
+        char *id;
 
         char *tmp_dir;
         char *var_tmp_dir;
@@ -162,6 +174,10 @@ struct ExecContext {
         ExecOutput std_output;
         ExecOutput std_error;
         char *stdio_fdname[3];
+        char *stdio_file[3];
+
+        void *stdin_data;
+        size_t stdin_data_size;
 
         nsec_t timer_slack_nsec;
 
@@ -203,6 +219,8 @@ struct ExecContext {
         unsigned long mount_flags;
         BindMount *bind_mounts;
         unsigned n_bind_mounts;
+        TemporaryFileSystem *temporary_filesystems;
+        unsigned n_temporary_filesystems;
 
         uint64_t capability_bounding_set;
         uint64_t capability_ambient_set;
@@ -211,6 +229,11 @@ struct ExecContext {
         int syslog_priority;
         char *syslog_identifier;
         bool syslog_level_prefix;
+
+        int log_level_max;
+
+        struct iovec* log_extra_fields;
+        size_t n_log_extra_fields;
 
         bool cpu_sched_reset_on_fork;
         bool non_blocking;
@@ -242,7 +265,7 @@ struct ExecContext {
 
         unsigned long restrict_namespaces; /* The CLONE_NEWxyz flags permitted to the unit's processes */
 
-        Set *syscall_filter;
+        Hashmap *syscall_filter;
         Set *syscall_archs;
         int syscall_errno;
         bool syscall_whitelist:1;
@@ -324,15 +347,11 @@ int exec_spawn(Unit *unit,
                DynamicCreds *dynamic_creds,
                pid_t *ret);
 
-void exec_command_done(ExecCommand *c);
 void exec_command_done_array(ExecCommand *c, unsigned n);
 
 ExecCommand* exec_command_free_list(ExecCommand *c);
 void exec_command_free_array(ExecCommand **c, unsigned n);
 
-char *exec_command_line(char **argv);
-
-void exec_command_dump(ExecCommand *c, FILE *f, const char *prefix);
 void exec_command_dump_list(ExecCommand *c, FILE *f, const char *prefix);
 void exec_command_append_list(ExecCommand **l, ExecCommand *e);
 int exec_command_set(ExecCommand *c, const char *path, ...);
@@ -340,31 +359,30 @@ int exec_command_append(ExecCommand *c, const char *path, ...);
 
 void exec_context_init(ExecContext *c);
 void exec_context_done(ExecContext *c);
-void exec_context_dump(ExecContext *c, FILE* f, const char *prefix);
+void exec_context_dump(const ExecContext *c, FILE* f, const char *prefix);
 
-int exec_context_destroy_runtime_directory(ExecContext *c, const char *runtime_root);
+int exec_context_destroy_runtime_directory(const ExecContext *c, const char *runtime_root);
 
-int exec_context_load_environment(Unit *unit, const ExecContext *c, char ***l);
-int exec_context_named_iofds(Unit *unit, const ExecContext *c, const ExecParameters *p, int named_iofds[3]);
 const char* exec_context_fdname(const ExecContext *c, int fd_index);
 
-bool exec_context_may_touch_console(ExecContext *c);
-bool exec_context_maintains_privileges(ExecContext *c);
+bool exec_context_may_touch_console(const ExecContext *c);
+bool exec_context_maintains_privileges(const ExecContext *c);
 
-int exec_context_get_effective_ioprio(ExecContext *c);
+int exec_context_get_effective_ioprio(const ExecContext *c);
+
+void exec_context_free_log_extra_fields(ExecContext *c);
 
 void exec_status_start(ExecStatus *s, pid_t pid);
-void exec_status_exit(ExecStatus *s, ExecContext *context, pid_t pid, int code, int status);
-void exec_status_dump(ExecStatus *s, FILE *f, const char *prefix);
+void exec_status_exit(ExecStatus *s, const ExecContext *context, pid_t pid, int code, int status);
+void exec_status_dump(const ExecStatus *s, FILE *f, const char *prefix);
 
-int exec_runtime_make(ExecRuntime **rt, ExecContext *c, const char *id);
-ExecRuntime *exec_runtime_ref(ExecRuntime *r);
-ExecRuntime *exec_runtime_unref(ExecRuntime *r);
+int exec_runtime_acquire(Manager *m, const ExecContext *c, const char *name, bool create, ExecRuntime **ret);
+ExecRuntime *exec_runtime_unref(ExecRuntime *r, bool destroy);
 
-int exec_runtime_serialize(Unit *unit, ExecRuntime *rt, FILE *f, FDSet *fds);
-int exec_runtime_deserialize_item(Unit *unit, ExecRuntime **rt, const char *key, const char *value, FDSet *fds);
-
-void exec_runtime_destroy(ExecRuntime *rt);
+int exec_runtime_serialize(const Manager *m, FILE *f, FDSet *fds);
+int exec_runtime_deserialize_compat(Unit *u, const char *key, const char *value, FDSet *fds);
+void exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds);
+void exec_runtime_vacuum(Manager *m);
 
 const char* exec_output_to_string(ExecOutput i) _const_;
 ExecOutput exec_output_from_string(const char *s) _pure_;

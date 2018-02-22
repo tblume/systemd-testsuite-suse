@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -17,6 +18,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include <errno.h>
 #include <fcntl.h>
 #include <linux/loop.h>
 #include <sys/ioctl.h>
@@ -25,6 +27,7 @@
 #include "alloc-util.h"
 #include "fd-util.h"
 #include "loop-util.h"
+#include "stat-util.h"
 
 int loop_device_make(int fd, int open_flags, LoopDevice **ret) {
         const struct loop_info64 info = {
@@ -35,7 +38,7 @@ int loop_device_make(int fd, int open_flags, LoopDevice **ret) {
         _cleanup_free_ char *loopdev = NULL;
         struct stat st;
         LoopDevice *d;
-        int nr;
+        int nr, r;
 
         assert(fd >= 0);
         assert(ret);
@@ -67,8 +70,9 @@ int loop_device_make(int fd, int open_flags, LoopDevice **ret) {
                 return 0;
         }
 
-        if (!S_ISREG(st.st_mode))
-                return -EINVAL;
+        r = stat_verify_regular(&st);
+        if (r < 0)
+                return r;
 
         control = open("/dev/loop-control", O_RDWR|O_CLOEXEC|O_NOCTTY|O_NONBLOCK);
         if (control < 0)
@@ -151,9 +155,7 @@ LoopDevice* loop_device_unref(LoopDevice *d) {
         }
 
         free(d->node);
-        free(d);
-
-        return NULL;
+        return mfree(d);
 }
 
 void loop_device_relinquish(LoopDevice *d) {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1+ */
 /***
   This file is part of systemd.
 
@@ -28,6 +29,7 @@
 #include "networkd-manager.h"
 #include "networkd-network.h"
 #include "string-util.h"
+#include "socket-util.h"
 
 static bool ipv6_proxy_ndp_is_needed(Link *link) {
         assert(link);
@@ -38,7 +40,7 @@ static bool ipv6_proxy_ndp_is_needed(Link *link) {
         if (!link->network)
                 return false;
 
-        if (link->network->ipv6_proxy_ndp != -1)
+        if (link->network->ipv6_proxy_ndp >= 0)
                 return link->network->ipv6_proxy_ndp;
 
         if (link->network->n_ipv6_proxy_ndp_addresses == 0)
@@ -52,6 +54,9 @@ static int ipv6_proxy_ndp_set(Link *link) {
         int r, v;
 
         assert(link);
+
+        if (!socket_ipv6_is_supported())
+                return 0;
 
         v = ipv6_proxy_ndp_is_needed(link);
         p = strjoina("/proc/sys/net/ipv6/conf/", link->ifname, "/proxy_ndp");
@@ -137,7 +142,7 @@ int config_parse_ipv6_proxy_ndp_address(
         r = in_addr_is_null(AF_INET6, &buffer);
         if (r != 0) {
                 log_syntax(unit, LOG_ERR, filename, line, r,
-                           "IPv6 proxy NDP address can not be the ANY address, ignoring: %s", rvalue);
+                           "IPv6 proxy NDP address cannot be the ANY address, ignoring: %s", rvalue);
                 return 0;
         }
 
@@ -197,6 +202,8 @@ int ipv6_proxy_ndp_address_configure(Link *link, IPv6ProxyNDPAddress *ipv6_proxy
 int ipv6_proxy_ndp_addresses_configure(Link *link) {
         IPv6ProxyNDPAddress *ipv6_proxy_ndp_address;
         int r;
+
+        assert(link);
 
         /* enable or disable proxy_ndp itself depending on whether ipv6_proxy_ndp_addresses are set or not */
         r = ipv6_proxy_ndp_set(link);
