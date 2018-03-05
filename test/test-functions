@@ -6,7 +6,7 @@ export PATH
 
 LOOKS_LIKE_DEBIAN=$(source /etc/os-release && [[ "$ID" = "debian" || "$ID_LIKE" = "debian" ]] && echo yes || true)
 LOOKS_LIKE_ARCH=$(source /etc/os-release && [[ "$ID" = "arch" ]] && echo yes || true)
-LOOKS_LIKE_SUSE=$(source /etc/os-release && [[ "$ID_LIKE" = "suse" ]] && echo yes || true)
+LOOKS_LIKE_SUSE=$(source /etc/os-release && [[ "$ID_LIKE" =~ "suse" ]] && echo yes || true)
 KERNEL_VER=${KERNEL_VER-$(uname -r)}
 KERNEL_MODS="/lib/modules/$KERNEL_VER/"
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-infinity}"
@@ -22,8 +22,9 @@ if ! ROOTLIBDIR=$(pkg-config --variable=systemdutildir systemd); then
 fi
 
 BASICTOOLS="test sh bash setsid loadkeys setfont login sulogin gzip sleep echo mount umount cryptsetup date dmsetup modprobe sed cmp tee rm true false chmod chown ln"
-DEBUGTOOLS="df free ls stty cat ps ln ip route dmesg dhclient mkdir cp ping dhclient strace less grep id tty touch du sort hostname find"
+DEBUGTOOLS="df free ls stty cat ps ln ip dmesg dhclient mkdir cp ping dhclient strace less grep id tty touch du sort hostname find passwd"
 
+BUILD_DIR=/var/opt/systemd-tests
 STATEDIR="${BUILD_DIR:-.}/test/$(basename $(dirname $(realpath $0)))"
 STATEFILE="$STATEDIR/.testdir"
 TESTLOG="$STATEDIR/test.log"
@@ -35,9 +36,9 @@ function find_qemu_bin() {
 
     [ "$ARCH" ] || ARCH=$(uname -m)
     case $ARCH in
-    x86_64)
+    x86_64|s390x|aarch64)
         # QEMU's own build system calls it qemu-system-x86_64
-        [ "$QEMU_BIN" ] || QEMU_BIN=$(which -a qemu-system-x86_64 2>/dev/null | grep '^/' -m1)
+        [ "$QEMU_BIN" ] || QEMU_BIN=$(which -a qemu-system-$ARCH 2>/dev/null | grep '^/' -m1)
         ;;
     i*86)
         # new i386 version of QEMU
@@ -47,7 +48,7 @@ function find_qemu_bin() {
         [ "$QEMU_BIN" ] || QEMU_BIN=$(which -a qemu 2>/dev/null | grep '^/' -m1)
         ;;
     ppc64*)
-        [ "$QEMU_BIN" ] || QEMU_BIN=$(which -a qemu-system-$ARCH 2>/dev/null | grep '^/' -m1)
+        [ "$QEMU_BIN" ] || QEMU_BIN=$(which -a qemu-system-ppc64 2>/dev/null | grep '^/' -m1)
         ;;
     esac
 
@@ -71,6 +72,12 @@ run_qemu() {
     if [[ ! "$KERNEL_BIN" ]]; then
         if [[ "$LOOKS_LIKE_ARCH" ]]; then
             KERNEL_BIN=/boot/vmlinuz-linux
+       elif [[ "$LOOKS_LIKE_SUSE" ]]; then
+            if [[ $(uname -m) == "aarch64" ]]; then
+                KERNEL_BIN=$(ls /boot/Image-$KERNEL_VER)
+            else
+                KERNEL_BIN=$(ls /boot/vmlinu*-$KERNEL_VER)
+            fi
         else
             KERNEL_BIN=/boot/vmlinuz-$KERNEL_VER
         fi
@@ -108,18 +115,31 @@ run_qemu() {
         exit 1
     fi
 
-if [[ "$LOOKS_LIKE_SUSE" ]]; then
-    PARAMS+="rd.hostonly=0"
-else
-    PARAMS+="ro"
-fi
+
+    DRIVEOPTS="file=${TESTDIR}/rootdisk.img,format=raw,cache=unsafe"
+    if [[ "$LOOKS_LIKE_SUSE" ]]; then
+        PARAMS="rd.hostonly=0 multipath=off systemd.mask=vboxdrv.service systemd.mask=vboxes.service systemd.mask=iscsiuio.socket systemd.mask=iscsid.socket console=ttyS0"
+        case $ARCH in
+        aarch64)
+            PLATFORM="arm"
+            PARAMS+=" console=ttyAMA0"
+            DRIVEOPTS+=",if=none,id=hd0"
+            ;;
+        ppc64*)
+            PLATFORM="pSeries"
+            PARAMS+=" console=hvc0"
+            DRIVEOPTS+=",if=none,id=scsi0"
+            ;;
+        esac
+    else
+        PARAMS+=" ro"
+    fi
 
 KERNEL_APPEND="$PARAMS \
 root=/dev/sda1 \
 raid=noautodetect \
 loglevel=2 \
 init=$ROOTLIBDIR/systemd \
-console=ttyS0 \
 selinux=0 \
 $_cgroup_args \
 $KERNEL_APPEND \
@@ -130,15 +150,21 @@ $KERNEL_APPEND \
 -m 512M \
 -nographic \
 -kernel $KERNEL_BIN \
--drive format=raw,cache=unsafe,file=${TESTDIR}/rootdisk.img \
+-drive $DRIVEOPTS \
 "
 
     if [[ "$INITRD" && "$SKIP_INITRD" != "yes" ]]; then
         QEMU_OPTIONS="$QEMU_OPTIONS -initrd $INITRD"
     fi
 
-    if [ -c /dev/kvm ]; then
-        QEMU_OPTIONS="$QEMU_OPTIONS -machine accel=kvm -enable-kvm -cpu host"
+    if [ "$PLATFORM" == "pSeries" ]; then
+        QEMU_OPTIONS=" -M pseries,accel=kvm,kvm-type=PR $QEMU_OPTIONS -device virtio-scsi-pci -device scsi-hd,drive=scsi0,bootindex=1"
+    elif [ "$PLATFORM" == "arm" ]; then
+        # non-accelerated
+        # QEMU_OPTIONS=" -cpu cortex-a57 -M virt $QEMU_OPTIONS -device ahci,id=ahci -device ide-hd,drive=hd0,bus=ahci.0"
+        QEMU_OPTIONS=" -enable-kvm -cpu host -M virt,gic-version=host $QEMU_OPTIONS -device ahci,id=ahci -device ide-hd,drive=hd0,bus=ahci.0"
+    elif [ -c /dev/kvm ]; then
+        QEMU_OPTIONS="$QEMU_OPTIONS -accel kvm -enable-kvm"
     fi
 
     if [[ "$QEMU_TIMEOUT" != "infinity" ]]; then
@@ -160,7 +186,7 @@ $KERNEL_APPEND \
 run_nspawn() {
     [[ -d /run/systemd/system ]] || return 1
 
-    local _nspawn_cmd="$BUILD_DIR/systemd-nspawn --register=no --kill-signal=SIGKILL --directory=$TESTDIR/nspawn-root $ROOTLIBDIR/systemd $KERNEL_APPEND"
+    local _nspawn_cmd="/usr/bin/systemd-nspawn --register=no --kill-signal=SIGKILL --directory=$TESTDIR/nspawn-root $ROOTLIBDIR/systemd $KERNEL_APPEND"
     if [[ "$NSPAWN_TIMEOUT" != "infinity" ]]; then
         _nspawn_cmd="timeout --foreground $NSPAWN_TIMEOUT $_nspawn_cmd"
     fi
@@ -317,18 +343,34 @@ install_dmevent() {
         # see https://gitlab.com/debian-lvm/lvm2/blob/master/debian/patches/udev.patch
         inst_rules 55-dm.rules 60-persistent-storage-dm.rules 95-dm-notify.rules
     else
-        inst_rules 10-dm.rules 13-dm-disk.rules 95-dm-notify.rules
+        inst_rules 10-dm.rules 13-dm-disk.rules 95-dm-notify.rules 60-persistent-storage.rules 61-persistent-storage-compat.rules 99-systemd.rules
     fi
 }
 
 install_systemd() {
-    # install compiled files
-    local _ninja_bin=$(type -P ninja || type -P ninja-build)
-    if [[ -z "$_ninja_bin" ]]; then
-        dfatal "ninja was not found"
-        exit 1
-    fi
-    (set -x; DESTDIR=$initdir "$_ninja_bin" -C $BUILD_DIR install)
+    ORIGDIR=$(pwd)
+    cd $TEST_BASE_DIR/..
+    for i in $(find /usr/lib/systemd -type f); do
+            inst_simple $i
+    done
+    for i in $(find /usr/lib/systemd -type l); do
+            inst_symlink $i
+    done
+    for i in $( find /usr/lib/systemd/* -type d); do
+            [[ -d $i ]] || mkdir $i
+            for j in $(find $i); do
+                    [[ -d $j ]] || inst_simple $j
+            done
+    done
+    for i in $(rpm -ql systemd | sed -n '/usr\/bin/p'); do
+            inst_simple $i
+    done
+#    for i in $(find /usr/lib/udev); do
+#            [[ -d $i ]] && inst_dir $i || inst_simple $i
+#    done
+
+    cd $ORIGDIR
+
     # remove unneeded documentation
     rm -fr $initdir/usr/share/{man,doc}
     # we strip binaries since debug symbols increase binaries size a lot
@@ -339,6 +381,7 @@ install_systemd() {
 
     # enable debug logging in PID1
     echo LogLevel=debug >> $initdir/etc/systemd/system.conf
+
 }
 
 get_ldpath() {
@@ -356,12 +399,12 @@ install_missing_libraries() {
 create_empty_image() {
     rm -f "$TESTDIR/rootdisk.img"
     # Create the blank file to use as a root filesystem
-    dd if=/dev/null of="$TESTDIR/rootdisk.img" bs=1M seek=400
+    dd if=/dev/null of="$TESTDIR/rootdisk.img" bs=1M seek=600
     LOOPDEV=$(losetup --show -P -f $TESTDIR/rootdisk.img)
     [ -b "$LOOPDEV" ] || return 1
     echo "LOOPDEV=$LOOPDEV" >> $STATEFILE
     sfdisk "$LOOPDEV" <<EOF
-,390M
+,590M
 ,
 EOF
 
@@ -950,6 +993,7 @@ find_binary() {
 # Install binary executable, and all shared library dependencies, if any.
 inst_binary() {
     local _bin _target
+    [[ -f ${initdir}$1 ]] && return 0
     _bin=$(find_binary "$1") || return 1
     _target=${2:-$_bin}
     [[ -e $initdir/$_target ]] && return 0
@@ -1058,7 +1102,6 @@ inst_rules() {
             fi
         done
         [[ $_found ]] || dinfo "Skipping udev rule: $_rule"
-        _found=
     done
 }
 
@@ -1383,9 +1426,16 @@ inst_libdir_file() {
 }
 
 setup_suse() {
-    ln -s ../usr/bin/systemctl $initdir/bin/systemctl
-    ln -s ../usr/lib/systemd $initdir/lib/systemd
-    inst_simple "/usr/lib/systemd/system/haveged.service"
+    [[ -f $initdir/bin/systemctl ]] || ln -s ../usr/bin/systemctl $initdir/bin/systemctl
+    inst_simple /usr/lib/systemd/system/haveged.service
+    inst_simple /usr/bin/systemd-cat
+
+    for dracutfile in cmdline initqueue mount pre-mount pre-pivot pre-trigger pre-udev; do
+            inst_script $(find /usr/lib -name dracut-$dracutfile.sh) /bin/dracut-$dracutfile
+    done
+
+    instmods ext4
+    rm $initdir/usr/lib/systemd/system-generators/systemd-getty-generator
 }
 
 # can be overridden in specific test
