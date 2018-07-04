@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <errno.h>
 #include <unistd.h>
@@ -51,12 +33,9 @@ int main(int argc, char*argv[]) {
                 if (k < 0 && r >= 0)
                         r = k;
 
-        } else if (streq(argv[1], "stop")) {
-                r = write_string_file_atomic_label("/run/nologin", "System is going down.");
-                if (r < 0)
-                        log_error_errno(r, "Failed to create /run/nologin: %m");
-
-        } else {
+        } else if (streq(argv[1], "stop"))
+                r = create_shutdown_run_nologin_or_warn();
+        else {
                 log_error("Unknown verb '%s'.", argv[1]);
                 r = -EINVAL;
         }

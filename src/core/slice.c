@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2013 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <errno.h>
 
@@ -55,7 +37,7 @@ static void slice_set_state(Slice *t, SliceState state) {
                           slice_state_to_string(old_state),
                           slice_state_to_string(state));
 
-        unit_notify(UNIT(t), state_translation_table[old_state], state_translation_table[state], true);
+        unit_notify(UNIT(t), state_translation_table[old_state], state_translation_table[state], 0);
 }
 
 static int slice_add_parent_slice(Slice *s) {
@@ -110,7 +92,7 @@ static int slice_verify(Slice *s) {
 
         if (!slice_name_is_valid(UNIT(s)->id)) {
                 log_unit_error(UNIT(s), "Slice name %s is not valid. Refusing.", UNIT(s)->id);
-                return -EINVAL;
+                return -ENOEXEC;
         }
 
         r = slice_build_parent_slice(UNIT(s)->id, &parent);
@@ -119,7 +101,7 @@ static int slice_verify(Slice *s) {
 
         if (parent ? !unit_has_name(UNIT_DEREF(UNIT(s)->slice), parent) : UNIT_ISSET(UNIT(s)->slice)) {
                 log_unit_error(UNIT(s), "Located outside of parent slice. Refusing.");
-                return -EINVAL;
+                return -ENOEXEC;
         }
 
         return 0;
@@ -313,19 +295,18 @@ _pure_ static const char *slice_sub_state_to_string(Unit *u) {
         return slice_state_to_string(SLICE(u)->state);
 }
 
-static void slice_enumerate_perpetual(Manager *m, const char *name) {
+static int slice_make_perpetual(Manager *m, const char *name, Unit **ret) {
         Unit *u;
         int r;
 
         assert(m);
+        assert(name);
 
         u = manager_get_unit(m, name);
         if (!u) {
                 r = unit_new_for_name(m, sizeof(Slice), name, &u);
-                if (r < 0) {
-                        log_error_errno(r, "Failed to allocate the special %s unit: %m", name);
-                        return;
-                }
+                if (r < 0)
+                        return log_error_errno(r, "Failed to allocate the special %s unit: %m", name);
         }
 
         u->perpetual = true;
@@ -333,15 +314,34 @@ static void slice_enumerate_perpetual(Manager *m, const char *name) {
 
         unit_add_to_load_queue(u);
         unit_add_to_dbus_queue(u);
+
+        if (ret)
+                *ret = u;
+
+        return 0;
 }
 
-static void slice_enumerate(Manager *m) {
+static void slice_enumerate_perpetual(Manager *m) {
+        Unit *u;
+        int r;
+
         assert(m);
 
-        slice_enumerate_perpetual(m, SPECIAL_ROOT_SLICE);
+        r = slice_make_perpetual(m, SPECIAL_ROOT_SLICE, &u);
+        if (r >= 0 && manager_owns_root_cgroup(m)) {
+                Slice *s = SLICE(u);
+
+                /* If we are managing the root cgroup then this means our root slice covers the whole system, which
+                 * means the kernel will track CPU/tasks/memory for us anyway, and it is all available in /proc. Let's
+                 * hence turn accounting on here, so that our APIs to query this data are available. */
+
+                s->cgroup_context.cpu_accounting = true;
+                s->cgroup_context.tasks_accounting = true;
+                s->cgroup_context.memory_accounting = true;
+        }
 
         if (MANAGER_IS_SYSTEM(m))
-                slice_enumerate_perpetual(m, SPECIAL_SYSTEM_SLICE);
+                (void) slice_make_perpetual(m, SPECIAL_SYSTEM_SLICE, NULL);
 }
 
 const UnitVTable slice_vtable = {
@@ -378,7 +378,7 @@ const UnitVTable slice_vtable = {
         .bus_set_property = bus_slice_set_property,
         .bus_commit_properties = bus_slice_commit_properties,
 
-        .enumerate = slice_enumerate,
+        .enumerate_perpetual = slice_enumerate_perpetual,
 
         .status_message_formats = {
                 .finished_start_job = {

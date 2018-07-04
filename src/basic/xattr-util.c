@@ -1,22 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  This file is part of systemd.
-
-  Copyright 2010 Lennart Poettering
-
-  systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU Lesser General Public License as published by
-  the Free Software Foundation; either version 2.1 of the License, or
-  (at your option) any later version.
-
-  systemd is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with systemd; If not, see <http://www.gnu.org/licenses/>.
-***/
 
 #include <errno.h>
 #include <fcntl.h>
@@ -107,7 +89,14 @@ int fgetxattr_malloc(int fd, const char *name, char **value) {
         }
 }
 
-ssize_t fgetxattrat_fake(int dirfd, const char *filename, const char *attribute, void *value, size_t size, int flags) {
+int fgetxattrat_fake(
+                int dirfd,
+                const char *filename,
+                const char *attribute,
+                void *value, size_t size,
+                int flags,
+                size_t *ret_size) {
+
         char fn[STRLEN("/proc/self/fd/") + DECIMAL_STR_MAX(int) + 1];
         _cleanup_close_ int fd = -1;
         ssize_t l;
@@ -134,7 +123,8 @@ ssize_t fgetxattrat_fake(int dirfd, const char *filename, const char *attribute,
         if (l < 0)
                 return -errno;
 
-        return l;
+        *ret_size = l;
+        return 0;
 }
 
 static int parse_crtime(le64_t le, usec_t *usec) {
@@ -154,7 +144,7 @@ int fd_getcrtime_at(int dirfd, const char *name, usec_t *ret, int flags) {
         struct_statx sx;
         usec_t a, b;
         le64_t le;
-        ssize_t n;
+        size_t n;
         int r;
 
         assert(ret);
@@ -180,13 +170,13 @@ int fd_getcrtime_at(int dirfd, const char *name, usec_t *ret, int flags) {
         else
                 a = USEC_INFINITY;
 
-        n = fgetxattrat_fake(dirfd, name, "user.crtime_usec", &le, sizeof(le), flags);
-        if (n < 0)
-                r = -errno;
-        else if (n != sizeof(le))
-                r = -EIO;
-        else
-                r = parse_crtime(le, &b);
+        r = fgetxattrat_fake(dirfd, name, "user.crtime_usec", &le, sizeof(le), flags, &n);
+        if (r >= 0) {
+                if (n != sizeof(le))
+                        r = -EIO;
+                else
+                        r = parse_crtime(le, &b);
+        }
         if (r < 0) {
                 if (a != USEC_INFINITY) {
                         *ret = a;
