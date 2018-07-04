@@ -8,7 +8,6 @@ root="${1:?Usage $0 container-root}"
 mkdir -p "$root"
 mkdir "$root/bin"
 cp $(type -P busybox) "$root/bin"
-
 mkdir -p "$root/usr/lib"
 touch "$root/usr/lib/os-release"
 
