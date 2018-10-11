@@ -36,7 +36,7 @@
    that. The first row is always the header row. If header display is turned off we simply skip outputting the first
    row. Also, when sorting rows we always leave the first row where it is, as the header shouldn't move.
 
- - Note because there's no row and no column object some properties that might be approproate as row/column properties
+ - Note because there's no row and no column object some properties that might be appropriate as row/column properties
    are exposed as cell properties instead. For example, the "weight" of a column (which is used to determine where to
    add/remove space preferable when expanding/compressing tables horizontally) is actually made the "weight" of a
    cell. Given that we usually need it per-column though we will calculate the average across every cell of the column
@@ -171,31 +171,15 @@ Table *table_new_internal(const char *first_header, ...) {
         return TAKE_PTR(t);
 }
 
-static TableData *table_data_unref(TableData *d) {
-        if (!d)
-                return NULL;
-
-        assert(d->n_ref > 0);
-        d->n_ref--;
-
-        if (d->n_ref > 0)
-                return NULL;
+static TableData *table_data_free(TableData *d) {
+        assert(d);
 
         free(d->formatted);
         return mfree(d);
 }
 
+DEFINE_PRIVATE_TRIVIAL_REF_UNREF_FUNC(TableData, table_data, table_data_free);
 DEFINE_TRIVIAL_CLEANUP_FUNC(TableData*, table_data_unref);
-
-static TableData *table_data_ref(TableData *d) {
-        if (!d)
-                return NULL;
-
-        assert(d->n_ref > 0);
-        d->n_ref++;
-
-        return d;
-}
 
 Table *table_unref(Table *t) {
         size_t i;
@@ -745,9 +729,7 @@ static int cell_data_compare(TableData *a, size_t index_a, TableData *b, size_t 
         return 0;
 }
 
-static int table_data_compare(const void *x, const void *y, void *userdata) {
-        const size_t *a = x, *b = y;
-        Table *t = userdata;
+static int table_data_compare(const size_t *a, const size_t *b, Table *t) {
         size_t i;
         int r;
 
@@ -775,12 +757,7 @@ static int table_data_compare(const void *x, const void *y, void *userdata) {
         }
 
         /* Order identical lines by the order there were originally added in */
-        if (*a < *b)
-                return -1;
-        if (*a > *b)
-                return 1;
-
-        return 0;
+        return CMP(*a, *b);
 }
 
 static const char *table_data_format(TableData *d) {
@@ -960,7 +937,7 @@ int table_print(Table *t, FILE *f) {
                 for (i = 0; i < n_rows; i++)
                         sorted[i] = i * t->n_columns;
 
-                qsort_r_safe(sorted, n_rows, sizeof(size_t), table_data_compare, t);
+                typesafe_qsort_r(sorted, n_rows, table_data_compare, t);
         }
 
         if (t->display_map)
@@ -1134,14 +1111,12 @@ int table_print(Table *t, FILE *f) {
                                 assert(weight_sum >= column_weight[j]);
                                 weight_sum -= column_weight[j];
 
-                                if (restart)
+                                if (restart && !finalize)
                                         break;
                         }
 
-                        if (finalize) {
-                                assert(!restart);
+                        if (finalize)
                                 break;
-                        }
 
                         if (!restart)
                                 finalize = true;

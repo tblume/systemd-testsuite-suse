@@ -1,7 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  Copyright © 2014 Michael Biebl
-***/
 
 #include <getopt.h>
 #include <stdio.h>
@@ -11,6 +8,7 @@
 #include "log.h"
 #include "string-util.h"
 #include "strv.h"
+#include "terminal-util.h"
 #include "unit-name.h"
 
 static enum {
@@ -21,18 +19,32 @@ static enum {
 static const char *arg_suffix = NULL;
 static const char *arg_template = NULL;
 static bool arg_path = false;
+static bool arg_instance = false;
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-escape", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] [NAME...]\n\n"
                "Escape strings for usage in systemd unit names.\n\n"
                "  -h --help               Show this help\n"
                "     --version            Show package version\n"
                "     --suffix=SUFFIX      Unit suffix to append to escaped strings\n"
                "     --template=TEMPLATE  Insert strings as instance into template\n"
+               "     --instance           With --unescape, show just the instance part\n"
                "  -u --unescape           Unescape strings\n"
                "  -m --mangle             Mangle strings\n"
                "  -p --path               When escaping/unescaping assume the string is a path\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -51,6 +63,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "unescape",  no_argument,       NULL, 'u'           },
                 { "mangle",    no_argument,       NULL, 'm'           },
                 { "path",      no_argument,       NULL, 'p'           },
+                { "instance",  no_argument,       NULL, 'i'           },
                 {}
         };
 
@@ -64,8 +77,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -102,6 +114,10 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_path = true;
                         break;
 
+                case 'i':
+                        arg_instance = true;
+                        break;
+
                 case '?':
                         return -EINVAL;
 
@@ -119,13 +135,28 @@ static int parse_argv(int argc, char *argv[]) {
                 return -EINVAL;
         }
 
-        if ((arg_template || arg_suffix) && arg_action != ACTION_ESCAPE) {
-                log_error("--suffix= and --template= are not compatible with --unescape or --mangle.");
+        if ((arg_template || arg_suffix) && arg_action == ACTION_MANGLE) {
+                log_error("--suffix= and --template= are not compatible with --mangle.");
+                return -EINVAL;
+        }
+
+        if (arg_suffix && arg_action == ACTION_UNESCAPE) {
+                log_error("--suffix is not compatible with --unescape.");
                 return -EINVAL;
         }
 
         if (arg_path && !IN_SET(arg_action, ACTION_ESCAPE, ACTION_UNESCAPE)) {
                 log_error("--path may not be combined with --mangle.");
+                return -EINVAL;
+        }
+
+        if (arg_instance && arg_action != ACTION_UNESCAPE) {
+                log_error("--instance must be used in conjunction with --unescape.");
+                return -EINVAL;
+        }
+
+        if (arg_instance && arg_template) {
+                log_error("--instance may not be combined with --template.");
                 return -EINVAL;
         }
 
@@ -189,17 +220,51 @@ int main(int argc, char *argv[]) {
 
                         break;
 
-                case ACTION_UNESCAPE:
+                case ACTION_UNESCAPE: {
+                        _cleanup_free_ char *name = NULL;
+
+                        if (arg_template || arg_instance) {
+                                _cleanup_free_ char *template = NULL;
+
+                                r = unit_name_to_instance(*i, &name);
+                                if (r < 0) {
+                                        log_error_errno(r, "Failed to extract instance: %m");
+                                        goto finish;
+                                }
+                                if (isempty(name)) {
+                                        log_error("Unit %s is missing the instance name.", *i);
+                                        r = -EINVAL;
+                                        goto finish;
+                                }
+                                r = unit_name_template(*i, &template);
+                                if (r < 0) {
+                                        log_error_errno(r, "Failed to extract template: %m");
+                                        goto finish;
+                                }
+                                if (arg_template && !streq(arg_template, template)) {
+                                        log_error("Unit %s template %s does not match specified template %s.", *i, template, arg_template);
+                                        r = -EINVAL;
+                                        goto finish;
+                                }
+                        } else {
+                                name = strdup(*i);
+                                if (!name) {
+                                        r = log_oom();
+                                        goto finish;
+                                }
+                        }
+
                         if (arg_path)
-                                r = unit_name_path_unescape(*i, &e);
+                                r = unit_name_path_unescape(name, &e);
                         else
-                                r = unit_name_unescape(*i, &e);
+                                r = unit_name_unescape(name, &e);
 
                         if (r < 0) {
                                 log_error_errno(r, "Failed to unescape string: %m");
                                 goto finish;
                         }
                         break;
+                }
 
                 case ACTION_MANGLE:
                         r = unit_name_mangle(*i, 0, &e);

@@ -1033,7 +1033,7 @@ int bus_unit_method_attach_processes(sd_bus_message *message, void *userdata, sd
                 if (r < 0)
                         return r;
 
-                /* Let's validate security: if the sender is root, then all is OK. If the sender is is any other unit,
+                /* Let's validate security: if the sender is root, then all is OK. If the sender is any other unit,
                  * then the process' UID and the target unit's UID have to match the sender's UID */
                 if (sender_uid != 0 && sender_uid != getuid()) {
                         r = get_process_uid(pid, &process_uid);
@@ -1572,7 +1572,7 @@ static int bus_unit_set_transient_property(
                         if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
                                 _cleanup_free_ char *label = NULL;
 
-                                r = unit_add_dependency_by_name(u, d, other, NULL, true, UNIT_DEPENDENCY_FILE);
+                                r = unit_add_dependency_by_name(u, d, other, true, UNIT_DEPENDENCY_FILE);
                                 if (r < 0)
                                         return r;
 
@@ -1726,7 +1726,7 @@ int bus_unit_validate_load_state(Unit *u, sd_bus_error *error) {
                 return sd_bus_error_setf(error, BUS_ERROR_BAD_UNIT_SETTING, "Unit %s has a bad unit file setting.", u->id);
 
         case UNIT_ERROR: /* Only show .load_error in UNIT_ERROR state */
-                return sd_bus_error_set_errnof(error, u->load_error, "Unit %s failed to loaded properly: %m.", u->id);
+                return sd_bus_error_set_errnof(error, u->load_error, "Unit %s failed to load properly: %m.", u->id);
 
         case UNIT_MASKED:
                 return sd_bus_error_setf(error, BUS_ERROR_UNIT_MASKED, "Unit %s is masked.", u->id);

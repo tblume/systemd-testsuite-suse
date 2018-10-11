@@ -50,6 +50,9 @@
 /* Erase characters until the end of the line */
 #define ANSI_ERASE_TO_END_OF_LINE "\x1B[K"
 
+/* Move cursor up one line */
+#define ANSI_REVERSE_LINEFEED "\x1BM"
+
 /* Set cursor to top left corner and clear screen */
 #define ANSI_HOME_CLEAR "\x1B[H\x1B[2J"
 
@@ -154,6 +157,7 @@ int vt_reset_keyboard(int fd);
 
 int terminal_urlify(const char *url, const char *text, char **ret);
 int terminal_urlify_path(const char *path, const char *text, char **ret);
+int terminal_urlify_man(const char *page, const char *section, char **ret);
 
 typedef enum CatFlags {
         CAT_FLAGS_MAIN_FILE_OPTIONAL = 1 << 0,

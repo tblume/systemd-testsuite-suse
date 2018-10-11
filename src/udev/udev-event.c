@@ -1,7 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0+ */
-/*
- *
- */
 
 #include <ctype.h>
 #include <errno.h>
@@ -22,6 +19,7 @@
 #include "fd-util.h"
 #include "format-util.h"
 #include "netlink-util.h"
+#include "path-util.h"
 #include "process-util.h"
 #include "signal-util.h"
 #include "string-util.h"
@@ -36,16 +34,14 @@ typedef struct Spawn {
 } Spawn;
 
 struct udev_event *udev_event_new(struct udev_device *dev) {
-        struct udev *udev = udev_device_get_udev(dev);
         struct udev_event *event;
 
         event = new0(struct udev_event, 1);
         if (event == NULL)
                 return NULL;
         event->dev = dev;
-        event->udev = udev;
-        udev_list_init(udev, &event->run_list, false);
-        udev_list_init(udev, &event->seclabel_list, false);
+        udev_list_init(NULL, &event->run_list, false);
+        udev_list_init(NULL, &event->seclabel_list, false);
         event->birth_usec = now(CLOCK_MONOTONIC);
         return event;
 }
@@ -183,7 +179,7 @@ static size_t subst_format_var(struct udev_event *event, struct udev_device *dev
                 }
 
                 /* try to read the value specified by "[dmi/id]product_name" */
-                if (util_resolve_subsys_kernel(event->udev, attr, vbuf, sizeof(vbuf), 1) == 0)
+                if (util_resolve_subsys_kernel(attr, vbuf, sizeof(vbuf), 1) == 0)
                         value = vbuf;
 
                 /* try to read the attribute the device */
@@ -701,7 +697,7 @@ static int spawn_wait(struct udev_event *event,
         return ret;
 }
 
-int udev_build_argv(struct udev *udev, char *cmd, int *argc, char *argv[]) {
+int udev_build_argv(char *cmd, int *argc, char *argv[]) {
         int i = 0;
         char *pos;
 
@@ -742,47 +738,44 @@ int udev_event_spawn(struct udev_event *event,
                      bool accept_failure,
                      const char *cmd,
                      char *result, size_t ressize) {
-        int outpipe[2] = {-1, -1};
-        int errpipe[2] = {-1, -1};
+        _cleanup_close_pair_ int outpipe[2] = {-1, -1}, errpipe[2] = {-1, -1};
+        _cleanup_strv_free_ char **argv = NULL;
         pid_t pid;
-        int err = 0;
+        int r;
 
         /* pipes from child to parent */
-        if (result != NULL || log_get_max_level() >= LOG_INFO) {
-                if (pipe2(outpipe, O_NONBLOCK) != 0) {
-                        err = log_error_errno(errno, "pipe failed: %m");
-                        goto out;
-                }
-        }
-        if (log_get_max_level() >= LOG_INFO) {
-                if (pipe2(errpipe, O_NONBLOCK) != 0) {
-                        err = log_error_errno(errno, "pipe failed: %m");
-                        goto out;
-                }
+        if (!result || log_get_max_level() >= LOG_INFO)
+                if (pipe2(outpipe, O_NONBLOCK) != 0)
+                        return log_error_errno(errno, "Failed to create pipe for command '%s': %m", cmd);
+
+        if (log_get_max_level() >= LOG_INFO)
+                if (pipe2(errpipe, O_NONBLOCK) != 0)
+                        return log_error_errno(errno, "Failed to create pipe for command '%s': %m", cmd);
+
+        argv = strv_split_full(cmd, NULL, SPLIT_QUOTES|SPLIT_RELAX);
+        if (!argv)
+                return log_oom();
+
+        /* allow programs in /usr/lib/udev/ to be called without the path */
+        if (!path_is_absolute(argv[0])) {
+                char *program;
+
+                program = path_join(NULL, UDEVLIBEXECDIR, argv[0]);
+                if (!program)
+                        return log_oom();
+
+                free_and_replace(argv[0], program);
         }
 
-        err = safe_fork("(spawn)", FORK_RESET_SIGNALS|FORK_LOG, &pid);
-        if (err < 0)
-                goto out;
-        if (err == 0) {
-                char arg[UTIL_PATH_SIZE];
-                char *argv[128];
-                char program[UTIL_PATH_SIZE];
-
+        r = safe_fork("(spawn)", FORK_RESET_SIGNALS|FORK_LOG, &pid);
+        if (r < 0)
+                return log_error_errno(r, "Failed to fork() to execute command '%s': %m", cmd);
+        if (r == 0) {
                 /* child closes parent's ends of pipes */
                 outpipe[READ_END] = safe_close(outpipe[READ_END]);
                 errpipe[READ_END] = safe_close(errpipe[READ_END]);
 
-                strscpy(arg, sizeof(arg), cmd);
-                udev_build_argv(event->udev, arg, NULL, argv);
-
-                /* allow programs in /usr/lib/udev/ to be called without the path */
-                if (argv[0][0] != '/') {
-                        strscpyl(program, sizeof(program), UDEVLIBEXECDIR "/", argv[0], NULL);
-                        argv[0] = program;
-                }
-
-                log_debug("starting '%s'", cmd);
+                log_debug("Starting '%s'", cmd);
 
                 spawn_exec(event, cmd, argv, udev_device_get_properties_envp(event->dev),
                            outpipe[WRITE_END], errpipe[WRITE_END]);
@@ -800,18 +793,11 @@ int udev_event_spawn(struct udev_event *event,
                    outpipe[READ_END], errpipe[READ_END],
                    result, ressize);
 
-        err = spawn_wait(event, timeout_usec, timeout_warn_usec, cmd, pid, accept_failure);
+        r = spawn_wait(event, timeout_usec, timeout_warn_usec, cmd, pid, accept_failure);
+        if (r < 0)
+                return log_error_errno(r, "Failed to wait spawned command '%s': %m", cmd);
 
-out:
-        if (outpipe[READ_END] >= 0)
-                close(outpipe[READ_END]);
-        if (outpipe[WRITE_END] >= 0)
-                close(outpipe[WRITE_END]);
-        if (errpipe[READ_END] >= 0)
-                close(errpipe[READ_END]);
-        if (errpipe[WRITE_END] >= 0)
-                close(errpipe[WRITE_END]);
-        return err;
+        return r;
 }
 
 static int rename_netif(struct udev_event *event) {
@@ -848,7 +834,7 @@ void udev_event_execute_rules(struct udev_event *event,
                 udev_device_delete_db(dev);
 
                 if (major(udev_device_get_devnum(dev)) != 0)
-                        udev_watch_end(event->udev, dev);
+                        udev_watch_end(dev);
 
                 udev_rules_apply_to_event(rules, event,
                                           timeout_usec, timeout_warn_usec,
@@ -861,7 +847,7 @@ void udev_event_execute_rules(struct udev_event *event,
                 if (event->dev_db != NULL) {
                         /* disable watch during event processing */
                         if (major(udev_device_get_devnum(dev)) != 0)
-                                udev_watch_end(event->udev, event->dev_db);
+                                udev_watch_end(event->dev_db);
 
                         if (major(udev_device_get_devnum(dev)) == 0 &&
                             streq(udev_device_get_action(dev), "move"))

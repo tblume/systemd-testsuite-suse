@@ -89,41 +89,44 @@ int rmdir_parents(const char *path, const char *stop) {
 }
 
 int rename_noreplace(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
-        struct stat buf;
-        int ret;
+        int r;
 
-        ret = renameat2(olddirfd, oldpath, newdirfd, newpath, RENAME_NOREPLACE);
-        if (ret >= 0)
+        /* Try the ideal approach first */
+        if (renameat2(olddirfd, oldpath, newdirfd, newpath, RENAME_NOREPLACE) >= 0)
                 return 0;
 
-        /* renameat2() exists since Linux 3.15, btrfs added support for it later.
-         * If it is not implemented, fallback to another method. */
-        if (!IN_SET(errno, EINVAL, ENOSYS))
+        /* renameat2() exists since Linux 3.15, btrfs and FAT added support for it later. If it is not implemented,
+         * fall back to a different method. */
+        if (!IN_SET(errno, EINVAL, ENOSYS, ENOTTY))
                 return -errno;
 
-        /* The link()/unlink() fallback does not work on directories. But
-         * renameat() without RENAME_NOREPLACE gives the same semantics on
-         * directories, except when newpath is an *empty* directory. This is
-         * good enough. */
-        ret = fstatat(olddirfd, oldpath, &buf, AT_SYMLINK_NOFOLLOW);
-        if (ret >= 0 && S_ISDIR(buf.st_mode)) {
-                ret = renameat(olddirfd, oldpath, newdirfd, newpath);
-                return ret >= 0 ? 0 : -errno;
+        /* Let's try to use linkat()+unlinkat() as fallback. This doesn't work on directories and on some file systems
+         * that do not support hard links (such as FAT, most prominently), but for files it's pretty close to what we
+         * want — though not atomic (i.e. for a short period both the new and the old filename will exist). */
+        if (linkat(olddirfd, oldpath, newdirfd, newpath, 0) >= 0) {
+
+                if (unlinkat(olddirfd, oldpath, 0) < 0) {
+                        r = -errno; /* Backup errno before the following unlinkat() alters it */
+                        (void) unlinkat(newdirfd, newpath, 0);
+                        return r;
+                }
+
+                return 0;
         }
 
-        /* If it is not a directory, use the link()/unlink() fallback. */
-        ret = linkat(olddirfd, oldpath, newdirfd, newpath, 0);
-        if (ret < 0)
+        if (!IN_SET(errno, EINVAL, ENOSYS, ENOTTY, EPERM)) /* FAT returns EPERM on link()… */
                 return -errno;
 
-        ret = unlinkat(olddirfd, oldpath, 0);
-        if (ret < 0) {
-                /* backup errno before the following unlinkat() alters it */
-                ret = errno;
-                (void) unlinkat(newdirfd, newpath, 0);
-                errno = ret;
+        /* OK, neither RENAME_NOREPLACE nor linkat()+unlinkat() worked. Let's then fallback to the racy TOCTOU
+         * vulnerable accessat(F_OK) check followed by classic, replacing renameat(), we have nothing better. */
+
+        if (faccessat(newdirfd, newpath, F_OK, AT_SYMLINK_NOFOLLOW) >= 0)
+                return -EEXIST;
+        if (errno != ENOENT)
                 return -errno;
-        }
+
+        if (renameat(olddirfd, oldpath, newdirfd, newpath) < 0)
+                return -errno;
 
         return 0;
 }
@@ -346,11 +349,26 @@ int touch(const char *path) {
         return touch_file(path, false, USEC_INFINITY, UID_INVALID, GID_INVALID, MODE_INVALID);
 }
 
-int symlink_idempotent(const char *from, const char *to) {
+int symlink_idempotent(const char *from, const char *to, bool make_relative) {
+        _cleanup_free_ char *relpath = NULL;
         int r;
 
         assert(from);
         assert(to);
+
+        if (make_relative) {
+                _cleanup_free_ char *parent = NULL;
+
+                parent = dirname_malloc(to);
+                if (!parent)
+                        return -ENOMEM;
+
+                r = path_make_relative(parent, from, &relpath);
+                if (r < 0)
+                        return r;
+
+                from = relpath;
+        }
 
         if (symlink(from, to) < 0) {
                 _cleanup_free_ char *p = NULL;
@@ -428,6 +446,31 @@ int mkfifo_atomic(const char *path, mode_t mode) {
                 return -errno;
 
         if (rename(t, path) < 0) {
+                unlink_noerrno(t);
+                return -errno;
+        }
+
+        return 0;
+}
+
+int mkfifoat_atomic(int dirfd, const char *path, mode_t mode) {
+        _cleanup_free_ char *t = NULL;
+        int r;
+
+        assert(path);
+
+        if (path_is_absolute(path))
+                return mkfifo_atomic(path, mode);
+
+        /* We're only interested in the (random) filename.  */
+        r = tempfn_random_child("", NULL, &t);
+        if (r < 0)
+                return r;
+
+        if (mkfifoat(dirfd, t, mode) < 0)
+                return -errno;
+
+        if (renameat(dirfd, t, dirfd, path) < 0) {
                 unlink_noerrno(t);
                 return -errno;
         }
@@ -670,7 +713,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
         if (!original_root && !ret && (flags & (CHASE_NONEXISTENT|CHASE_NO_AUTOFS|CHASE_SAFE|CHASE_OPEN|CHASE_STEP)) == CHASE_OPEN) {
                 /* Shortcut the CHASE_OPEN case if the caller isn't interested in the actual path and has no root set
                  * and doesn't care about any of the other special features we provide either. */
-                r = open(path, O_PATH|O_CLOEXEC);
+                r = open(path, O_PATH|O_CLOEXEC|((flags & CHASE_NOFOLLOW) ? O_NOFOLLOW : 0));
                 if (r < 0)
                         return -errno;
 
@@ -825,7 +868,7 @@ int chase_symlinks(const char *path, const char *original_root, unsigned flags, 
                     fd_is_fs_type(child, AUTOFS_SUPER_MAGIC) > 0)
                         return -EREMOTE;
 
-                if (S_ISLNK(st.st_mode)) {
+                if (S_ISLNK(st.st_mode) && !((flags & CHASE_NOFOLLOW) && isempty(todo))) {
                         char *joined;
 
                         _cleanup_free_ char *destination = NULL;
@@ -1156,7 +1199,7 @@ int unlinkat_deallocate(int fd, const char *name, int flags) {
 }
 
 int fsync_directory_of_file(int fd) {
-        _cleanup_free_ char *path = NULL, *dn = NULL;
+        _cleanup_free_ char *path = NULL;
         _cleanup_close_ int dfd = -1;
         int r;
 
@@ -1182,16 +1225,40 @@ int fsync_directory_of_file(int fd) {
         if (!path_is_absolute(path))
                 return -EINVAL;
 
-        dn = dirname_malloc(path);
-        if (!dn)
-                return -ENOMEM;
-
-        dfd = open(dn, O_RDONLY|O_CLOEXEC|O_DIRECTORY);
+        dfd = open_parent(path, O_CLOEXEC, 0);
         if (dfd < 0)
-                return -errno;
+                return dfd;
 
         if (fsync(dfd) < 0)
                 return -errno;
 
         return 0;
+}
+
+int open_parent(const char *path, int flags, mode_t mode) {
+        _cleanup_free_ char *parent = NULL;
+        int fd;
+
+        if (isempty(path))
+                return -EINVAL;
+        if (path_equal(path, "/")) /* requesting the parent of the root dir is fishy, let's prohibit that */
+                return -EINVAL;
+
+        parent = dirname_malloc(path);
+        if (!parent)
+                return -ENOMEM;
+
+        /* Let's insist on O_DIRECTORY since the parent of a file or directory is a directory. Except if we open an
+         * O_TMPFILE file, because in that case we are actually create a regular file below the parent directory. */
+
+        if ((flags & O_PATH) == O_PATH)
+                flags |= O_DIRECTORY;
+        else if ((flags & O_TMPFILE) != O_TMPFILE)
+                flags |= O_DIRECTORY|O_RDONLY;
+
+        fd = open(parent, flags, mode);
+        if (fd < 0)
+                return -errno;
+
+        return fd;
 }

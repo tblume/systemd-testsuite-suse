@@ -91,7 +91,6 @@
 #include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
-#include "udev-util.h"
 #include "umask-util.h"
 #include "user-util.h"
 #include "util.h"
@@ -190,7 +189,7 @@ static const char *arg_container_service_name = "systemd-nspawn";
 static bool arg_notify_ready = false;
 static bool arg_use_cgns = true;
 static unsigned long arg_clone_ns_flags = CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWUTS;
-static MountSettingsMask arg_mount_settings = MOUNT_APPLY_APIVFS_RO;
+static MountSettingsMask arg_mount_settings = MOUNT_APPLY_APIVFS_RO|MOUNT_APPLY_TMPFS_TMP;
 static void *arg_root_hash = NULL;
 static size_t arg_root_hash_size = 0;
 static char **arg_syscall_whitelist = NULL;
@@ -204,11 +203,18 @@ static unsigned arg_cpuset_ncpus = 0;
 static ResolvConfMode arg_resolv_conf = RESOLV_CONF_AUTO;
 static TimezoneMode arg_timezone = TIMEZONE_AUTO;
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
         (void) pager_open(false, false);
 
+        r = terminal_urlify_man("systemd-nspawn", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] [PATH] [ARGUMENTS...]\n\n"
-               "Spawn a minimal namespace container for debugging, testing and building.\n\n"
+               "Spawn a command or OS in a light-weight container.\n\n"
                "  -h --help                 Show this help\n"
                "     --version              Print version string\n"
                "  -q --quiet                Do not show status information\n"
@@ -299,7 +305,12 @@ static void help(void) {
                "     --volatile[=MODE]      Run the system in volatile mode\n"
                "     --settings=BOOLEAN     Load additional settings from .nspawn file\n"
                "     --notify-ready=BOOLEAN Receive notifications from the child init process\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int custom_mount_check_all(void) {
@@ -391,8 +402,14 @@ static void parse_share_ns_env(const char *name, unsigned long ns_flag) {
 }
 
 static void parse_mount_settings_env(void) {
-        int r;
         const char *e;
+        int r;
+
+        r = getenv_bool("SYSTEMD_NSPAWN_TMPFS_TMP");
+        if (r >= 0)
+                SET_FLAG(arg_mount_settings, MOUNT_APPLY_TMPFS_TMP, r > 0);
+        else if (r != -ENXIO)
+                log_warning_errno(r, "Failed to parse $SYSTEMD_NSPAWN_TMPFS_TMP, ignoring: %m");
 
         e = getenv("SYSTEMD_NSPAWN_API_VFS_WRITABLE");
         if (!e)
@@ -532,8 +549,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -1646,12 +1662,7 @@ static int setup_resolv_conf(const char *dest) {
                 if (arg_private_network)
                         m = RESOLV_CONF_OFF;
                 else if (have_resolv_conf(STATIC_RESOLV_CONF) > 0 && resolved_listening() > 0)
-                        /* resolved is enabled on the host. In this, case bind mount its static resolv.conf file into the
-                         * container, so that the container can use the host's resolver. Given that network namespacing is
-                         * disabled it's only natural of the container also uses the host's resolver. It also has the big
-                         * advantage that the container will be able to follow the host's DNS server configuration changes
-                         * transparently. */
-                        m = RESOLV_CONF_BIND_STATIC;
+                        m = arg_read_only && arg_volatile_mode != VOLATILE_YES ? RESOLV_CONF_BIND_STATIC : RESOLV_CONF_COPY_STATIC;
                 else if (have_resolv_conf("/etc/resolv.conf") > 0)
                         m = arg_read_only && arg_volatile_mode != VOLATILE_YES ? RESOLV_CONF_BIND_HOST : RESOLV_CONF_COPY_HOST;
                 else
@@ -1779,7 +1790,12 @@ static int copy_devnodes(const char *dest) {
                 struct stat st;
 
                 from = strappend("/dev/", d);
+                if (!from)
+                        return log_oom();
+
                 to = prefix_root(dest, from);
+                if (!to)
+                        return log_oom();
 
                 if (stat(from, &st) < 0) {
 
@@ -1792,6 +1808,8 @@ static int copy_devnodes(const char *dest) {
                         return -EIO;
 
                 } else {
+                        _cleanup_free_ char *sl = NULL, *prefixed = NULL, *dn = NULL, *t = NULL;
+
                         if (mknod(to, st.st_mode, st.st_rdev) < 0) {
                                 /* Explicitly warn the user when /dev is already populated. */
                                 if (errno == EEXIST)
@@ -1799,8 +1817,7 @@ static int copy_devnodes(const char *dest) {
                                 if (errno != EPERM)
                                         return log_error_errno(errno, "mknod(%s) failed: %m", to);
 
-                                /* Some systems abusively restrict mknod but
-                                 * allow bind mounts. */
+                                /* Some systems abusively restrict mknod but allow bind mounts. */
                                 r = touch(to);
                                 if (r < 0)
                                         return log_error_errno(r, "touch (%s) failed: %m", to);
@@ -1812,6 +1829,28 @@ static int copy_devnodes(const char *dest) {
                         r = userns_lchown(to, 0, 0);
                         if (r < 0)
                                 return log_error_errno(r, "chown() of device node %s failed: %m", to);
+
+                        dn = strjoin("/dev/", S_ISCHR(st.st_mode) ? "char" : "block");
+                        if (!dn)
+                                return log_oom();
+
+                        r = userns_mkdir(dest, dn, 0755, 0, 0);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to create '%s': %m", dn);
+
+                        if (asprintf(&sl, "%s/%u:%u", dn, major(st.st_rdev), minor(st.st_rdev)) < 0)
+                                return log_oom();
+
+                        prefixed = prefix_root(dest, sl);
+                        if (!prefixed)
+                                return log_oom();
+
+                        t = strjoin("../", d);
+                        if (!t)
+                                return log_oom();
+
+                        if (symlink(t, prefixed) < 0)
+                                log_debug_errno(errno, "Failed to symlink '%s' to '%s': %m", t, prefixed);
                 }
         }
 
@@ -2536,6 +2575,17 @@ static int inner_child(
         _cleanup_strv_free_ char **env_use = NULL;
         int r;
 
+        /* This is the "inner" child process, i.e. the one forked off by the "outer" child process, which is the one
+         * the container manager itself forked off. At the time of clone() it gained its own CLONE_NEWNS, CLONE_NEWPID,
+         * CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWUSER namespaces. Note that it has its own CLONE_NEWNS namespace,
+         * separate from the CLONE_NEWNS created for the "outer" child, and also separate from the host's CLONE_NEWNS
+         * namespace. The reason for having two levels of CLONE_NEWNS namespaces is that the "inner" one is owned by
+         * the CLONE_NEWUSER namespace of the container, while the "outer" one is owned by the host's CLONE_NEWUSER
+         * namespace.
+         *
+         * Note at this point we have no CLONE_NEWNET namespace yet. We'll acquire that one later through
+         * unshare(). See below. */
+
         assert(barrier);
         assert(directory);
         assert(kmsg_socket >= 0);
@@ -2558,7 +2608,6 @@ static int inner_child(
         r = mount_all(NULL,
                       arg_mount_settings | MOUNT_IN_USERNS,
                       arg_uid_shift,
-                      arg_uid_range,
                       arg_selinux_apifs_context);
         if (r < 0)
                 return r;
@@ -2821,6 +2870,11 @@ static int outer_child(
         pid_t pid;
         ssize_t l;
 
+        /* This is the "outer" child process, i.e the one forked off by the container manager itself. It already has
+         * its own CLONE_NEWNS namespace (which was created by the clone()). It still lives in the host's CLONE_NEWPID,
+         * CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWUSER and CLONE_NEWNET namespaces. After it completed a number of
+         * initializations a second child (the "inner" one) is forked off it, and it exits. */
+
         assert(barrier);
         assert(directory);
         assert(console);
@@ -2902,7 +2956,8 @@ static int outer_child(
                         }
                 }
 
-                log_info("Selected user namespace base " UID_FMT " and range " UID_FMT ".", arg_uid_shift, arg_uid_range);
+                log_full(arg_quiet ? LOG_DEBUG : LOG_INFO,
+                         "Selected user namespace base " UID_FMT " and range " UID_FMT ".", arg_uid_shift, arg_uid_range);
         }
 
         if (dissected_image) {
@@ -2990,7 +3045,6 @@ static int outer_child(
         r = mount_all(directory,
                       arg_mount_settings,
                       arg_uid_shift,
-                      arg_uid_range,
                       arg_selinux_apifs_context);
         if (r < 0)
                 return r;
@@ -4319,16 +4373,15 @@ int main(int argc, char *argv[]) {
                                                           BTRFS_SNAPSHOT_FALLBACK_IMMUTABLE |
                                                           BTRFS_SNAPSHOT_RECURSIVE |
                                                           BTRFS_SNAPSHOT_QUOTA);
-                                if (r == -EEXIST) {
-                                        if (!arg_quiet)
-                                                log_info("Directory %s already exists, not populating from template %s.", arg_directory, arg_template);
-                                } else if (r < 0) {
+                                if (r == -EEXIST)
+                                        log_full(arg_quiet ? LOG_DEBUG : LOG_INFO,
+                                                 "Directory %s already exists, not populating from template %s.", arg_directory, arg_template);
+                                else if (r < 0) {
                                         log_error_errno(r, "Couldn't create snapshot %s from %s: %m", arg_directory, arg_template);
                                         goto finish;
-                                } else {
-                                        if (!arg_quiet)
-                                                log_info("Populated %s from template %s.", arg_directory, arg_template);
-                                }
+                                } else
+                                        log_full(arg_quiet ? LOG_DEBUG : LOG_INFO,
+                                                 "Populated %s from template %s.", arg_directory, arg_template);
                         }
                 }
 

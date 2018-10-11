@@ -3,7 +3,6 @@
 #define foosdid128hfoo
 
 /***
-
   systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
   the Free Software Foundation; either version 2.1 of the License, or
@@ -43,6 +42,7 @@ int sd_id128_randomize(sd_id128_t *ret);
 
 int sd_id128_get_machine(sd_id128_t *ret);
 int sd_id128_get_machine_app_specific(sd_id128_t app_id, sd_id128_t *ret);
+int sd_id128_get_boot_app_specific(sd_id128_t app_id, sd_id128_t *ret);
 int sd_id128_get_boot(sd_id128_t *ret);
 int sd_id128_get_invocation(sd_id128_t *ret);
 

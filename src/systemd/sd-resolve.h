@@ -3,7 +3,6 @@
 #define foosdresolvehfoo
 
 /***
-
   systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
   the Free Software Foundation; either version 2.1 of the License, or
@@ -17,6 +16,11 @@
   You should have received a copy of the GNU Lesser General Public License
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
+
+/* 'struct addrinfo' needs _GNU_SOURCE */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
 
 #include <inttypes.h>
 #include <netdb.h>

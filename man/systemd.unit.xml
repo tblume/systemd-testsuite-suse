@@ -1,4 +1,4 @@
-<?xml version='1.0'?> <!--*- Mode: nxml; nxml-child-indent: 2; indent-tabs-mode: nil -*-->
+<?xml version='1.0'?>
 <!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd" [
 <!ENTITY % entities SYSTEM "custom-entities.ent" >
@@ -39,19 +39,26 @@
     <filename><replaceable>slice</replaceable>.slice</filename>,
     <filename><replaceable>scope</replaceable>.scope</filename></para>
 
-    <para><literallayout><filename>/etc/systemd/system.control/*</filename>
+    <refsect2>
+      <title>System Unit Search Path</title>
+
+      <para><literallayout><filename>/etc/systemd/system.control/*</filename>
 <filename>/run/systemd/system.control/*</filename>
 <filename>/run/systemd/transient/*</filename>
 <filename>/run/systemd/generator.early/*</filename>
 <filename>/etc/systemd/system/*</filename>
+<filename>/etc/systemd/systemd.attached/*</filename>
 <filename>/run/systemd/system/*</filename>
+<filename>/run/systemd/systemd.attached/*</filename>
 <filename>/run/systemd/generator/*</filename>
 <filename>…</filename>
 <filename>/usr/lib/systemd/system/*</filename>
-<filename>/run/systemd/generator.late/*</filename>
-    </literallayout></para>
+<filename>/run/systemd/generator.late/*</filename></literallayout></para>
+    </refsect2>
 
-    <para><literallayout><filename>~/.config/systemd/user.control/*</filename>
+    <refsect2>
+      <title>User Unit Search Path</title>
+      <para><literallayout><filename>~/.config/systemd/user.control/*</filename>
 <filename>$XDG_RUNTIME_DIR/systemd/user.control/*</filename>
 <filename>$XDG_RUNTIME_DIR/systemd/transient/*</filename>
 <filename>$XDG_RUNTIME_DIR/systemd/generator.early/*</filename>
@@ -63,8 +70,9 @@
 <filename>~/.local/share/systemd/user/*</filename>
 <filename>…</filename>
 <filename>/usr/lib/systemd/user/*</filename>
-<filename>$XDG_RUNTIME_DIR/systemd/generator.late/*</filename>
-    </literallayout></para>
+<filename>$XDG_RUNTIME_DIR/systemd/generator.late/*</filename></literallayout></para>
+    </refsect2>
+
   </refsynopsisdiv>
 
   <refsect1>
@@ -117,23 +125,6 @@
     ignored completely by systemd. Options within an ignored section
     do not need the prefix. Applications may use this to include
     additional information in the unit files.</para>
-
-    <para>Boolean arguments used in unit files can be written in
-    various formats. For positive settings the strings
-    <option>1</option>, <option>yes</option>, <option>true</option>
-    and <option>on</option> are equivalent. For negative settings, the
-    strings <option>0</option>, <option>no</option>,
-    <option>false</option> and <option>off</option> are
-    equivalent.</para>
-
-    <para>Time span values encoded in unit files can be written in various formats. A stand-alone
-    number specifies a time in seconds.  If suffixed with a time unit, the unit is honored. A
-    concatenation of multiple values with units is supported, in which case the values are added
-    up. Example: <literal>50</literal> refers to 50 seconds; <literal>2min 200ms</literal> refers to
-    2 minutes and 200 milliseconds, i.e. 120200 ms.  The following time units are understood:
-    <literal>s</literal>, <literal>min</literal>, <literal>h</literal>, <literal>d</literal>,
-    <literal>w</literal>, <literal>ms</literal>, <literal>us</literal>.  For details see
-    <citerefentry><refentrytitle>systemd.time</refentrytitle><manvolnum>7</manvolnum></citerefentry>.</para>
 
     <para>Units can be aliased (have an alternative name), by creating a symlink from the new name
     to the existing name in one of the unit search paths. For example,

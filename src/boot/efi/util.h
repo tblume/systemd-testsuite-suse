@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-
-#ifndef __SDBOOT_UTIL_H
-#define __SDBOOT_UTIL_H
+#pragma once
 
 #include <efi.h>
 #include <efilib.h>
@@ -32,7 +30,6 @@ CHAR16 *stra_to_path(CHAR8 *stra);
 CHAR16 *stra_to_str(CHAR8 *stra);
 
 EFI_STATUS file_read(EFI_FILE_HANDLE dir, CHAR16 *name, UINTN off, UINTN size, CHAR8 **content, UINTN *content_size);
-#endif
 
 static inline void FreePoolp(void *p) {
         FreePool(*(void**) p);

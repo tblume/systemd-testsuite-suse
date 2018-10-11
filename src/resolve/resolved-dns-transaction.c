@@ -11,11 +11,10 @@
 #include "resolved-dns-cache.h"
 #include "resolved-dns-transaction.h"
 #include "resolved-llmnr.h"
-#include "string-table.h"
-
 #if ENABLE_DNS_OVER_TLS
-#include <gnutls/socket.h>
+#include "resolved-dnstls.h"
 #endif
+#include "string-table.h"
 
 #define TRANSACTIONS_MAX 4096
 #define TRANSACTION_TCP_TIMEOUT_USEC (10U*USEC_PER_SEC)
@@ -503,27 +502,14 @@ static int dns_transaction_on_stream_packet(DnsTransaction *t, DnsPacket *p) {
         return 0;
 }
 
-static int on_stream_connection(DnsStream *s) {
-#if ENABLE_DNS_OVER_TLS
-        /* Store TLS Ticket for faster succesive TLS handshakes */
-        if (s->tls_session && s->server) {
-                if (s->server->tls_session_data.data)
-                        gnutls_free(s->server->tls_session_data.data);
-
-                gnutls_session_get_data2(s->tls_session, &s->server->tls_session_data);
-        }
-#endif
-
-        return 0;
-}
-
 static int on_stream_complete(DnsStream *s, int error) {
+        _cleanup_(dns_stream_unrefp) DnsStream *p = NULL;
         DnsTransaction *t, *n;
         int r = 0;
 
         /* Do not let new transactions use this stream */
         if (s->server && s->server->stream == s)
-                s->server->stream = dns_stream_unref(s->server->stream);
+                p = TAKE_PTR(s->server->stream);
 
         if (ERRNO_IS_DISCONNECT(error) && s->protocol != DNS_PROTOCOL_LLMNR) {
                 usec_t usec;
@@ -577,9 +563,6 @@ static int dns_transaction_emit_tcp(DnsTransaction *t) {
         _cleanup_(dns_stream_unrefp) DnsStream *s = NULL;
         union sockaddr_union sa;
         int r;
-#if ENABLE_DNS_OVER_TLS
-        gnutls_session_t gs;
-#endif
 
         assert(t);
 
@@ -645,41 +628,21 @@ static int dns_transaction_emit_tcp(DnsTransaction *t) {
 
                 fd = -1;
 
+#if ENABLE_DNS_OVER_TLS
+                if (DNS_SERVER_FEATURE_LEVEL_IS_TLS(t->current_feature_level)) {
+                        assert(t->server);
+                        r = dnstls_stream_connect_tls(s, t->server);
+                        if (r < 0)
+                                return r;
+                }
+#endif
+
                 if (t->server) {
                         dns_stream_unref(t->server->stream);
                         t->server->stream = dns_stream_ref(s);
                         s->server = dns_server_ref(t->server);
                 }
 
-#if ENABLE_DNS_OVER_TLS
-                if (DNS_SERVER_FEATURE_LEVEL_IS_TLS(t->current_feature_level)) {
-                        assert(t->server);
-
-                        r = gnutls_init(&gs, GNUTLS_CLIENT | GNUTLS_ENABLE_FALSE_START | GNUTLS_NONBLOCK);
-                        if (r < 0)
-                                return r;
-
-                        /* As DNS-over-TLS is a recent protocol, older TLS versions can be disabled */
-                        r = gnutls_priority_set_direct(gs, "NORMAL:-VERS-ALL:+VERS-TLS1.2", NULL);
-                        if (r < 0)
-                                return r;
-
-                        r = gnutls_credentials_set(gs, GNUTLS_CRD_CERTIFICATE, t->server->tls_cert_cred);
-                        if (r < 0)
-                                return r;
-
-                        if (t->server->tls_session_data.size > 0)
-                                gnutls_session_set_data(gs, t->server->tls_session_data.data, t->server->tls_session_data.size);
-
-                        gnutls_handshake_set_timeout(gs, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
-
-                        r = dns_stream_connect_tls(s, gs);
-                        if (r < 0)
-                                return r;
-                }
-#endif
-
-                s->on_connection = on_stream_connection;
                 s->complete = on_stream_complete;
                 s->on_packet = dns_stream_on_packet;
 

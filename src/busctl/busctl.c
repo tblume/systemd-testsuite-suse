@@ -29,7 +29,7 @@
 
 static bool arg_no_pager = false;
 static bool arg_legend = true;
-static char *arg_address = NULL;
+static const char *arg_address = NULL;
 static bool arg_unique = false;
 static bool arg_acquired = false;
 static bool arg_activatable = false;
@@ -719,8 +719,7 @@ static void member_hash_func(const void *p, struct siphash *state) {
                 string_hash_func(m->interface, state);
 }
 
-static int member_compare_func(const void *a, const void *b) {
-        const Member *x = a, *y = b;
+static int member_compare_func(const Member *x, const Member *y) {
         int d;
 
         assert(x);
@@ -739,10 +738,8 @@ static int member_compare_func(const void *a, const void *b) {
         return strcmp_ptr(x->name, y->name);
 }
 
-static int member_compare_funcp(const void *a, const void *b) {
-        const Member *const * x = (const Member *const *) a, * const *y = (const Member *const *) b;
-
-        return member_compare_func(*x, *y);
+static int member_compare_funcp(Member * const *a, Member * const *b) {
+        return member_compare_func(*a, *b);
 }
 
 static void member_free(Member *m) {
@@ -913,7 +910,7 @@ static int on_property(const char *interface, const char *name, const char *sign
 static int introspect(int argc, char **argv, void *userdata) {
         static const struct hash_ops member_hash_ops = {
                 .hash = member_hash_func,
-                .compare = member_compare_func,
+                .compare = (__compar_fn_t) member_compare_func,
         };
 
         static const XMLIntrospectOps ops = {
@@ -1063,7 +1060,7 @@ static int introspect(int argc, char **argv, void *userdata) {
         if (result_width > 40)
                 result_width = 40;
 
-        qsort(sorted, k, sizeof(Member*), member_compare_funcp);
+        typesafe_qsort(sorted, k, member_compare_funcp);
 
         if (arg_legend) {
                 printf("%-*s %-*s %-*s %-*s %s\n",
@@ -1726,6 +1723,13 @@ static int set_property(int argc, char **argv, void *userdata) {
 }
 
 static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("busctl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
                "Introspect the bus.\n\n"
                "  -h --help               Show this help\n"
@@ -1768,7 +1772,10 @@ static int help(void) {
                "  set-property SERVICE OBJECT INTERFACE PROPERTY SIGNATURE ARGUMENT...\n"
                "                          Set property value\n"
                "  help                    Show this help\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }

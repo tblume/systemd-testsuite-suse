@@ -35,6 +35,8 @@ sources = files('''
         netdev/wireguard.h
         netdev/netdevsim.c
         netdev/netdevsim.h
+        netdev/fou-tunnel.c
+        netdev/fou-tunnel.h
         networkd-address-label.c
         networkd-address-label.h
         networkd-address-pool.c
@@ -130,6 +132,9 @@ if conf.get('ENABLE_NETWORKD') == 1
                 install_data('systemd-networkd.pkla',
                              install_dir : polkitpkladir)
         endif
+
+        install_data('networkd.conf',
+                     install_dir : pkgsysconfdir)
 
         tests += [
     [['src/network/test-networkd-conf.c'],

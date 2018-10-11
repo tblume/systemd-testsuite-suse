@@ -135,6 +135,13 @@ static int acquire_journal(sd_journal **ret, char **matches) {
 }
 
 static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("coredumpctl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s [OPTIONS...]\n\n"
                "List or retrieve coredumps from the journal.\n\n"
                "Flags:\n"
@@ -156,7 +163,10 @@ static int help(void) {
                "  info [MATCHES...]  Show detailed information about one or more coredumps\n"
                "  dump [MATCHES...]  Print first matching coredump to stdout\n"
                "  debug [MATCHES...] Start a debugger for the first matching coredump\n"
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }
@@ -654,7 +664,8 @@ static int dump_list(int argc, char **argv, void *userdata) {
          * pick a fairly low data threshold here */
         sd_journal_set_data_threshold(j, 4096);
 
-        if (arg_one) {
+        /* "info" without pattern implies "-1" */
+        if (arg_one || (verb_is_info && argc == 1)) {
                 r = focus(j);
                 if (r < 0)
                         return r;

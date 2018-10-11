@@ -11,6 +11,7 @@
  *
  * Two character prefixes based on the type of interface:
  *   en — Ethernet
+ *   ib — InfiniBand
  *   sl — serial line IP (slip)
  *   wl — wlan
  *   ww — wwan
@@ -33,6 +34,9 @@
  *
  * All multi-function PCI devices will carry the [f<function>] number in the
  * device name, including the function 0 device.
+ *
+ * SR-IOV virtual devices are named based on the name of the parent interface,
+ * with a suffix of "v<N>", where <N> is the virtual device number.
  *
  * When using PCI geography, The PCI domain is only prepended when it is not 0.
  *
@@ -63,6 +67,12 @@
  *   /sys/devices/pci0000:00/0000:00:1c.1/0000:03:00.0/net/wlp3s0
  *   ID_NET_NAME_MAC=wlx0024d7e31130
  *   ID_NET_NAME_PATH=wlp3s0
+ *
+ * PCI IB host adapter with 2 ports:
+ *   /sys/devices/pci0000:00/0000:00:03.0/0000:15:00.0/net/ibp21s0f0
+ *   ID_NET_NAME_PATH=ibp21s0f0
+ *   /sys/devices/pci0000:00/0000:00:03.0/0000:15:00.1/net/ibp21s0f1
+ *   ID_NET_NAME_PATH=ibp21s0f1
  *
  * USB built-in 3G modem:
  *   /sys/devices/pci0000:00/0000:00:1d.0/usb2/2-1/2-1.4/2-1.4:1.6/net/wwp0s29u1u4i6
@@ -99,7 +109,6 @@
 #include "stdio-util.h"
 #include "string-util.h"
 #include "udev.h"
-#include "udev-util.h"
 
 #define ONBOARD_INDEX_MAX (16*1024-1)
 
@@ -151,7 +160,6 @@ static struct udev_device *skip_virtio(struct udev_device *dev) {
 }
 
 static int get_virtfn_info(struct udev_device *dev, struct netnames *names, struct virtfn_info *vf_info) {
-        struct udev *udev;
         const char *physfn_link_file;
         _cleanup_free_ char *physfn_pci_syspath = NULL;
         _cleanup_free_ char *virtfn_pci_syspath = NULL;
@@ -160,9 +168,6 @@ static int get_virtfn_info(struct udev_device *dev, struct netnames *names, stru
         struct virtfn_info vf_info_local = {};
         int r;
 
-        udev = udev_device_get_udev(names->pcidev);
-        if (!udev)
-                return -ENOENT;
         /* Check if this is a virtual function. */
         physfn_link_file = strjoina(udev_device_get_syspath(names->pcidev), "/physfn");
         r = chase_symlinks(physfn_link_file, NULL, 0, &physfn_pci_syspath);
@@ -170,7 +175,7 @@ static int get_virtfn_info(struct udev_device *dev, struct netnames *names, stru
                 return r;
 
         /* Get physical function's pci device. */
-        vf_info_local.physfn_pcidev = udev_device_new_from_syspath(udev, physfn_pci_syspath);
+        vf_info_local.physfn_pcidev = udev_device_new_from_syspath(NULL, physfn_pci_syspath);
         if (!vf_info_local.physfn_pcidev)
                 return -ENOENT;
 
@@ -213,11 +218,11 @@ out_unref:
 
 /* retrieve on-board index number and label from firmware */
 static int dev_pci_onboard(struct udev_device *dev, struct netnames *names) {
-        unsigned dev_port = 0;
+        unsigned long idx, dev_port = 0;
+        const char *attr, *port_name;
         size_t l;
         char *s;
-        const char *attr, *port_name;
-        int idx;
+        int r;
 
         /* ACPI _DSM  — device specific method for naming a PCI or PCI Express device */
         attr = udev_device_get_sysattr_value(names->pcidev, "acpi_index");
@@ -227,9 +232,9 @@ static int dev_pci_onboard(struct udev_device *dev, struct netnames *names) {
         if (!attr)
                 return -ENOENT;
 
-        idx = strtoul(attr, NULL, 0);
-        if (idx <= 0)
-                return -EINVAL;
+        r = safe_atolu(attr, &idx);
+        if (r < 0)
+                return r;
 
         /* Some BIOSes report rubbish indexes that are excessively high (2^24-1 is an index VMware likes to report for
          * example). Let's define a cut-off where we don't consider the index reliable anymore. We pick some arbitrary
@@ -241,18 +246,18 @@ static int dev_pci_onboard(struct udev_device *dev, struct netnames *names) {
         /* kernel provided port index for multiple ports on a single PCI function */
         attr = udev_device_get_sysattr_value(dev, "dev_port");
         if (attr)
-                dev_port = strtol(attr, NULL, 10);
+                dev_port = strtoul(attr, NULL, 10);
 
         /* kernel provided front panel port name for multiple port PCI device */
         port_name = udev_device_get_sysattr_value(dev, "phys_port_name");
 
         s = names->pci_onboard;
         l = sizeof(names->pci_onboard);
-        l = strpcpyf(&s, l, "o%d", idx);
+        l = strpcpyf(&s, l, "o%lu", idx);
         if (port_name)
                 l = strpcpyf(&s, l, "n%s", port_name);
         else if (dev_port > 0)
-                l = strpcpyf(&s, l, "d%d", dev_port);
+                l = strpcpyf(&s, l, "d%lu", dev_port);
         if (l == 0)
                 names->pci_onboard[0] = '\0';
 
@@ -286,8 +291,8 @@ static bool is_pci_ari_enabled(struct udev_device *dev) {
 }
 
 static int dev_pci_slot(struct udev_device *dev, struct netnames *names) {
-        struct udev *udev = udev_device_get_udev(names->pcidev);
-        unsigned domain, bus, slot, func, dev_port = 0, hotplug_slot = 0;
+        unsigned long dev_port = 0;
+        unsigned domain, bus, slot, func, hotplug_slot = 0;
         size_t l;
         char *s;
         const char *attr, *port_name;
@@ -307,8 +312,23 @@ static int dev_pci_slot(struct udev_device *dev, struct netnames *names) {
 
         /* kernel provided port index for multiple ports on a single PCI function */
         attr = udev_device_get_sysattr_value(dev, "dev_port");
-        if (attr)
-                dev_port = strtol(attr, NULL, 10);
+        if (attr) {
+                dev_port = strtoul(attr, NULL, 10);
+                /* With older kernels IP-over-InfiniBand network interfaces sometimes erroneously
+                 * provide the port number in the 'dev_id' sysfs attribute instead of 'dev_port',
+                 * which thus stays initialized as 0. */
+                if (dev_port == 0) {
+                        attr = udev_device_get_sysattr_value(dev, "type");
+                        if (attr) {
+                                unsigned long type = strtoul(attr, NULL, 10);
+                                if (type == ARPHRD_INFINIBAND) {
+                                        attr = udev_device_get_sysattr_value(dev, "dev_id");
+                                        if (attr)
+                                                dev_port = strtoul(attr, NULL, 16);
+                                }
+                        }
+                }
+        }
 
         /* kernel provided front panel port name for multiple port PCI device */
         port_name = udev_device_get_sysattr_value(dev, "phys_port_name");
@@ -324,12 +344,12 @@ static int dev_pci_slot(struct udev_device *dev, struct netnames *names) {
         if (port_name)
                 l = strpcpyf(&s, l, "n%s", port_name);
         else if (dev_port > 0)
-                l = strpcpyf(&s, l, "d%u", dev_port);
+                l = strpcpyf(&s, l, "d%lu", dev_port);
         if (l == 0)
                 names->pci_path[0] = '\0';
 
         /* ACPI _SUN  — slot user number */
-        pci = udev_device_new_from_subsystem_sysname(udev, "subsystem", "pci");
+        pci = udev_device_new_from_subsystem_sysname(NULL, "subsystem", "pci");
         if (!pci)
                 return -ENOENT;
 
@@ -380,7 +400,7 @@ static int dev_pci_slot(struct udev_device *dev, struct netnames *names) {
                 if (port_name)
                         l = strpcpyf(&s, l, "n%s", port_name);
                 else if (dev_port > 0)
-                        l = strpcpyf(&s, l, "d%d", dev_port);
+                        l = strpcpyf(&s, l, "d%lu", dev_port);
                 if (l == 0)
                         names->pci_slot[0] = '\0';
         }
@@ -651,8 +671,25 @@ static int names_ccw(struct  udev_device *dev, struct netnames *names) {
 
 static int names_mac(struct udev_device *dev, struct netnames *names) {
         const char *s;
-        unsigned int i;
+        unsigned long i;
         unsigned int a1, a2, a3, a4, a5, a6;
+
+        /* Some kinds of devices tend to have hardware addresses
+         * that are impossible to use in an iface name.
+         */
+        s = udev_device_get_sysattr_value(dev, "type");
+        if (!s)
+                return EXIT_FAILURE;
+        i = strtoul(s, NULL, 0);
+        switch (i) {
+        /* The persistent part of a hardware address of an InfiniBand NIC
+         * is 8 bytes long. We cannot fit this much in an iface name.
+         */
+        case ARPHRD_INFINIBAND:
+                return -EINVAL;
+        default:
+                break;
+        }
 
         /* check for NET_ADDR_PERM, skip random MAC addresses */
         s = udev_device_get_sysattr_value(dev, "addr_assign_type");
@@ -701,13 +738,15 @@ static int ieee_oui(struct udev_device *dev, struct netnames *names, bool test) 
 static int builtin_net_id(struct udev_device *dev, int argc, char *argv[], bool test) {
         const char *s;
         const char *p;
-        unsigned int i;
+        unsigned long i;
         const char *devtype;
         const char *prefix = "en";
         struct netnames names = {};
         int err;
 
-        /* handle only ARPHRD_ETHER and ARPHRD_SLIP devices */
+        /* handle only ARPHRD_ETHER, ARPHRD_SLIP
+         * and ARPHRD_INFINIBAND devices
+         */
         s = udev_device_get_sysattr_value(dev, "type");
         if (!s)
                 return EXIT_FAILURE;
@@ -715,6 +754,9 @@ static int builtin_net_id(struct udev_device *dev, int argc, char *argv[], bool 
         switch (i) {
         case ARPHRD_ETHER:
                 prefix = "en";
+                break;
+        case ARPHRD_INFINIBAND:
+                prefix = "ib";
                 break;
         case ARPHRD_SLIP:
                 prefix = "sl";

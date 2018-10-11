@@ -44,6 +44,8 @@ shared_sources = files('''
         generator.c
         generator.h
         gpt.h
+        id128-print.c
+        id128-print.h
         ima-util.c
         ima-util.h
         import-util.c
@@ -63,6 +65,7 @@ shared_sources = files('''
         machine-image.h
         machine-pool.c
         machine-pool.h
+        module-util.h
         nsflags.c
         nsflags.h
         output-mode.c
@@ -86,8 +89,6 @@ shared_sources = files('''
         switch-root.h
         sysctl-util.c
         sysctl-util.h
-        tests.c
-        tests.h
         tomoyo-util.c
         tomoyo-util.h
         udev-util.h
@@ -104,8 +105,12 @@ shared_sources = files('''
         wireguard-netlink.h
 '''.split())
 
+if get_option('tests') != 'false'
+        shared_sources += files('tests.c', 'tests.h')
+endif
+
 test_tables_h = files('test-tables.h')
-shared_sources += [test_tables_h]
+shared_sources += test_tables_h
 
 if conf.get('HAVE_ACL') == 1
         shared_sources += files('acl-util.c')
@@ -123,6 +128,10 @@ if conf.get('HAVE_LIBIPTC') == 1
         shared_sources += files('firewall-util.c')
 endif
 
+if conf.get('HAVE_KMOD') == 1
+        shared_sources += files('module-util.c')
+endif
+
 libshared_name = 'systemd-shared-@0@'.format(meson.project_version())
 
 libshared_deps = [threads,
@@ -132,6 +141,7 @@ libshared_deps = [threads,
                   libcryptsetup,
                   libgcrypt,
                   libiptc,
+                  libkmod,
                   libseccomp,
                   libselinux,
                   libidn,

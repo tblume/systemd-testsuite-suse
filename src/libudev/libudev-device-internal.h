@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
-
 #include "libudev.h"
 #include "sd-device.h"
 
@@ -19,7 +18,7 @@ struct udev_device {
         sd_device *device;
 
         /* legacy */
-        int refcount;
+        unsigned n_ref;
 
         struct udev_device *parent;
         bool parent_set;
@@ -37,4 +36,4 @@ struct udev_device {
         bool sysattrs_read;
 };
 
-struct udev_device *udev_device_new(struct udev *udev);
+struct udev_device *udev_device_new(struct udev *udev, sd_device *device);

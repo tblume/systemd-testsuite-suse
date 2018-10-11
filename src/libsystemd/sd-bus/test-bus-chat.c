@@ -1,6 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-***/
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -18,6 +16,7 @@
 #include "format-util.h"
 #include "log.h"
 #include "macro.h"
+#include "tests.h"
 #include "util.h"
 
 static int match_callback(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
@@ -511,11 +510,11 @@ int main(int argc, char *argv[]) {
         void *p;
         int q, r;
 
+        test_setup_logging(LOG_INFO);
+
         r = server_init(&bus);
-        if (r < 0) {
-                log_info("Failed to connect to bus, skipping tests.");
-                return EXIT_TEST_SKIP;
-        }
+        if (r < 0)
+                return log_tests_skipped("Failed to connect to bus");
 
         log_info("Initialized...");
 

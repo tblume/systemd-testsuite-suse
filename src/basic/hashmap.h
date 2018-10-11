@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
-
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -16,7 +15,7 @@
  * necessary to instantiate an object for each Hashmap use.
  *
  * If ENABLE_DEBUG_HASHMAP is defined (by configuring with --enable-debug=hashmap),
- * the implemention will:
+ * the implementation will:
  * - store extra data for debugging and statistics (see tools/gdb-sd_dump_hashmaps.py)
  * - perform extra checks for invalid use of iterators
  */

@@ -203,8 +203,7 @@ int seat_apply_acls(Seat *s, Session *old_active) {
 
         assert(s);
 
-        r = devnode_acl_all(s->manager->udev,
-                            s->id,
+        r = devnode_acl_all(s->id,
                             false,
                             !!old_active, old_active ? old_active->user->uid : 0,
                             !!s->active, s->active ? s->active->user->uid : 0);
@@ -356,8 +355,7 @@ int seat_active_vt_changed(Seat *s, unsigned int vtnr) {
 int seat_read_active_vt(Seat *s) {
         char t[64];
         ssize_t k;
-        unsigned int vtnr;
-        int r;
+        int vtnr;
 
         assert(s);
 
@@ -376,17 +374,9 @@ int seat_read_active_vt(Seat *s) {
         t[k] = 0;
         truncate_nl(t);
 
-        if (!startswith(t, "tty")) {
-                log_error("Hm, /sys/class/tty/tty0/active is badly formatted.");
-                return -EIO;
-        }
-
-        r = safe_atou(t+3, &vtnr);
-        if (r < 0)
-                return log_error_errno(r, "Failed to parse VT number \"%s\": %m", t+3);
-
-        if (!vtnr) {
-                log_error("VT number invalid: %s", t+3);
+        vtnr = vtnr_from_tty(t);
+        if (vtnr < 0) {
+                log_error_errno(vtnr, "Hm, /sys/class/tty/tty0/active is badly formatted: %m");
                 return -EIO;
         }
 

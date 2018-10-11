@@ -413,7 +413,7 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                 return 1;
         }
 
-        if (STR_IN_SET(field, "MemoryLow", "MemoryHigh", "MemoryMax", "MemorySwapMax", "MemoryLimit", "TasksMax")) {
+        if (STR_IN_SET(field, "MemoryMin", "MemoryLow", "MemoryHigh", "MemoryMax", "MemorySwapMax", "MemoryLimit", "TasksMax")) {
 
                 if (isempty(eq) || streq(eq, "infinity")) {
                         r = sd_bus_message_append(m, "(sv)", field, "t", CGROUP_LIMIT_MAX);
@@ -422,16 +422,16 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                         return 1;
                 }
 
-                r = parse_percent(eq);
+                r = parse_permille(eq);
                 if (r >= 0) {
                         char *n;
 
-                        /* When this is a percentage we'll convert this into a relative value in the range
-                         * 0…UINT32_MAX and pass it in the MemoryLowScale property (and related
-                         * ones). This way the physical memory size can be determined server-side */
+                        /* When this is a percentage we'll convert this into a relative value in the range 0…UINT32_MAX
+                         * and pass it in the MemoryLowScale property (and related ones). This way the physical memory
+                         * size can be determined server-side. */
 
                         n = strjoina(field, "Scale");
-                        r = sd_bus_message_append(m, "(sv)", n, "u", (uint32_t) (((uint64_t) UINT32_MAX * r) / 100U));
+                        r = sd_bus_message_append(m, "(sv)", n, "u", (uint32_t) (((uint64_t) r * UINT32_MAX) / 1000U));
                         if (r < 0)
                                 return bus_log_create_error(r);
 
@@ -449,13 +449,15 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                 if (isempty(eq))
                         r = sd_bus_message_append(m, "(sv)", "CPUQuotaPerSecUSec", "t", USEC_INFINITY);
                 else {
-                        r = parse_percent_unbounded(eq);
-                        if (r <= 0) {
-                                log_error_errno(r, "CPU quota '%s' invalid.", eq);
-                                return -EINVAL;
+                        r = parse_permille_unbounded(eq);
+                        if (r == 0) {
+                                log_error("CPU quota too small.");
+                                return -ERANGE;
                         }
+                        if (r < 0)
+                                return log_error_errno(r, "CPU quota '%s' invalid.", eq);
 
-                        r = sd_bus_message_append(m, "(sv)", "CPUQuotaPerSecUSec", "t", (usec_t) r * USEC_PER_SEC / 100U);
+                        r = sd_bus_message_append(m, "(sv)", "CPUQuotaPerSecUSec", "t", (((uint64_t) r * USEC_PER_SEC) / 1000U));
                 }
 
                 if (r < 0)
@@ -503,9 +505,9 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                         path = strndupa(eq, e - eq);
                         bandwidth = e+1;
 
-                        if (streq(bandwidth, "infinity")) {
+                        if (streq(bandwidth, "infinity"))
                                 bytes = CGROUP_LIMIT_MAX;
-                        } else {
+                        else {
                                 r = parse_size(bandwidth, 1000, &bytes);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to parse byte value %s: %m", bandwidth);
@@ -542,6 +544,37 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                                 return log_error_errno(r, "Failed to parse %s value %s: %m", field, weight);
 
                         r = sd_bus_message_append(m, "(sv)", field, "a(st)", 1, path, u);
+                }
+
+                if (r < 0)
+                        return bus_log_create_error(r);
+
+                return 1;
+        }
+
+        if (streq(field, "IODeviceLatencyTargetSec")) {
+                const char *field_usec = "IODeviceLatencyTargetUSec";
+
+                if (isempty(eq))
+                        r = sd_bus_message_append(m, "(sv)", field_usec, "a(st)", USEC_INFINITY);
+                else {
+                        const char *path, *target, *e;
+                        usec_t usec;
+
+                        e = strchr(eq, ' ');
+                        if (!e) {
+                                log_error("Failed to parse %s value %s.", field, eq);
+                                return -EINVAL;
+                        }
+
+                        path = strndupa(eq, e - eq);
+                        target = e+1;
+
+                        r = parse_sec(target, &usec);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse %s value %s: %m", field, target);
+
+                        r = sd_bus_message_append(m, "(sv)", field_usec, "a(st)", 1, path, usec);
                 }
 
                 if (r < 0)
@@ -634,13 +667,25 @@ static int bus_append_cgroup_property(sd_bus_message *m, const char *field, cons
                                 return bus_log_create_error(r);
 
                 } else {
-                        r = in_addr_prefix_from_string_auto(eq, &family, &prefix, &prefixlen);
-                        if (r < 0)
-                                return log_error_errno(r, "Failed to parse IP address prefix: %s", eq);
+                        for (;;) {
+                                _cleanup_free_ char *word = NULL;
 
-                        r = bus_append_ip_address_access(m, family, &prefix, prefixlen);
-                        if (r < 0)
-                                return bus_log_create_error(r);
+                                r = extract_first_word(&eq, &word, NULL, 0);
+                                if (r == 0)
+                                        break;
+                                if (r == -ENOMEM)
+                                        return log_oom();
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse %s: %s", field, eq);
+
+                                r = in_addr_prefix_from_string_auto(word, &family, &prefix, &prefixlen);
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse IP address prefix: %s", word);
+
+                                r = bus_append_ip_address_access(m, family, &prefix, prefixlen);
+                                if (r < 0)
+                                        return bus_log_create_error(r);
+                        }
                 }
 
                 r = sd_bus_message_close_container(m);
@@ -1189,7 +1234,7 @@ static int bus_append_kill_property(sd_bus_message *m, const char *field, const 
 
                 return bus_append_parse_boolean(m, field, eq);
 
-        if (streq(field, "KillSignal"))
+        if (STR_IN_SET(field, "KillSignal", "FinalKillSignal", "WatchdogSignal"))
 
                 return bus_append_signal_from_string(m, field, eq);
 
@@ -2173,13 +2218,8 @@ static void remove_cgroup(Hashmap *cgroups, struct CGroupInfo *cg) {
         free(cg);
 }
 
-static int cgroup_info_compare_func(const void *a, const void *b) {
-        const struct CGroupInfo *x = *(const struct CGroupInfo* const*) a, *y = *(const struct CGroupInfo* const*) b;
-
-        assert(x);
-        assert(y);
-
-        return strcmp(x->cgroup_path, y->cgroup_path);
+static int cgroup_info_compare_func(struct CGroupInfo * const *a, struct CGroupInfo * const *b) {
+        return strcmp((*a)->cgroup_path, (*b)->cgroup_path);
 }
 
 static int dump_processes(
@@ -2216,7 +2256,7 @@ static int dump_processes(
                         pids[n++] = PTR_TO_PID(pidp);
 
                 assert(n == hashmap_size(cg->pids));
-                qsort_safe(pids, n, sizeof(pid_t), pid_compare_func);
+                typesafe_qsort(pids, n, pid_compare_func);
 
                 width = DECIMAL_STR_WIDTH(pids[n-1]);
 
@@ -2258,7 +2298,7 @@ static int dump_processes(
                 LIST_FOREACH(siblings, child, cg->children)
                         children[n++] = child;
                 assert(n == cg->n_children);
-                qsort_safe(children, n, sizeof(struct CGroupInfo*), cgroup_info_compare_func);
+                typesafe_qsort(children, n, cgroup_info_compare_func);
 
                 if (n_columns != 0)
                         n_columns = MAX(LESS_BY(n_columns, 2U), 20U);
@@ -2345,7 +2385,7 @@ static int dump_extra_processes(
         if (n == 0)
                 return 0;
 
-        qsort_safe(pids, n, sizeof(pid_t), pid_compare_func);
+        typesafe_qsort(pids, n, pid_compare_func);
         width = DECIMAL_STR_WIDTH(pids[n-1]);
 
         for (k = 0; k < n; k++) {

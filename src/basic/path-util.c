@@ -110,10 +110,7 @@ int path_make_absolute_cwd(const char *p, char **ret) {
                 if (r < 0)
                         return r;
 
-                if (endswith(cwd, "/"))
-                        c = strjoin(cwd, p);
-                else
-                        c = strjoin(cwd, "/", p);
+                c = path_join(NULL, cwd, p);
         }
         if (!c)
                 return -ENOMEM;
@@ -336,11 +333,14 @@ char *path_simplify(char *path, bool kill_dots) {
         /* Removes redundant inner and trailing slashes. Also removes unnecessary dots
          * if kill_dots is true. Modifies the passed string in-place.
          *
-         * ///foo//./bar/.   becomes /foo/./bar/.  (if kill_dots is false)
-         * ///foo//./bar/.   becomes /foo/bar      (if kill_dots is true)
-         * .//./foo//./bar/. becomes ./foo/bar     (if kill_dots is false)
-         * .//./foo//./bar/. becomes foo/bar       (if kill_dots is true)
+         * ///foo//./bar/.   becomes /foo/./bar/.      (if kill_dots is false)
+         * ///foo//./bar/.   becomes /foo/bar          (if kill_dots is true)
+         * .//./foo//./bar/. becomes ././foo/./bar/.   (if kill_dots is false)
+         * .//./foo//./bar/. becomes foo/bar           (if kill_dots is true)
          */
+
+        if (isempty(path))
+                return path;
 
         absolute = path_is_absolute(path);
 
@@ -371,9 +371,14 @@ char *path_simplify(char *path, bool kill_dots) {
                 *(t++) = *f;
         }
 
-        /* Special rule, if we are talking of the root directory, a trailing slash is good */
-        if (absolute && t == path)
-                *(t++) = '/';
+        /* Special rule, if we stripped everything, we either need a "/" (for the root directory)
+         * or "." for the current directory */
+        if (t == path) {
+                if (absolute)
+                        *(t++) = '/';
+                else
+                        *(t++) = '.';
+        }
 
         *t = 0;
         return path;
@@ -428,7 +433,7 @@ int path_compare(const char *a, const char *b) {
         assert(a);
         assert(b);
 
-        /* A relative path and an abolute path must not compare as equal.
+        /* A relative path and an absolute path must not compare as equal.
          * Which one is sorted before the other does not really matter.
          * Here a relative path is ordered before an absolute path. */
         d = (a[0] == '/') - (b[0] == '/');

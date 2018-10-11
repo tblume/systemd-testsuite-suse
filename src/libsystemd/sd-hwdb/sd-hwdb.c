@@ -20,10 +20,10 @@
 #include "hwdb-util.h"
 #include "refcnt.h"
 #include "string-util.h"
+#include "util.h"
 
 struct sd_hwdb {
         RefCount n_ref;
-        int refcount;
 
         FILE *f;
         struct stat st;
@@ -147,7 +147,6 @@ static int hwdb_add_property(sd_hwdb *hwdb, const struct trie_value_entry_f *ent
                 old = ordered_hashmap_get(hwdb->properties, key);
                 if (old) {
                         /* On duplicates, we order by filename priority and line-number.
-                         *
                          *
                          * v2 of the format had 64 bits for the line number.
                          * v3 reuses top 32 bits of line_number to store the priority.
@@ -331,7 +330,7 @@ _public_ int sd_hwdb_new(sd_hwdb **ret) {
         }
 
         if (!hwdb->f) {
-                log_debug("hwdb.bin does not exist, please run systemd-hwdb update");
+                log_debug("hwdb.bin does not exist, please run 'systemd-hwdb update'");
                 return -ENOENT;
         }
 
@@ -361,25 +360,17 @@ _public_ int sd_hwdb_new(sd_hwdb **ret) {
         return 0;
 }
 
-_public_ sd_hwdb *sd_hwdb_ref(sd_hwdb *hwdb) {
-        assert_return(hwdb, NULL);
+static sd_hwdb *hwdb_free(sd_hwdb *hwdb) {
+        assert(hwdb);
 
-        assert_se(REFCNT_INC(hwdb->n_ref) >= 2);
-
-        return hwdb;
+        if (hwdb->map)
+                munmap((void *)hwdb->map, hwdb->st.st_size);
+        safe_fclose(hwdb->f);
+        ordered_hashmap_free(hwdb->properties);
+        return mfree(hwdb);
 }
 
-_public_ sd_hwdb *sd_hwdb_unref(sd_hwdb *hwdb) {
-        if (hwdb && REFCNT_DEC(hwdb->n_ref) == 0) {
-                if (hwdb->map)
-                        munmap((void *)hwdb->map, hwdb->st.st_size);
-                safe_fclose(hwdb->f);
-                ordered_hashmap_free(hwdb->properties);
-                free(hwdb);
-        }
-
-        return NULL;
-}
+DEFINE_PUBLIC_ATOMIC_REF_UNREF_FUNC(sd_hwdb, sd_hwdb, hwdb_free)
 
 bool hwdb_validate(sd_hwdb *hwdb) {
         bool found = false;

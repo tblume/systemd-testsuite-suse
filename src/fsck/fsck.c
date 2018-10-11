@@ -34,14 +34,14 @@
 
 /* exit codes as defined in fsck(8) */
 enum {
-        FSCK_SUCCESS = 0,
-        FSCK_ERROR_CORRECTED = 1,
-        FSCK_SYSTEM_SHOULD_REBOOT = 2,
-        FSCK_ERRORS_LEFT_UNCORRECTED = 4,
-        FSCK_OPERATIONAL_ERROR = 8,
-        FSCK_USAGE_OR_SYNTAX_ERROR = 16,
-        FSCK_USER_CANCELLED = 32,
-        FSCK_SHARED_LIB_ERROR = 128,
+        FSCK_SUCCESS                 = 0,
+        FSCK_ERROR_CORRECTED         = 1 << 0,
+        FSCK_SYSTEM_SHOULD_REBOOT    = 1 << 1,
+        FSCK_ERRORS_LEFT_UNCORRECTED = 1 << 2,
+        FSCK_OPERATIONAL_ERROR       = 1 << 3,
+        FSCK_USAGE_OR_SYNTAX_ERROR   = 1 << 4,
+        FSCK_USER_CANCELLED          = 1 << 5,
+        FSCK_SHARED_LIB_ERROR        = 1 << 7,
 };
 
 static bool arg_skip = false;
@@ -357,8 +357,7 @@ int main(int argc, char *argv[]) {
                 root_directory = true;
         }
 
-        r = sd_device_get_property_value(dev, "ID_FS_TYPE", &type);
-        if (r >= 0) {
+        if (sd_device_get_property_value(dev, "ID_FS_TYPE", &type) >= 0) {
                 r = fsck_exists(type);
                 if (r < 0)
                         log_warning_errno(r, "Couldn't detect if fsck.%s may be used for %s, proceeding: %m", type, device);

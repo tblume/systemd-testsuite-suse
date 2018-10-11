@@ -93,7 +93,7 @@ Unit *unit_new(Manager *m, size_t size) {
         u->ref_uid = UID_INVALID;
         u->ref_gid = GID_INVALID;
         u->cpu_usage_last = NSEC_INFINITY;
-        u->cgroup_bpf_state = UNIT_CGROUP_BPF_INVALIDATED;
+        u->cgroup_invalidated_mask |= CGROUP_MASK_BPF_FIREWALL;
 
         u->ip_accounting_ingress_map_fd = -1;
         u->ip_accounting_egress_map_fd = -1;
@@ -438,6 +438,22 @@ void unit_add_to_dbus_queue(Unit *u) {
         u->in_dbus_queue = true;
 }
 
+void unit_submit_to_stop_when_unneeded_queue(Unit *u) {
+        assert(u);
+
+        if (u->in_stop_when_unneeded_queue)
+                return;
+
+        if (!u->stop_when_unneeded)
+                return;
+
+        if (!UNIT_IS_ACTIVE_OR_RELOADING(unit_active_state(u)))
+                return;
+
+        LIST_PREPEND(stop_when_unneeded_queue, u->manager->stop_when_unneeded_queue, u);
+        u->in_stop_when_unneeded_queue = true;
+}
+
 static void bidi_set_free(Unit *u, Hashmap *h) {
         Unit *other;
         Iterator i;
@@ -634,6 +650,9 @@ void unit_free(Unit *u) {
         if (u->in_target_deps_queue)
                 LIST_REMOVE(target_deps_queue, u->manager->target_deps_queue, u);
 
+        if (u->in_stop_when_unneeded_queue)
+                LIST_REMOVE(stop_when_unneeded_queue, u->manager->stop_when_unneeded_queue, u);
+
         safe_close(u->ip_accounting_ingress_map_fd);
         safe_close(u->ip_accounting_egress_map_fd);
 
@@ -646,6 +665,8 @@ void unit_free(Unit *u) {
         bpf_program_unref(u->ip_bpf_ingress_installed);
         bpf_program_unref(u->ip_bpf_egress);
         bpf_program_unref(u->ip_bpf_egress_installed);
+
+        bpf_program_unref(u->bpf_device_control_installed);
 
         condition_free_list(u->conditions);
         condition_free_list(u->asserts);
@@ -990,7 +1011,7 @@ int unit_add_exec_dependencies(Unit *u, ExecContext *c) {
                                 return r;
                 }
 
-                r = unit_add_dependency_by_name(u, UNIT_AFTER, SPECIAL_TMPFILES_SETUP_SERVICE, NULL, true, UNIT_DEPENDENCY_FILE);
+                r = unit_add_dependency_by_name(u, UNIT_AFTER, SPECIAL_TMPFILES_SETUP_SERVICE, true, UNIT_DEPENDENCY_FILE);
                 if (r < 0)
                         return r;
         }
@@ -1008,7 +1029,7 @@ int unit_add_exec_dependencies(Unit *u, ExecContext *c) {
         /* If syslog or kernel logging is requested, make sure our own
          * logging daemon is run first. */
 
-        r = unit_add_dependency_by_name(u, UNIT_AFTER, SPECIAL_JOURNALD_SOCKET, NULL, true, UNIT_DEPENDENCY_FILE);
+        r = unit_add_dependency_by_name(u, UNIT_AFTER, SPECIAL_JOURNALD_SOCKET, true, UNIT_DEPENDENCY_FILE);
         if (r < 0)
                 return r;
 
@@ -1379,7 +1400,7 @@ static int unit_add_slice_dependencies(Unit *u) {
         if (unit_has_name(u, SPECIAL_ROOT_SLICE))
                 return 0;
 
-        return unit_add_two_dependencies_by_name(u, UNIT_AFTER, UNIT_REQUIRES, SPECIAL_ROOT_SLICE, NULL, true, mask);
+        return unit_add_two_dependencies_by_name(u, UNIT_AFTER, UNIT_REQUIRES, SPECIAL_ROOT_SLICE, true, mask);
 }
 
 static int unit_add_mount_dependencies(Unit *u) {
@@ -1950,55 +1971,71 @@ bool unit_can_reload(Unit *u) {
         return UNIT_VTABLE(u)->reload;
 }
 
-static void unit_check_unneeded(Unit *u) {
-
-        _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-
-        static const UnitDependency needed_dependencies[] = {
+bool unit_is_unneeded(Unit *u) {
+        static const UnitDependency deps[] = {
                 UNIT_REQUIRED_BY,
                 UNIT_REQUISITE_OF,
                 UNIT_WANTED_BY,
                 UNIT_BOUND_BY,
         };
-
-        unsigned j;
-        int r;
+        size_t j;
 
         assert(u);
 
-        /* If this service shall be shut down when unneeded then do
-         * so. */
-
         if (!u->stop_when_unneeded)
-                return;
+                return false;
 
-        if (!UNIT_IS_ACTIVE_OR_ACTIVATING(unit_active_state(u)))
-                return;
+        /* Don't clean up while the unit is transitioning or is even inactive. */
+        if (!UNIT_IS_ACTIVE_OR_RELOADING(unit_active_state(u)))
+                return false;
+        if (u->job)
+                return false;
 
-        for (j = 0; j < ELEMENTSOF(needed_dependencies); j++) {
+        for (j = 0; j < ELEMENTSOF(deps); j++) {
                 Unit *other;
                 Iterator i;
                 void *v;
 
-                HASHMAP_FOREACH_KEY(v, other, u->dependencies[needed_dependencies[j]], i)
-                        if (unit_active_or_pending(other) || unit_will_restart(other))
-                                return;
+                /* If a dependent unit has a job queued, is active or transitioning, or is marked for
+                 * restart, then don't clean this one up. */
+
+                HASHMAP_FOREACH_KEY(v, other, u->dependencies[deps[j]], i) {
+                        if (u->job)
+                                return false;
+
+                        if (!UNIT_IS_INACTIVE_OR_FAILED(unit_active_state(other)))
+                                return false;
+
+                        if (unit_will_restart(other))
+                                return false;
+                }
         }
 
-        /* If stopping a unit fails continuously we might enter a stop
-         * loop here, hence stop acting on the service being
-         * unnecessary after a while. */
-        if (!ratelimit_below(&u->auto_stop_ratelimit)) {
-                log_unit_warning(u, "Unit not needed anymore, but not stopping since we tried this too often recently.");
-                return;
+        return true;
+}
+
+static void check_unneeded_dependencies(Unit *u) {
+
+        static const UnitDependency deps[] = {
+                UNIT_REQUIRES,
+                UNIT_REQUISITE,
+                UNIT_WANTS,
+                UNIT_BINDS_TO,
+        };
+        size_t j;
+
+        assert(u);
+
+        /* Add all units this unit depends on to the queue that processes StopWhenUnneeded= behaviour. */
+
+        for (j = 0; j < ELEMENTSOF(deps); j++) {
+                Unit *other;
+                Iterator i;
+                void *v;
+
+                HASHMAP_FOREACH_KEY(v, other, u->dependencies[deps[j]], i)
+                        unit_submit_to_stop_when_unneeded_queue(other);
         }
-
-        log_unit_info(u, "Unit not needed anymore. Stopping.");
-
-        /* Ok, nobody needs us anymore. Sniff. Then let's commit suicide */
-        r = manager_add_job(u->manager, JOB_STOP, u, JOB_FAIL, &error, NULL);
-        if (r < 0)
-                log_unit_warning_errno(u, r, "Failed to enqueue stop job, ignoring: %s", bus_error_message(&error, r));
 }
 
 static void unit_check_binds_to(Unit *u) {
@@ -2096,29 +2133,6 @@ static void retroactively_stop_dependencies(Unit *u) {
         HASHMAP_FOREACH_KEY(v, other, u->dependencies[UNIT_BOUND_BY], i)
                 if (!UNIT_IS_INACTIVE_OR_DEACTIVATING(unit_active_state(other)))
                         manager_add_job(u->manager, JOB_STOP, other, JOB_REPLACE, NULL, NULL);
-}
-
-static void check_unneeded_dependencies(Unit *u) {
-        Unit *other;
-        Iterator i;
-        void *v;
-
-        assert(u);
-        assert(UNIT_IS_INACTIVE_OR_DEACTIVATING(unit_active_state(u)));
-
-        /* Garbage collect services that might not be needed anymore, if enabled */
-        HASHMAP_FOREACH_KEY(v, other, u->dependencies[UNIT_REQUIRES], i)
-                if (!UNIT_IS_INACTIVE_OR_DEACTIVATING(unit_active_state(other)))
-                        unit_check_unneeded(other);
-        HASHMAP_FOREACH_KEY(v, other, u->dependencies[UNIT_WANTS], i)
-                if (!UNIT_IS_INACTIVE_OR_DEACTIVATING(unit_active_state(other)))
-                        unit_check_unneeded(other);
-        HASHMAP_FOREACH_KEY(v, other, u->dependencies[UNIT_REQUISITE], i)
-                if (!UNIT_IS_INACTIVE_OR_DEACTIVATING(unit_active_state(other)))
-                        unit_check_unneeded(other);
-        HASHMAP_FOREACH_KEY(v, other, u->dependencies[UNIT_BINDS_TO], i)
-                if (!UNIT_IS_INACTIVE_OR_DEACTIVATING(unit_active_state(other)))
-                        unit_check_unneeded(other);
 }
 
 void unit_start_on_failure(Unit *u) {
@@ -2423,7 +2437,7 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, UnitNotifyFlag
                 }
 
                 /* stop unneeded units regardless if going down was expected or not */
-                if (UNIT_IS_INACTIVE_OR_DEACTIVATING(ns))
+                if (UNIT_IS_INACTIVE_OR_FAILED(ns))
                         check_unneeded_dependencies(u);
 
                 if (ns != os && ns == UNIT_FAILED) {
@@ -2432,43 +2446,36 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, UnitNotifyFlag
                         if (!(flags & UNIT_NOTIFY_WILL_AUTO_RESTART))
                                 unit_start_on_failure(u);
                 }
-        }
 
-        if (UNIT_IS_ACTIVE_OR_RELOADING(ns)) {
+                if (UNIT_IS_ACTIVE_OR_RELOADING(ns) && !UNIT_IS_ACTIVE_OR_RELOADING(os)) {
+                        /* This unit just finished starting up */
 
-                if (u->type == UNIT_SERVICE &&
-                    !UNIT_IS_ACTIVE_OR_RELOADING(os) &&
-                    !MANAGER_IS_RELOADING(m)) {
-                        /* Write audit record if we have just finished starting up */
-                        manager_send_unit_audit(m, u, AUDIT_SERVICE_START, true);
-                        u->in_audit = true;
+                        if (u->type == UNIT_SERVICE) {
+                                /* Write audit record if we have just finished starting up */
+                                manager_send_unit_audit(m, u, AUDIT_SERVICE_START, true);
+                                u->in_audit = true;
+                        }
+
+                        manager_send_unit_plymouth(m, u);
                 }
 
-                if (!UNIT_IS_ACTIVE_OR_RELOADING(os))
-                        manager_send_unit_plymouth(m, u);
-
-        } else {
-
-                if (UNIT_IS_INACTIVE_OR_FAILED(ns) &&
-                    !UNIT_IS_INACTIVE_OR_FAILED(os)
-                    && !MANAGER_IS_RELOADING(m)) {
-
+                if (UNIT_IS_INACTIVE_OR_FAILED(ns) && !UNIT_IS_INACTIVE_OR_FAILED(os)) {
                         /* This unit just stopped/failed. */
+
                         if (u->type == UNIT_SERVICE) {
 
-                                /* Hmm, if there was no start record written
-                                 * write it now, so that we always have a nice
-                                 * pair */
-                                if (!u->in_audit) {
+                                if (u->in_audit) {
+                                        /* Write audit record if we have just finished shutting down */
+                                        manager_send_unit_audit(m, u, AUDIT_SERVICE_STOP, ns == UNIT_INACTIVE);
+                                        u->in_audit = false;
+                                } else {
+                                        /* Hmm, if there was no start record written write it now, so that we always
+                                         * have a nice pair */
                                         manager_send_unit_audit(m, u, AUDIT_SERVICE_START, ns == UNIT_INACTIVE);
 
                                         if (ns == UNIT_INACTIVE)
                                                 manager_send_unit_audit(m, u, AUDIT_SERVICE_STOP, true);
-                                } else
-                                        /* Write audit record if we have just finished shutting down */
-                                        manager_send_unit_audit(m, u, AUDIT_SERVICE_STOP, ns == UNIT_INACTIVE);
-
-                                u->in_audit = false;
+                                }
                         }
 
                         /* Write a log message about consumed resources */
@@ -2483,7 +2490,7 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, UnitNotifyFlag
 
         if (!MANAGER_IS_RELOADING(u->manager)) {
                 /* Maybe we finished startup and are now ready for being stopped because unneeded? */
-                unit_check_unneeded(u);
+                unit_submit_to_stop_when_unneeded_queue(u);
 
                 /* Maybe we finished startup, but something we needed has vanished? Let's die then. (This happens when
                  * something BindsTo= to a Type=oneshot unit, as these units go directly from starting to inactive,
@@ -2882,16 +2889,13 @@ int unit_add_two_dependencies(Unit *u, UnitDependency d, UnitDependency e, Unit 
         return unit_add_dependency(u, e, other, add_reference, mask);
 }
 
-static int resolve_template(Unit *u, const char *name, const char*path, char **buf, const char **ret) {
+static int resolve_template(Unit *u, const char *name, char **buf, const char **ret) {
         int r;
 
         assert(u);
-        assert(name || path);
+        assert(name);
         assert(buf);
         assert(ret);
-
-        if (!name)
-                name = basename(path);
 
         if (!unit_name_is_valid(name, UNIT_NAME_TEMPLATE)) {
                 *buf = NULL;
@@ -2917,38 +2921,38 @@ static int resolve_template(Unit *u, const char *name, const char*path, char **b
         return 0;
 }
 
-int unit_add_dependency_by_name(Unit *u, UnitDependency d, const char *name, const char *path, bool add_reference, UnitDependencyMask mask) {
+int unit_add_dependency_by_name(Unit *u, UnitDependency d, const char *name, bool add_reference, UnitDependencyMask mask) {
         _cleanup_free_ char *buf = NULL;
         Unit *other;
         int r;
 
         assert(u);
-        assert(name || path);
+        assert(name);
 
-        r = resolve_template(u, name, path, &buf, &name);
+        r = resolve_template(u, name, &buf, &name);
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(u->manager, name, path, NULL, &other);
+        r = manager_load_unit(u->manager, name, NULL, NULL, &other);
         if (r < 0)
                 return r;
 
         return unit_add_dependency(u, d, other, add_reference, mask);
 }
 
-int unit_add_two_dependencies_by_name(Unit *u, UnitDependency d, UnitDependency e, const char *name, const char *path, bool add_reference, UnitDependencyMask mask) {
+int unit_add_two_dependencies_by_name(Unit *u, UnitDependency d, UnitDependency e, const char *name, bool add_reference, UnitDependencyMask mask) {
         _cleanup_free_ char *buf = NULL;
         Unit *other;
         int r;
 
         assert(u);
-        assert(name || path);
+        assert(name);
 
-        r = resolve_template(u, name, path, &buf, &name);
+        r = resolve_template(u, name, &buf, &name);
         if (r < 0)
                 return r;
 
-        r = manager_load_unit(u->manager, name, path, NULL, &other);
+        r = manager_load_unit(u->manager, name, NULL, NULL, &other);
         if (r < 0)
                 return r;
 
@@ -3236,6 +3240,8 @@ int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs) {
 
         unit_serialize_item(u, f, "transient", yes_no(u->transient));
 
+        unit_serialize_item(u, f, "in-audit", yes_no(u->in_audit));
+
         unit_serialize_item(u, f, "exported-invocation-id", yes_no(u->exported_invocation_id));
         unit_serialize_item(u, f, "exported-log-level-max", yes_no(u->exported_log_level_max));
         unit_serialize_item(u, f, "exported-log-extra-fields", yes_no(u->exported_log_extra_fields));
@@ -3249,7 +3255,7 @@ int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs) {
         unit_serialize_item(u, f, "cgroup-realized", yes_no(u->cgroup_realized));
         (void) unit_serialize_cgroup_mask(f, "cgroup-realized-mask", u->cgroup_realized_mask);
         (void) unit_serialize_cgroup_mask(f, "cgroup-enabled-mask", u->cgroup_enabled_mask);
-        unit_serialize_item_format(u, f, "cgroup-bpf-realized", "%i", u->cgroup_bpf_state);
+        (void) unit_serialize_cgroup_mask(f, "cgroup-invalidated-mask", u->cgroup_invalidated_mask);
 
         if (uid_is_valid(u->ref_uid))
                 unit_serialize_item_format(u, f, "ref-uid", UID_FMT, u->ref_uid);
@@ -3474,6 +3480,16 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
 
                         continue;
 
+                } else if (streq(l, "in-audit")) {
+
+                        r = parse_boolean(v);
+                        if (r < 0)
+                                log_unit_debug(u, "Failed to parse in-audit bool %s, ignoring.", v);
+                        else
+                                u->in_audit = r;
+
+                        continue;
+
                 } else if (streq(l, "exported-invocation-id")) {
 
                         r = parse_boolean(v);
@@ -3554,18 +3570,11 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
                                 log_unit_debug(u, "Failed to parse cgroup-enabled-mask %s, ignoring.", v);
                         continue;
 
-                } else if (streq(l, "cgroup-bpf-realized")) {
-                        int i;
+                } else if (streq(l, "cgroup-invalidated-mask")) {
 
-                        r = safe_atoi(v, &i);
+                        r = cg_mask_from_string(v, &u->cgroup_invalidated_mask);
                         if (r < 0)
-                                log_unit_debug(u, "Failed to parse cgroup BPF state %s, ignoring.", v);
-                        else
-                                u->cgroup_bpf_state =
-                                        i < 0 ? UNIT_CGROUP_BPF_INVALIDATED :
-                                        i > 0 ? UNIT_CGROUP_BPF_ON :
-                                        UNIT_CGROUP_BPF_OFF;
-
+                                log_unit_debug(u, "Failed to parse cgroup-invalidated-mask %s, ignoring.", v);
                         continue;
 
                 } else if (streq(l, "ref-uid")) {
@@ -3587,6 +3596,8 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
                                 log_unit_debug(u, "Failed to parse referenced GID %s, ignoring.", v);
                         else
                                 unit_ref_uid_gid(u, UID_INVALID, gid);
+
+                        continue;
 
                 } else if (streq(l, "ref")) {
 
@@ -4143,12 +4154,28 @@ int unit_patch_contexts(Unit *u) {
         }
 
         cc = unit_get_cgroup_context(u);
-        if (cc) {
+        if (cc && ec) {
 
-                if (ec &&
-                    ec->private_devices &&
+                if (ec->private_devices &&
                     cc->device_policy == CGROUP_AUTO)
                         cc->device_policy = CGROUP_CLOSED;
+
+                if (ec->root_image &&
+                    (cc->device_policy != CGROUP_AUTO || cc->device_allow)) {
+
+                        /* When RootImage= is specified, the following devices are touched. */
+                        r = cgroup_add_device_allow(cc, "/dev/loop-control", "rw");
+                        if (r < 0)
+                                return r;
+
+                        r = cgroup_add_device_allow(cc, "block-loop", "rwm");
+                        if (r < 0)
+                                return r;
+
+                        r = cgroup_add_device_allow(cc, "block-blkext", "rwm");
+                        if (r < 0)
+                                return r;
+                }
         }
 
         return 0;
@@ -4479,10 +4506,10 @@ static int operation_to_signal(KillContext *c, KillOperation k) {
                 return c->kill_signal;
 
         case KILL_KILL:
-                return SIGKILL;
+                return c->final_kill_signal;
 
-        case KILL_ABORT:
-                return SIGABRT;
+        case KILL_WATCHDOG:
+                return c->watchdog_signal;
 
         default:
                 assert_not_reached("KillOperation unknown");
@@ -5253,7 +5280,7 @@ void unit_export_state_files(Unit *u) {
         if (!MANAGER_IS_SYSTEM(u->manager))
                 return;
 
-        if (u->manager->test_run_flags != 0)
+        if (MANAGER_IS_TEST_RUN(u->manager))
                 return;
 
         /* Exports a couple of unit properties to /run/systemd/units/, so that journald can quickly query this data

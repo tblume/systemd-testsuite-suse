@@ -135,7 +135,7 @@ int config_parse_unit_deps(
                         continue;
                 }
 
-                r = unit_add_dependency_by_name(u, d, k, NULL, true, UNIT_DEPENDENCY_FILE);
+                r = unit_add_dependency_by_name(u, d, k, true, UNIT_DEPENDENCY_FILE);
                 if (r < 0)
                         log_syntax(unit, LOG_ERR, filename, line, r, "Failed to add dependency on %s, ignoring: %m", k);
         }
@@ -1015,6 +1015,17 @@ int config_parse_exec_output(
 
                 eo = EXEC_OUTPUT_FILE;
 
+        } else if ((n = startswith(rvalue, "append:"))) {
+
+                r = unit_full_printf(u, n, &resolved);
+                if (r < 0)
+                        return log_syntax(unit, LOG_ERR, filename, line, r, "Failed to resolve unit specifiers in %s: %m", n);
+
+                r = path_simplify_and_warn(resolved, PATH_CHECK_ABSOLUTE | PATH_CHECK_FATAL, unit, filename, line, lvalue);
+                if (r < 0)
+                        return -ENOEXEC;
+
+                eo = EXEC_OUTPUT_FILE_APPEND;
         } else {
                 eo = exec_output_from_string(rvalue);
                 if (eo < 0) {
@@ -1557,7 +1568,7 @@ int config_parse_trigger_unit(
                 return 0;
         }
 
-        r = unit_add_two_dependencies_by_name(u, UNIT_BEFORE, UNIT_TRIGGERS, p, NULL, true, UNIT_DEPENDENCY_FILE);
+        r = unit_add_two_dependencies_by_name(u, UNIT_BEFORE, UNIT_TRIGGERS, p, true, UNIT_DEPENDENCY_FILE);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, r, "Failed to add trigger on %s, ignoring: %m", p);
                 return 0;
@@ -1755,11 +1766,11 @@ int config_parse_service_sockets(
                         continue;
                 }
 
-                r = unit_add_two_dependencies_by_name(UNIT(s), UNIT_WANTS, UNIT_AFTER, k, NULL, true, UNIT_DEPENDENCY_FILE);
+                r = unit_add_two_dependencies_by_name(UNIT(s), UNIT_WANTS, UNIT_AFTER, k, true, UNIT_DEPENDENCY_FILE);
                 if (r < 0)
                         log_syntax(unit, LOG_ERR, filename, line, r, "Failed to add dependency on %s, ignoring: %m", k);
 
-                r = unit_add_dependency_by_name(UNIT(s), UNIT_TRIGGERED_BY, k, NULL, true, UNIT_DEPENDENCY_FILE);
+                r = unit_add_dependency_by_name(UNIT(s), UNIT_TRIGGERED_BY, k, true, UNIT_DEPENDENCY_FILE);
                 if (r < 0)
                         log_syntax(unit, LOG_ERR, filename, line, r, "Failed to add dependency on %s, ignoring: %m", k);
         }
@@ -3002,13 +3013,13 @@ int config_parse_cpu_quota(
                 return 0;
         }
 
-        r = parse_percent_unbounded(rvalue);
+        r = parse_permille_unbounded(rvalue);
         if (r <= 0) {
                 log_syntax(unit, LOG_ERR, filename, line, r, "Invalid CPU quota '%s', ignoring.", rvalue);
                 return 0;
         }
 
-        c->cpu_quota_per_sec_usec = ((usec_t) r * USEC_PER_SEC) / 100U;
+        c->cpu_quota_per_sec_usec = ((usec_t) r * USEC_PER_SEC) / 1000U;
         return 0;
 }
 
@@ -3030,7 +3041,7 @@ int config_parse_memory_limit(
 
         if (!isempty(rvalue) && !streq(rvalue, "infinity")) {
 
-                r = parse_percent(rvalue);
+                r = parse_permille(rvalue);
                 if (r < 0) {
                         r = parse_size(rvalue, 1024, &bytes);
                         if (r < 0) {
@@ -3038,7 +3049,7 @@ int config_parse_memory_limit(
                                 return 0;
                         }
                 } else
-                        bytes = physical_memory_scale(r, 100U);
+                        bytes = physical_memory_scale(r, 1000U);
 
                 if (bytes >= UINT64_MAX ||
                     (bytes <= 0 && !streq(lvalue, "MemorySwapMax"))) {
@@ -3047,7 +3058,9 @@ int config_parse_memory_limit(
                 }
         }
 
-        if (streq(lvalue, "MemoryLow"))
+        if (streq(lvalue, "MemoryMin"))
+                c->memory_min = bytes;
+        else if (streq(lvalue, "MemoryLow"))
                 c->memory_low = bytes;
         else if (streq(lvalue, "MemoryHigh"))
                 c->memory_high = bytes;
@@ -3089,7 +3102,7 @@ int config_parse_tasks_max(
                 return 0;
         }
 
-        r = parse_percent(rvalue);
+        r = parse_permille(rvalue);
         if (r < 0) {
                 r = safe_atou64(rvalue, &v);
                 if (r < 0) {
@@ -3097,7 +3110,7 @@ int config_parse_tasks_max(
                         return 0;
                 }
         } else
-                v = system_tasks_max_scale(r, 100U);
+                v = system_tasks_max_scale(r, 1000U);
 
         if (v <= 0 || v >= UINT64_MAX) {
                 log_syntax(unit, LOG_ERR, filename, line, 0, "Maximum tasks value '%s' out of range, ignoring.", rvalue);
@@ -3199,7 +3212,6 @@ int config_parse_device_allow(
 
         _cleanup_free_ char *path = NULL, *resolved = NULL;
         CGroupContext *c = data;
-        CGroupDeviceAllow *a;
         const char *p = rvalue;
         int r;
 
@@ -3248,17 +3260,7 @@ int config_parse_device_allow(
                 return 0;
         }
 
-        a = new0(CGroupDeviceAllow, 1);
-        if (!a)
-                return log_oom();
-
-        a->path = TAKE_PTR(resolved);
-        a->r = isempty(p) || !!strchr(p, 'r');
-        a->w = isempty(p) || !!strchr(p, 'w');
-        a->m = isempty(p) || !!strchr(p, 'm');
-
-        LIST_PREPEND(device_allow, c->device_allow, a);
-        return 0;
+        return cgroup_add_device_allow(c, resolved, p);
 }
 
 int config_parse_io_device_weight(
@@ -3332,6 +3334,77 @@ int config_parse_io_device_weight(
         w->weight = u;
 
         LIST_PREPEND(device_weights, c->io_device_weights, w);
+        return 0;
+}
+
+int config_parse_io_device_latency(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        _cleanup_free_ char *path = NULL, *resolved = NULL;
+        CGroupIODeviceLatency *l;
+        CGroupContext *c = data;
+        const char *p = rvalue;
+        usec_t usec;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                while (c->io_device_latencies)
+                        cgroup_context_free_io_device_latency(c, c->io_device_latencies);
+
+                return 0;
+        }
+
+        r = extract_first_word(&p, &path, NULL, EXTRACT_QUOTES);
+        if (r == -ENOMEM)
+                return log_oom();
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Invalid syntax, ignoring: %s", rvalue);
+                return 0;
+        }
+        if (r == 0 || isempty(p)) {
+                log_syntax(unit, LOG_WARNING, filename, line, 0,
+                           "Failed to extract device path and latency from '%s', ignoring.", rvalue);
+                return 0;
+        }
+
+        r = unit_full_printf(userdata, path, &resolved);
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                           "Failed to resolve unit specifiers in '%s', ignoring: %m", path);
+                return 0;
+        }
+
+        r = path_simplify_and_warn(resolved, 0, unit, filename, line, lvalue);
+        if (r < 0)
+                return 0;
+
+        if (parse_sec(p, &usec) < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, 0, "Failed to parse timer value, ignoring: %s", p);
+                return 0;
+        }
+
+        l = new0(CGroupIODeviceLatency, 1);
+        if (!l)
+                return log_oom();
+
+        l->path = TAKE_PTR(resolved);
+        l->target_usec = usec;
+
+        LIST_PREPEND(device_latencies, c->io_device_latencies, l);
         return 0;
 }
 
@@ -4520,6 +4593,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_device_policy,         "POLICY" },
                 { config_parse_io_limit,              "LIMIT" },
                 { config_parse_io_device_weight,      "DEVICEWEIGHT" },
+                { config_parse_io_device_latency,     "DEVICELATENCY" },
                 { config_parse_blockio_bandwidth,     "BANDWIDTH" },
                 { config_parse_blockio_weight,        "WEIGHT" },
                 { config_parse_blockio_device_weight, "DEVICEWEIGHT" },

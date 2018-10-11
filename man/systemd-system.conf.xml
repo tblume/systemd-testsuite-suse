@@ -1,4 +1,4 @@
-<?xml version='1.0'?> <!--*- Mode: nxml; nxml-child-indent: 2; indent-tabs-mode: nil -*-->
+<?xml version='1.0'?>
 <!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd" [
 <!ENTITY % entities SYSTEM "custom-entities.ent" >
@@ -99,11 +99,11 @@
       <varlistentry>
         <term><varname>CPUAffinity=</varname></term>
 
-        <listitem><para>Configures the initial CPU affinity for the
-        init process. Takes a list of CPU indices or ranges separated
-        by either whitespace or commas. CPU ranges are specified by
-        the lower and upper CPU indices separated by a
-        dash.</para></listitem>
+        <listitem><para>Configures the CPU affinity for the service manager as well as the default CPU affinity for all
+        forked off processes. Takes a list of CPU indices or ranges separated by either whitespace or commas. CPU
+        ranges are specified by the lower and upper CPU indices separated by a dash. Individual services may override
+        the CPU affinity for their processes with the <varname>CPUAffinity=</varname> setting in unit files, see
+        <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para></listitem>
       </varlistentry>
 
       <varlistentry>
@@ -322,15 +322,16 @@
         <term><varname>DefaultBlockIOAccounting=</varname></term>
         <term><varname>DefaultMemoryAccounting=</varname></term>
         <term><varname>DefaultTasksAccounting=</varname></term>
+        <term><varname>DefaultIOAccounting=</varname></term>
         <term><varname>DefaultIPAccounting=</varname></term>
 
         <listitem><para>Configure the default resource accounting settings, as configured per-unit by
         <varname>CPUAccounting=</varname>, <varname>BlockIOAccounting=</varname>, <varname>MemoryAccounting=</varname>,
-        <varname>TasksAccounting=</varname> and <varname>IPAccounting=</varname>. See
+        <varname>TasksAccounting=</varname>, <varname>IOAccounting=</varname> and <varname>IPAccounting=</varname>. See
         <citerefentry><refentrytitle>systemd.resource-control</refentrytitle><manvolnum>5</manvolnum></citerefentry>
         for details on the per-unit settings. <varname>DefaultTasksAccounting=</varname> defaults to on,
         <varname>DefaultMemoryAccounting=</varname> to &MEMORY_ACCOUNTING_DEFAULT;,
-        the other three settings to off.</para></listitem>
+        the other four settings to off.</para></listitem>
       </varlistentry>
 
       <varlistentry>

@@ -31,51 +31,49 @@ int device_new_aux(sd_device **ret) {
 
         assert(ret);
 
-        device = new0(sd_device, 1);
+        device = new(sd_device, 1);
         if (!device)
                 return -ENOMEM;
 
-        device->n_ref = 1;
-        device->watch_handle = -1;
+        *device = (sd_device) {
+                .n_ref = 1,
+                .watch_handle = -1,
+                .ifindex = -1,
+                .devmode = (mode_t) -1,
+                .devuid = (uid_t) -1,
+                .devgid = (gid_t) -1,
+        };
 
         *ret = device;
-
         return 0;
 }
 
-_public_ sd_device *sd_device_ref(sd_device *device) {
-        if (device)
-                assert_se(++ device->n_ref >= 2);
+static sd_device *device_free(sd_device *device) {
+        assert(device);
 
-        return device;
+        sd_device_unref(device->parent);
+        free(device->syspath);
+        free(device->sysname);
+        free(device->devtype);
+        free(device->devname);
+        free(device->subsystem);
+        free(device->driver_subsystem);
+        free(device->driver);
+        free(device->id_filename);
+        free(device->properties_strv);
+        free(device->properties_nulstr);
+
+        ordered_hashmap_free_free_free(device->properties);
+        ordered_hashmap_free_free_free(device->properties_db);
+        hashmap_free_free_free(device->sysattr_values);
+        set_free_free(device->sysattrs);
+        set_free_free(device->tags);
+        set_free_free(device->devlinks);
+
+        return mfree(device);
 }
 
-_public_ sd_device *sd_device_unref(sd_device *device) {
-        if (device && -- device->n_ref == 0) {
-                sd_device_unref(device->parent);
-                free(device->syspath);
-                free(device->sysname);
-                free(device->devtype);
-                free(device->devname);
-                free(device->subsystem);
-                free(device->driver_subsystem);
-                free(device->driver);
-                free(device->id_filename);
-                free(device->properties_strv);
-                free(device->properties_nulstr);
-
-                ordered_hashmap_free_free_free(device->properties);
-                ordered_hashmap_free_free_free(device->properties_db);
-                hashmap_free_free_free(device->sysattr_values);
-                set_free_free(device->sysattrs);
-                set_free_free(device->tags);
-                set_free_free(device->devlinks);
-
-                free(device);
-        }
-
-        return NULL;
-}
+DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(sd_device, sd_device, device_free);
 
 int device_add_property_aux(sd_device *device, const char *_key, const char *_value, bool db) {
         OrderedHashmap **properties;
@@ -515,10 +513,8 @@ int device_read_uevent_file(sd_device *device) {
         else if (r == -ENOENT)
                 /* some devices may not have uevent files, see set_syspath() */
                 return 0;
-        else if (r < 0) {
-                log_debug_errno(r, "sd-device: failed to read uevent file '%s': %m", path);
-                return r;
-        }
+        else if (r < 0)
+                return log_debug_errno(r, "sd-device: failed to read uevent file '%s': %m", path);
 
         for (i = 0; i < uevent_len; i++)
                 switch (state) {
@@ -582,6 +578,9 @@ _public_ int sd_device_get_ifindex(sd_device *device, int *ifindex) {
         r = device_read_uevent_file(device);
         if (r < 0)
                 return r;
+
+        if (device->ifindex < 0)
+                return -ENOENT;
 
         *ifindex = device->ifindex;
 
@@ -647,7 +646,7 @@ _public_ int sd_device_new_from_device_id(sd_device **ret, const char *id) {
                 char subsys[PATH_MAX];
                 char *sysname;
 
-                (void)strscpy(subsys, sizeof(subsys), id + 1);
+                (void) strscpy(subsys, sizeof(subsys), id + 1);
                 sysname = strchr(subsys, ':');
                 if (!sysname)
                         return -EINVAL;
@@ -717,7 +716,7 @@ _public_ int sd_device_get_parent(sd_device *child, sd_device **ret) {
         if (!child->parent_set) {
                 child->parent_set = true;
 
-                (void)device_new_from_child(&child->parent, child);
+                (void) device_new_from_child(&child->parent, child);
         }
 
         if (!child->parent)
@@ -847,6 +846,9 @@ _public_ int sd_device_get_devtype(sd_device *device, const char **devtype) {
         if (r < 0)
                 return r;
 
+        if (!device->devtype)
+                return -ENOENT;
+
         *devtype = device->devtype;
 
         return 0;
@@ -864,12 +866,12 @@ _public_ int sd_device_get_parent_with_subsystem_devtype(sd_device *child, const
                 const char *parent_subsystem = NULL;
                 const char *parent_devtype = NULL;
 
-                (void)sd_device_get_subsystem(parent, &parent_subsystem);
+                (void) sd_device_get_subsystem(parent, &parent_subsystem);
                 if (streq_ptr(parent_subsystem, subsystem)) {
                         if (!devtype)
                                 break;
 
-                        (void)sd_device_get_devtype(parent, &parent_devtype);
+                        (void) sd_device_get_devtype(parent, &parent_devtype);
                         if (streq_ptr(parent_devtype, devtype))
                                 break;
                 }
@@ -893,6 +895,9 @@ _public_ int sd_device_get_devnum(sd_device *device, dev_t *devnum) {
         r = device_read_uevent_file(device);
         if (r < 0)
                 return r;
+
+        if (major(device->devnum) <= 0)
+                return -ENOENT;
 
         *devnum = device->devnum;
 
@@ -1061,6 +1066,9 @@ _public_ int sd_device_get_sysnum(sd_device *device, const char **ret) {
                         return r;
         }
 
+        if (!device->sysnum)
+                return -ENOENT;
+
         *ret = device->sysnum;
 
         return 0;
@@ -1224,15 +1232,7 @@ int device_get_id_filename(sd_device *device, const char **ret) {
                 if (r < 0)
                         return r;
 
-                r = sd_device_get_devnum(device, &devnum);
-                if (r < 0)
-                        return r;
-
-                r = sd_device_get_ifindex(device, &ifindex);
-                if (r < 0)
-                        return r;
-
-                if (major(devnum) > 0) {
+                if (sd_device_get_devnum(device, &devnum) >= 0) {
                         assert(subsystem);
 
                         /* use dev_t — b259:131072, c254:0 */
@@ -1241,7 +1241,7 @@ int device_get_id_filename(sd_device *device, const char **ret) {
                                      major(devnum), minor(devnum));
                         if (r < 0)
                                 return -ENOMEM;
-                } else if (ifindex > 0) {
+                } else if (sd_device_get_ifindex(device, &ifindex) >= 0 && ifindex > 0) {
                         /* use netdev ifindex — n3 */
                         r = asprintf(&id, "n%u", ifindex);
                         if (r < 0)
@@ -1830,7 +1830,7 @@ static void device_remove_sysattr_value(sd_device *device, const char *_key) {
 
 /* set the attribute and save it in the cache. If a NULL value is passed the
  * attribute is cleared from the cache */
-_public_ int sd_device_set_sysattr_value(sd_device *device, const char *sysattr, char *_value) {
+_public_ int sd_device_set_sysattr_value(sd_device *device, const char *sysattr, const char *_value) {
         _cleanup_close_ int fd = -1;
         _cleanup_free_ char *value = NULL;
         const char *syspath;

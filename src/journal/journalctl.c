@@ -22,6 +22,7 @@
 #endif
 
 #include "sd-bus.h"
+#include "sd-device.h"
 #include "sd-journal.h"
 
 #include "acl-util.h"
@@ -30,12 +31,14 @@
 #include "bus-util.h"
 #include "catalog.h"
 #include "chattr-util.h"
+#include "device-private.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
 #include "fsprg.h"
 #include "glob-util.h"
 #include "hostname-util.h"
+#include "id128-print.h"
 #include "io-util.h"
 #include "journal-def.h"
 #include "journal-internal.h"
@@ -57,8 +60,6 @@
 #include "strv.h"
 #include "syslog-util.h"
 #include "terminal-util.h"
-#include "udev-util.h"
-#include "udev.h"
 #include "unit-name.h"
 #include "user-util.h"
 
@@ -177,9 +178,8 @@ typedef struct BootId {
 } BootId;
 
 static int add_matches_for_device(sd_journal *j, const char *devpath) {
-        _cleanup_(udev_unrefp) struct udev *udev = NULL;
-        _cleanup_(udev_device_unrefp) struct udev_device *device = NULL;
-        struct udev_device *d = NULL;
+        _cleanup_(sd_device_unrefp) sd_device *device = NULL;
+        sd_device *d = NULL;
         struct stat st;
         int r;
 
@@ -191,33 +191,25 @@ static int add_matches_for_device(sd_journal *j, const char *devpath) {
                 return -EINVAL;
         }
 
-        udev = udev_new();
-        if (!udev)
-                return log_oom();
-
         if (stat(devpath, &st) < 0)
                 return log_error_errno(errno, "Couldn't stat file: %m");
 
-        r = udev_device_new_from_stat_rdev(udev, &st, &device);
+        r = device_new_from_stat_rdev(&device, &st);
         if (r < 0)
-                return log_error_errno(r, "Failed to get udev device from devnum %u:%u: %m", major(st.st_rdev), minor(st.st_rdev));
+                return log_error_errno(r, "Failed to get device from devnum %u:%u: %m", major(st.st_rdev), minor(st.st_rdev));
 
-        d = device;
-        while (d) {
+        for (d = device; d; ) {
                 _cleanup_free_ char *match = NULL;
                 const char *subsys, *sysname, *devnode;
+                sd_device *parent;
 
-                subsys = udev_device_get_subsystem(d);
-                if (!subsys) {
-                        d = udev_device_get_parent(d);
-                        continue;
-                }
+                r = sd_device_get_subsystem(d, &subsys);
+                if (r < 0)
+                        goto get_parent;
 
-                sysname = udev_device_get_sysname(d);
-                if (!sysname) {
-                        d = udev_device_get_parent(d);
-                        continue;
-                }
+                r = sd_device_get_sysname(d, &sysname);
+                if (r < 0)
+                        goto get_parent;
 
                 match = strjoin("_KERNEL_DEVICE=+", subsys, ":", sysname);
                 if (!match)
@@ -227,8 +219,7 @@ static int add_matches_for_device(sd_journal *j, const char *devpath) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to add match: %m");
 
-                devnode = udev_device_get_devnode(d);
-                if (devnode) {
+                if (sd_device_get_devname(d, &devnode) >= 0) {
                         _cleanup_free_ char *match1 = NULL;
 
                         r = stat(devnode, &st);
@@ -244,7 +235,11 @@ static int add_matches_for_device(sd_journal *j, const char *devpath) {
                                 return log_error_errno(r, "Failed to add match: %m");
                 }
 
-                d = udev_device_get_parent(d);
+get_parent:
+                if (sd_device_get_parent(d, &parent) < 0)
+                        break;
+
+                d = parent;
         }
 
         r = add_match_this_boot(j, arg_machine);
@@ -297,9 +292,15 @@ static int parse_boot_descriptor(const char *x, sd_id128_t *boot_id, int *offset
         return 0;
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
 
         (void) pager_open(arg_no_pager, arg_pager_end);
+
+        r = terminal_urlify_man("journalctl", "1", &link);
+        if (r < 0)
+                return log_oom();
 
         printf("%s [OPTIONS...] [MATCHES...]\n\n"
                "Query the journal.\n\n"
@@ -342,11 +343,9 @@ static void help(void) {
                "  -D --directory=PATH        Show journal files from directory\n"
                "     --file=PATH             Show journal file\n"
                "     --root=ROOT             Operate on files below a root directory\n"
-#if HAVE_GCRYPT
                "     --interval=TIME         Time interval for changing the FSS sealing key\n"
                "     --verify-key=KEY        Specify FSS verification key\n"
                "     --force                 Override of the FSS key pair with --setup-keys\n"
-#endif
                "\nCommands:\n"
                "  -h --help                  Show this help text\n"
                "     --version               Show package version\n"
@@ -364,11 +363,13 @@ static void help(void) {
                "     --list-catalog          Show all message IDs in the catalog\n"
                "     --dump-catalog          Show entries in the message catalog\n"
                "     --update-catalog        Update the message catalog database\n"
-               "     --new-id128             Generate a new 128-bit ID\n"
-#if HAVE_GCRYPT
                "     --setup-keys            Generate a new FSS key pair\n"
-#endif
-               , program_invocation_short_name);
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -423,7 +424,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "no-full",        no_argument,       NULL, ARG_NO_FULL        },
                 { "lines",          optional_argument, NULL, 'n'                },
                 { "no-tail",        no_argument,       NULL, ARG_NO_TAIL        },
-                { "new-id128",      no_argument,       NULL, ARG_NEW_ID128      },
+                { "new-id128",      no_argument,       NULL, ARG_NEW_ID128      }, /* deprecated */
                 { "quiet",          no_argument,       NULL, 'q'                },
                 { "merge",          no_argument,       NULL, 'm'                },
                 { "this-boot",      no_argument,       NULL, ARG_THIS_BOOT      }, /* deprecated */
@@ -482,8 +483,7 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        help();
-                        return 0;
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -741,7 +741,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_VERIFY_KEY:
                 case ARG_INTERVAL:
                 case ARG_FORCE:
-                        log_error("Forward-secure sealing not available.");
+                        log_error("Compiled without forward-secure sealing support.");
                         return -EOPNOTSUPP;
 #endif
 
@@ -1005,35 +1005,6 @@ static int parse_argv(int argc, char *argv[]) {
 #endif
 
         return 1;
-}
-
-static int generate_new_id128(void) {
-        sd_id128_t id;
-        int r;
-        unsigned i;
-
-        r = sd_id128_randomize(&id);
-        if (r < 0)
-                return log_error_errno(r, "Failed to generate ID: %m");
-
-        printf("As string:\n"
-               SD_ID128_FORMAT_STR "\n\n"
-               "As UUID:\n"
-               "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n\n"
-               "As man:sd-id128(3) macro:\n"
-               "#define MESSAGE_XYZ SD_ID128_MAKE(",
-               SD_ID128_FORMAT_VAL(id),
-               SD_ID128_FORMAT_VAL(id));
-        for (i = 0; i < 16; i++)
-                printf("%02x%s", id.bytes[i], i != 15 ? "," : "");
-        fputs(")\n\n", stdout);
-
-        printf("As Python constant:\n"
-               ">>> import uuid\n"
-               ">>> MESSAGE_XYZ = uuid.UUID('" SD_ID128_FORMAT_STR "')\n",
-               SD_ID128_FORMAT_VAL(id));
-
-        return 0;
 }
 
 static int add_matches(sd_journal *j, char **args) {
@@ -1761,7 +1732,7 @@ static int setup_keys(void) {
 
         /* Enable secure remove, exclusion from dump, synchronous
          * writing and in-place updating */
-        r = chattr_fd(fd, FS_SECRM_FL|FS_NODUMP_FL|FS_SYNC_FL|FS_NOCOW_FL, FS_SECRM_FL|FS_NODUMP_FL|FS_SYNC_FL|FS_NOCOW_FL);
+        r = chattr_fd(fd, FS_SECRM_FL|FS_NODUMP_FL|FS_SYNC_FL|FS_NOCOW_FL, FS_SECRM_FL|FS_NODUMP_FL|FS_SYNC_FL|FS_NOCOW_FL, NULL);
         if (r < 0)
                 log_warning_errno(r, "Failed to set file attributes: %m");
 
@@ -2092,7 +2063,7 @@ int main(int argc, char *argv[]) {
         switch (arg_action) {
 
         case ACTION_NEW_ID128:
-                r = generate_new_id128();
+                r = id128_print_new(true);
                 goto finish;
 
         case ACTION_SETUP_KEYS:

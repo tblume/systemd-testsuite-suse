@@ -581,6 +581,7 @@ int manager_new(Manager **ret) {
         m->read_resolv_conf = true;
         m->need_builtin_fallbacks = true;
         m->etc_hosts_last = m->etc_hosts_mtime = USEC_INFINITY;
+        m->read_etc_hosts = true;
 
         r = dns_trust_anchor_load(&m->trust_anchor);
         if (r < 0)
@@ -594,10 +595,10 @@ int manager_new(Manager **ret) {
         if (r < 0)
                 return r;
 
-        sd_event_add_signal(m->event, NULL, SIGTERM, NULL,  NULL);
-        sd_event_add_signal(m->event, NULL, SIGINT, NULL, NULL);
+        (void) sd_event_add_signal(m->event, NULL, SIGTERM, NULL,  NULL);
+        (void) sd_event_add_signal(m->event, NULL, SIGINT, NULL, NULL);
 
-        sd_event_set_watchdog(m->event, true);
+        (void) sd_event_set_watchdog(m->event, true);
 
         r = manager_watch_hostname(m);
         if (r < 0)
@@ -683,7 +684,6 @@ Manager *manager_free(Manager *m) {
         manager_mdns_stop(m);
         manager_dns_stub_stop(m);
 
-        sd_bus_slot_unref(m->prepare_for_sleep_slot);
         sd_bus_unref(m->bus);
 
         sd_event_source_unref(m->sigusr1_event_source);

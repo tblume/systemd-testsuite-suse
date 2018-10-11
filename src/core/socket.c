@@ -301,17 +301,17 @@ static int socket_add_default_dependencies(Socket *s) {
         if (!UNIT(s)->default_dependencies)
                 return 0;
 
-        r = unit_add_dependency_by_name(UNIT(s), UNIT_BEFORE, SPECIAL_SOCKETS_TARGET, NULL, true, UNIT_DEPENDENCY_DEFAULT);
+        r = unit_add_dependency_by_name(UNIT(s), UNIT_BEFORE, SPECIAL_SOCKETS_TARGET, true, UNIT_DEPENDENCY_DEFAULT);
         if (r < 0)
                 return r;
 
         if (MANAGER_IS_SYSTEM(UNIT(s)->manager)) {
-                r = unit_add_two_dependencies_by_name(UNIT(s), UNIT_AFTER, UNIT_REQUIRES, SPECIAL_SYSINIT_TARGET, NULL, true, UNIT_DEPENDENCY_DEFAULT);
+                r = unit_add_two_dependencies_by_name(UNIT(s), UNIT_AFTER, UNIT_REQUIRES, SPECIAL_SYSINIT_TARGET, true, UNIT_DEPENDENCY_DEFAULT);
                 if (r < 0)
                         return r;
         }
 
-        return unit_add_two_dependencies_by_name(UNIT(s), UNIT_BEFORE, UNIT_CONFLICTS, SPECIAL_SHUTDOWN_TARGET, NULL, true, UNIT_DEPENDENCY_DEFAULT);
+        return unit_add_two_dependencies_by_name(UNIT(s), UNIT_BEFORE, UNIT_CONFLICTS, SPECIAL_SHUTDOWN_TARGET, true, UNIT_DEPENDENCY_DEFAULT);
 }
 
 _pure_ static bool socket_has_exec(Socket *s) {
@@ -484,11 +484,11 @@ static void peer_address_hash_func(const void *p, struct siphash *state) {
 
 static int peer_address_compare_func(const void *a, const void *b) {
         const SocketPeer *x = a, *y = b;
+        int r;
 
-        if (x->peer.sa.sa_family < y->peer.sa.sa_family)
-                return -1;
-        if (x->peer.sa.sa_family > y->peer.sa.sa_family)
-                return 1;
+        r = CMP(x->peer.sa.sa_family, y->peer.sa.sa_family);
+        if (r != 0)
+                return r;
 
         switch(x->peer.sa.sa_family) {
         case AF_INET:
@@ -547,32 +547,16 @@ static SocketPeer *socket_peer_new(void) {
         return p;
 }
 
-SocketPeer *socket_peer_ref(SocketPeer *p) {
-        if (!p)
-                return NULL;
-
-        assert(p->n_ref > 0);
-        p->n_ref++;
-
-        return p;
-}
-
-SocketPeer *socket_peer_unref(SocketPeer *p) {
-        if (!p)
-                return NULL;
-
-        assert(p->n_ref > 0);
-
-        p->n_ref--;
-
-        if (p->n_ref > 0)
-                return NULL;
+static SocketPeer *socket_peer_free(SocketPeer *p) {
+        assert(p);
 
         if (p->socket)
                 set_remove(p->socket->peers_by_address, p);
 
         return mfree(p);
 }
+
+DEFINE_TRIVIAL_REF_UNREF_FUNC(SocketPeer, socket_peer, socket_peer_free);
 
 int socket_acquire_peer(Socket *s, int fd, SocketPeer **p) {
         _cleanup_(socket_peer_unrefp) SocketPeer *remote = NULL;
@@ -1329,7 +1313,7 @@ static int socket_symlink(Socket *s) {
         STRV_FOREACH(i, s->symlinks) {
                 (void) mkdir_parents_label(*i, s->directory_mode);
 
-                r = symlink_idempotent(p, *i);
+                r = symlink_idempotent(p, *i, false);
 
                 if (r == -EEXIST && s->remove_on_stop) {
                         /* If there's already something where we want to create the symlink, and the destructive
@@ -1337,7 +1321,7 @@ static int socket_symlink(Socket *s) {
                          * again. */
 
                         if (unlink(*i) >= 0)
-                                r = symlink_idempotent(p, *i);
+                                r = symlink_idempotent(p, *i, false);
                 }
 
                 if (r < 0)
@@ -1375,8 +1359,10 @@ static int usbffs_dispatch_eps(SocketPort *p) {
 
         n = (size_t) r;
         p->auxiliary_fds = new(int, n);
-        if (!p->auxiliary_fds)
-                return -ENOMEM;
+        if (!p->auxiliary_fds) {
+                r = -ENOMEM;
+                goto clear;
+        }
 
         p->n_auxiliary_fds = n;
 
@@ -1385,8 +1371,10 @@ static int usbffs_dispatch_eps(SocketPort *p) {
                 _cleanup_free_ char *ep = NULL;
 
                 ep = path_make_absolute(ent[i]->d_name, p->path);
-                if (!ep)
-                        return -ENOMEM;
+                if (!ep) {
+                        r = -ENOMEM;
+                        goto fail;
+                }
 
                 path_simplify(ep, false);
 
@@ -1395,15 +1383,19 @@ static int usbffs_dispatch_eps(SocketPort *p) {
                         goto fail;
 
                 p->auxiliary_fds[k++] = r;
-                free(ent[i]);
         }
 
-        return r;
+        r = 0;
+        goto clear;
 
 fail:
         close_many(p->auxiliary_fds, k);
         p->auxiliary_fds = mfree(p->auxiliary_fds);
         p->n_auxiliary_fds = 0;
+
+clear:
+        for (i = 0; i < n; ++i)
+                free(ent[i]);
 
         return r;
 }
@@ -1867,10 +1859,11 @@ static int socket_coldplug(Unit *u) {
 static int socket_spawn(Socket *s, ExecCommand *c, pid_t *_pid) {
 
         ExecParameters exec_params = {
-                .flags      = EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN,
-                .stdin_fd   = -1,
-                .stdout_fd  = -1,
-                .stderr_fd  = -1,
+                .flags     = EXEC_APPLY_SANDBOXING|EXEC_APPLY_CHROOT|EXEC_APPLY_TTY_STDIN,
+                .stdin_fd  = -1,
+                .stdout_fd = -1,
+                .stderr_fd = -1,
+                .exec_fd   = -1,
         };
         pid_t pid;
         int r;
@@ -1888,8 +1881,6 @@ static int socket_spawn(Socket *s, ExecCommand *c, pid_t *_pid) {
                 return r;
 
         unit_set_exec_params(UNIT(s), &exec_params);
-
-        exec_params.argv = c->argv;
 
         r = exec_spawn(UNIT(s),
                        c,
@@ -1935,7 +1926,7 @@ static int socket_chown(Socket *s, pid_t *_pid) {
                 if (!isempty(s->user)) {
                         const char *user = s->user;
 
-                        r = get_user_creds(&user, &uid, &gid, NULL, NULL);
+                        r = get_user_creds(&user, &uid, &gid, NULL, NULL, 0);
                         if (r < 0) {
                                 log_unit_error_errno(UNIT(s), r, "Failed to resolve user %s: %m", user);
                                 _exit(EXIT_USER);
@@ -1945,7 +1936,7 @@ static int socket_chown(Socket *s, pid_t *_pid) {
                 if (!isempty(s->group)) {
                         const char *group = s->group;
 
-                        r = get_group_creds(&group, &gid);
+                        r = get_group_creds(&group, &gid, 0);
                         if (r < 0) {
                                 log_unit_error_errno(UNIT(s), r, "Failed to resolve group %s: %m", group);
                                 _exit(EXIT_GROUP);
@@ -2459,6 +2450,7 @@ static int socket_start(Unit *u) {
                 return r;
 
         s->result = SOCKET_SUCCESS;
+        exec_command_reset_status_list_array(s->exec_command, _SOCKET_EXEC_COMMAND_MAX);
 
         u->reset_accounting = true;
 

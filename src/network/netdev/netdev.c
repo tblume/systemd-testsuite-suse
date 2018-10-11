@@ -16,6 +16,7 @@
 #include "stat-util.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "strv.h"
 
 #include "netdev/bridge.h"
 #include "netdev/bond.h"
@@ -33,6 +34,7 @@
 #include "netdev/vxcan.h"
 #include "netdev/wireguard.h"
 #include "netdev/netdevsim.h"
+#include "netdev/fou-tunnel.h"
 
 const NetDevVTable * const netdev_vtable[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_BRIDGE] = &bridge_vtable,
@@ -61,6 +63,7 @@ const NetDevVTable * const netdev_vtable[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_VXCAN] = &vxcan_vtable,
         [NETDEV_KIND_WIREGUARD] = &wireguard_vtable,
         [NETDEV_KIND_NETDEVSIM] = &netdevsim_vtable,
+        [NETDEV_KIND_FOU] = &foutnl_vtable,
 };
 
 static const char* const netdev_kind_table[_NETDEV_KIND_MAX] = {
@@ -90,6 +93,7 @@ static const char* const netdev_kind_table[_NETDEV_KIND_MAX] = {
         [NETDEV_KIND_VXCAN] = "vxcan",
         [NETDEV_KIND_WIREGUARD] = "wireguard",
         [NETDEV_KIND_NETDEVSIM] = "netdevsim",
+        [NETDEV_KIND_FOU] = "fou",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(netdev_kind, NetDevKind);
@@ -120,9 +124,8 @@ static void netdev_cancel_callbacks(NetDev *netdev) {
         }
 }
 
-static void netdev_free(NetDev *netdev) {
-        if (!netdev)
-                return;
+static NetDev *netdev_free(NetDev *netdev) {
+        assert(netdev);
 
         netdev_cancel_callbacks(netdev);
 
@@ -153,22 +156,10 @@ static void netdev_free(NetDev *netdev) {
             NETDEV_VTABLE(netdev)->done)
                 NETDEV_VTABLE(netdev)->done(netdev);
 
-        free(netdev);
+        return mfree(netdev);
 }
 
-NetDev *netdev_unref(NetDev *netdev) {
-        if (netdev && (-- netdev->n_ref <= 0))
-                netdev_free(netdev);
-
-        return NULL;
-}
-
-NetDev *netdev_ref(NetDev *netdev) {
-        if (netdev)
-                assert_se(++ netdev->n_ref >= 2);
-
-        return netdev;
-}
+DEFINE_TRIVIAL_REF_UNREF_FUNC(NetDev, netdev, netdev_free);
 
 void netdev_drop(NetDev *netdev) {
         if (!netdev || netdev->state == NETDEV_STATE_LINGER)

@@ -22,7 +22,6 @@
 #include "ordered-set.h"
 #include "path-util.h"
 #include "set.h"
-#include "udev-util.h"
 #include "virt.h"
 
 /* use 8 MB for receive socket kernel queue. */
@@ -114,6 +113,8 @@ static int on_connected(sd_bus_message *message, void *userdata, sd_bus_error *r
                 (void) manager_set_hostname(m, m->dynamic_hostname);
         if (m->dynamic_timezone)
                 (void) manager_set_timezone(m, m->dynamic_timezone);
+        if (m->links_requesting_uuid)
+                (void) manager_request_product_uuid(m, NULL);
 
         return 0;
 }
@@ -150,7 +151,7 @@ int manager_connect_bus(Manager *m) {
         if (r < 0)
                 return log_error_errno(r, "Failed to add network enumerator: %m");
 
-        r = bus_request_name_async_may_reload_dbus(m->bus, NULL, "org.freedesktop.network1", 0, NULL);
+        r = sd_bus_request_name_async(m->bus, NULL, "org.freedesktop.network1", 0, NULL, NULL);
         if (r < 0)
                 return log_error_errno(r, "Failed to request name: %m");
 
@@ -160,7 +161,7 @@ int manager_connect_bus(Manager *m) {
 
         r = sd_bus_match_signal_async(
                         m->bus,
-                        &m->connected_slot,
+                        NULL,
                         "org.freedesktop.DBus.Local",
                         NULL,
                         "org.freedesktop.DBus.Local",
@@ -171,7 +172,7 @@ int manager_connect_bus(Manager *m) {
 
         r = sd_bus_match_signal_async(
                         m->bus,
-                        &m->prepare_for_sleep_slot,
+                        NULL,
                         "org.freedesktop.login1",
                         "/org/freedesktop/login1",
                         "org.freedesktop.login1.Manager",
@@ -183,18 +184,20 @@ int manager_connect_bus(Manager *m) {
         return 0;
 }
 
-static int manager_udev_process_link(Manager *m, struct udev_device *device) {
+static int manager_udev_process_link(Manager *m, sd_device *device) {
+        const char *action;
         Link *link = NULL;
         int r, ifindex;
 
         assert(m);
         assert(device);
 
-        if (!streq_ptr(udev_device_get_action(device), "add"))
+        r = sd_device_get_property_value(device, "ACTION", &action);
+        if (r < 0 || !streq_ptr(action, "add"))
                 return 0;
 
-        ifindex = udev_device_get_ifindex(device);
-        if (ifindex <= 0) {
+        r = sd_device_get_ifindex(device, &ifindex);
+        if (r < 0 || ifindex <= 0) {
                 log_debug("Ignoring udev ADD event for device with invalid ifindex");
                 return 0;
         }
@@ -215,11 +218,12 @@ static int manager_udev_process_link(Manager *m, struct udev_device *device) {
 static int manager_dispatch_link_udev(sd_event_source *source, int fd, uint32_t revents, void *userdata) {
         Manager *m = userdata;
         struct udev_monitor *monitor = m->udev_monitor;
-        _cleanup_(udev_device_unrefp) struct udev_device *device = NULL;
+        _cleanup_(sd_device_unrefp) sd_device *device = NULL;
+        int r;
 
-        device = udev_monitor_receive_device(monitor);
-        if (!device)
-                return -ENOMEM;
+        r = udev_monitor_receive_sd_device(monitor, &device);
+        if (r < 0)
+                return r;
 
         (void) manager_udev_process_link(m, device);
 
@@ -235,11 +239,7 @@ static int manager_connect_udev(Manager *m) {
         if (detect_container() > 0)
                 return 0;
 
-        m->udev = udev_new();
-        if (!m->udev)
-                return -ENOMEM;
-
-        m->udev_monitor = udev_monitor_new_from_netlink(m->udev, "udev");
+        m->udev_monitor = udev_monitor_new_from_netlink(NULL, "udev");
         if (!m->udev_monitor)
                 return -ENOMEM;
 
@@ -718,7 +718,7 @@ int manager_rtnl_process_rule(sd_netlink *rtnl, sd_netlink_message *message, voi
         union in_addr_union to = {}, from = {};
         RoutingPolicyRule *rule = NULL;
         uint32_t fwmark = 0, table = 0;
-        char *iif = NULL, *oif = NULL;
+        const char *iif = NULL, *oif = NULL;
         Manager *m = userdata;
         uint16_t type;
         int family;
@@ -834,13 +834,13 @@ int manager_rtnl_process_rule(sd_netlink *rtnl, sd_netlink_message *message, voi
                 return 0;
         }
 
-        r = sd_netlink_message_read_string(message, FRA_IIFNAME, (const char **) &iif);
+        r = sd_netlink_message_read_string(message, FRA_IIFNAME, &iif);
         if (r < 0 && r != -ENODATA) {
                 log_warning_errno(r, "rtnl: could not get FRA_IIFNAME attribute, ignoring: %m");
                 return 0;
         }
 
-        r = sd_netlink_message_read_string(message, FRA_OIFNAME, (const char **) &oif);
+        r = sd_netlink_message_read_string(message, FRA_OIFNAME, &oif);
         if (r < 0 && r != -ENODATA) {
                 log_warning_errno(r, "rtnl: could not get FRA_OIFNAME attribute, ignoring: %m");
                 return 0;
@@ -1240,27 +1240,15 @@ Link *manager_dhcp6_prefix_get(Manager *m, struct in6_addr *addr) {
 }
 
 static int dhcp6_route_add_callback(sd_netlink *nl, sd_netlink_message *m,
-                                       void *userdata) {
+                                  void *userdata) {
         Link *l = userdata;
         int r;
-        union in_addr_union prefix;
-        _cleanup_free_ char *buf = NULL;
 
         r = sd_netlink_message_get_errno(m);
-        if (r != 0) {
+        if (r < 0 && r != -EEXIST)
                 log_link_debug_errno(l, r, "Received error adding DHCPv6 Prefix Delegation route: %m");
-                return 0;
-        }
 
-        r = sd_netlink_message_read_in6_addr(m, RTA_DST, &prefix.in6);
-        if (r < 0) {
-                log_link_debug_errno(l, r, "Could not read IPv6 address from DHCPv6 Prefix Delegation while adding route: %m");
-                return 0;
-        }
-
-        (void) in_addr_to_string(AF_INET6, &prefix, &buf);
-        log_link_debug(l, "Added DHCPv6 Prefix Deleagtion route %s/64",
-                       strnull(buf));
+        l = link_unref(l);
 
         return 0;
 }
@@ -1268,6 +1256,7 @@ static int dhcp6_route_add_callback(sd_netlink *nl, sd_netlink_message *m,
 int manager_dhcp6_prefix_add(Manager *m, struct in6_addr *addr, Link *link) {
         int r;
         Route *route;
+        _cleanup_free_ char *buf = NULL;
 
         assert_return(m, -EINVAL);
         assert_return(m->dhcp6_prefixes, -ENODATA);
@@ -1282,6 +1271,11 @@ int manager_dhcp6_prefix_add(Manager *m, struct in6_addr *addr, Link *link) {
         if (r < 0)
                 return r;
 
+        (void) in_addr_to_string(AF_INET6, (union in_addr_union *) addr, &buf);
+        log_link_debug(link, "Adding prefix route %s/64", strnull(buf));
+
+        link = link_ref(link);
+
         return hashmap_put(m->dhcp6_prefixes, addr, link);
 }
 
@@ -1289,24 +1283,12 @@ static int dhcp6_route_remove_callback(sd_netlink *nl, sd_netlink_message *m,
                                        void *userdata) {
         Link *l = userdata;
         int r;
-        union in_addr_union prefix;
-        _cleanup_free_ char *buf = NULL;
 
         r = sd_netlink_message_get_errno(m);
-        if (r != 0) {
+        if (r < 0)
                 log_link_debug_errno(l, r, "Received error on DHCPv6 Prefix Delegation route removal: %m");
-                return 0;
-        }
 
-        r = sd_netlink_message_read_in6_addr(m, RTA_DST, &prefix.in6);
-        if (r < 0) {
-                log_link_debug_errno(l, r, "Could not read IPv6 address from DHCPv6 Prefix Delegation while removing route: %m");
-                return 0;
-        }
-
-        (void) in_addr_to_string(AF_INET6, &prefix, &buf);
-        log_link_debug(l, "Removed DHCPv6 Prefix Delegation route %s/64",
-                       strnull(buf));
+        l = link_unref(l);
 
         return 0;
 }
@@ -1315,6 +1297,7 @@ int manager_dhcp6_prefix_remove(Manager *m, struct in6_addr *addr) {
         Link *l;
         int r;
         Route *route;
+        _cleanup_free_ char *buf = NULL;
 
         assert_return(m, -EINVAL);
         assert_return(m->dhcp6_prefixes, -ENODATA);
@@ -1327,8 +1310,17 @@ int manager_dhcp6_prefix_remove(Manager *m, struct in6_addr *addr) {
         (void) sd_radv_remove_prefix(l->radv, addr, 64);
         r = route_get(l, AF_INET6, (union in_addr_union *) addr, 64,
                       0, 0, 0, &route);
-        if (r >= 0)
-                (void) route_remove(route, l, dhcp6_route_remove_callback);
+        if (r < 0)
+                return r;
+
+        r = route_remove(route, l, dhcp6_route_remove_callback);
+        if (r < 0)
+                return r;
+
+        (void) in_addr_to_string(AF_INET6, (union in_addr_union *) addr, &buf);
+        log_link_debug(l, "Removing prefix route %s/64", strnull(buf));
+
+        l = link_ref(l);
 
         return 0;
 }
@@ -1370,7 +1362,7 @@ static const struct hash_ops dhcp6_prefixes_hash_ops = {
         .compare = dhcp6_prefixes_compare_func,
 };
 
-int manager_new(Manager **ret, sd_event *event) {
+int manager_new(Manager **ret) {
         _cleanup_(manager_freep) Manager *m = NULL;
         int r;
 
@@ -1382,7 +1374,13 @@ int manager_new(Manager **ret, sd_event *event) {
         if (!m->state_file)
                 return -ENOMEM;
 
-        m->event = sd_event_ref(event);
+        r = sd_event_default(&m->event);
+        if (r < 0)
+                return r;
+
+        (void) sd_event_set_watchdog(m->event, true);
+        (void) sd_event_add_signal(m->event, NULL, SIGTERM, NULL, NULL);
+        (void) sd_event_add_signal(m->event, NULL, SIGINT, NULL, NULL);
 
         r = sd_event_add_post(m->event, NULL, manager_dirty_handler, m);
         if (r < 0)
@@ -1446,12 +1444,22 @@ void manager_free(Manager *m) {
                 network_free(network);
 
         while ((link = hashmap_first(m->dhcp6_prefixes)))
-                link_unref(link);
+                manager_dhcp6_prefix_remove_all(m, link);
         hashmap_free(m->dhcp6_prefixes);
 
-        while ((link = hashmap_first(m->links)))
+        while ((link = hashmap_first(m->links))) {
+                if (link->dhcp6_client)
+                        (void) dhcp6_lease_pd_prefix_lost(link->dhcp6_client,
+                                                          link);
+
+                hashmap_remove(m->links, INT_TO_PTR(link->ifindex));
+
                 link_unref(link);
+        }
         hashmap_free(m->links);
+
+        set_free(m->links_requesting_uuid);
+        set_free(m->duids_requesting_uuid);
 
         hashmap_free(m->networks_by_name);
 
@@ -1462,23 +1470,20 @@ void manager_free(Manager *m) {
         while ((pool = m->address_pools))
                 address_pool_free(pool);
 
-        set_free(m->rules);
-        set_free(m->rules_foreign);
-
+        set_free_with_destructor(m->rules, routing_policy_rule_free);
+        set_free_with_destructor(m->rules_foreign, routing_policy_rule_free);
         set_free_with_destructor(m->rules_saved, routing_policy_rule_free);
 
         sd_netlink_unref(m->rtnl);
+        sd_netlink_unref(m->genl);
         sd_event_unref(m->event);
 
         sd_resolve_unref(m->resolve);
 
         sd_event_source_unref(m->udev_event_source);
         udev_monitor_unref(m->udev_monitor);
-        udev_unref(m->udev);
 
         sd_bus_unref(m->bus);
-        sd_bus_slot_unref(m->prepare_for_sleep_slot);
-        sd_bus_slot_unref(m->connected_slot);
 
         free(m->dynamic_timezone);
         free(m->dynamic_hostname);
@@ -1757,7 +1762,7 @@ int manager_set_hostname(Manager *m, const char *hostname) {
                 return log_oom();
 
         if (!m->bus || sd_bus_is_ready(m->bus) <= 0) {
-                log_info("Not connected to system bus, not setting hostname.");
+                log_debug("Not connected to system bus, setting hostname later.");
                 return 0;
         }
 
@@ -1805,7 +1810,7 @@ int manager_set_timezone(Manager *m, const char *tz) {
                 return log_oom();
 
         if (!m->bus || sd_bus_is_ready(m->bus) <= 0) {
-                log_info("Not connected to system bus, not setting timezone.");
+                log_debug("Not connected to system bus, setting timezone later.");
                 return 0;
         }
 
@@ -1823,6 +1828,60 @@ int manager_set_timezone(Manager *m, const char *tz) {
                         false);
         if (r < 0)
                 return log_error_errno(r, "Could not set timezone: %m");
+
+        return 0;
+}
+
+int manager_request_product_uuid(Manager *m, Link *link) {
+        int r;
+
+        assert(m);
+
+        if (m->has_product_uuid)
+                return 0;
+
+        log_debug("Requesting product UUID");
+
+        if (link) {
+                DUID *duid;
+
+                assert_se(duid = link_get_duid(link));
+
+                r = set_ensure_allocated(&m->links_requesting_uuid, NULL);
+                if (r < 0)
+                        return log_oom();
+
+                r = set_ensure_allocated(&m->duids_requesting_uuid, NULL);
+                if (r < 0)
+                        return log_oom();
+
+                r = set_put(m->links_requesting_uuid, link);
+                if (r < 0)
+                        return log_oom();
+
+                r = set_put(m->duids_requesting_uuid, duid);
+                if (r < 0)
+                        return log_oom();
+        }
+
+        if (!m->bus || sd_bus_is_ready(m->bus) <= 0) {
+                log_debug("Not connected to system bus, requesting product UUID later.");
+                return 0;
+        }
+
+        r = sd_bus_call_method_async(
+                        m->bus,
+                        NULL,
+                        "org.freedesktop.hostname1",
+                        "/org/freedesktop/hostname1",
+                        "org.freedesktop.hostname1",
+                        "GetProductUUID",
+                        get_product_uuid_handler,
+                        m,
+                        "b",
+                        false);
+        if (r < 0)
+                return log_warning_errno(r, "Failed to get product UUID: %m");
 
         return 0;
 }

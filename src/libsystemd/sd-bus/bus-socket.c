@@ -1,6 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-***/
 
 #include <endian.h>
 #include <poll.h>
@@ -248,10 +246,7 @@ static bool line_begins(const char *s, size_t m, const char *word) {
         const char *p;
 
         p = memory_startswith(s, m, word);
-        if (!p)
-                return false;
-
-        return IN_SET(*p, 0, ' ');
+        return p && (p == (s + m) || *p == ' ');
 }
 
 static int verify_anonymous_token(sd_bus *b, const char *p, size_t l) {

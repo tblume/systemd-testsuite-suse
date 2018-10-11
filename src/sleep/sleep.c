@@ -11,16 +11,17 @@
 
 #include "sd-messages.h"
 
-#include "parse-util.h"
 #include "def.h"
 #include "exec-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "log.h"
+#include "parse-util.h"
 #include "sleep-config.h"
 #include "stdio-util.h"
 #include "string-util.h"
 #include "strv.h"
+#include "terminal-util.h"
 #include "util.h"
 
 static char* arg_verb = NULL;
@@ -40,21 +41,27 @@ static int write_hibernate_location_info(void) {
                 return log_debug_errno(r, "Unable to find hibernation location: %m");
 
         /* if it's a swap partition, we just write the disk to /sys/power/resume */
-        if (streq(type, "partition"))
-                return write_string_file("/sys/power/resume", device, 0);
-        else if (!streq(type, "file"))
-                return log_debug_errno(EINVAL, "Invalid hibernate type %s: %m",
-                                       type);
+        if (streq(type, "partition")) {
+                r = write_string_file("/sys/power/resume", device, 0);
+                if (r < 0)
+                        return log_debug_errno(r, "Faileed to write partitoin device to /sys/power/resume: %m");
+
+                return r;
+        }
+        if (!streq(type, "file")) {
+                log_debug("Invalid hibernate type: %s", type);
+                return -EINVAL;
+        }
 
         /* Only available in 4.17+ */
         if (access("/sys/power/resume_offset", F_OK) < 0) {
                 if (errno == ENOENT)
                         return 0;
+
                 return log_debug_errno(errno, "/sys/power/resume_offset unavailable: %m");
         }
 
-        r = access("/sys/power/resume_offset", W_OK);
-        if (r < 0)
+        if (access("/sys/power/resume_offset", W_OK) < 0)
                 return log_debug_errno(errno, "/sys/power/resume_offset not writeable: %m");
 
         fd = open(device, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
@@ -63,26 +70,26 @@ static int write_hibernate_location_info(void) {
         r = fstat(fd, &stb);
         if (r < 0)
                 return log_debug_errno(errno, "Unable to stat %s: %m", device);
+
         r = read_fiemap(fd, &fiemap);
         if (r < 0)
-                return log_debug_errno(r, "Unable to read extent map for '%s': %m",
-                                       device);
+                return log_debug_errno(r, "Unable to read extent map for '%s': %m", device);
         if (fiemap->fm_mapped_extents == 0) {
                 log_debug("No extents found in '%s'", device);
                 return -EINVAL;
         }
+
         offset = fiemap->fm_extents[0].fe_physical / page_size();
         xsprintf(offset_str, "%" PRIu64, offset);
         r = write_string_file("/sys/power/resume_offset", offset_str, 0);
         if (r < 0)
-                return log_debug_errno(r, "Failed to write offset '%s': %m",
-                                       offset_str);
+                return log_debug_errno(r, "Failed to write offset '%s': %m", offset_str);
 
         xsprintf(device_str, "%lx", (unsigned long)stb.st_dev);
         r = write_string_file("/sys/power/resume", device_str, 0);
         if (r < 0)
-                return log_debug_errno(r, "Failed to write device '%s': %m",
-                                       device_str);
+                return log_debug_errno(r, "Failed to write device '%s': %m", device_str);
+
         return 0;
 }
 
@@ -94,12 +101,11 @@ static int write_mode(char **modes) {
                 int k;
 
                 k = write_string_file("/sys/power/disk", *mode, 0);
-                if (k == 0)
+                if (k >= 0)
                         return 0;
 
-                log_debug_errno(k, "Failed to write '%s' to /sys/power/disk: %m",
-                                *mode);
-                if (r == 0)
+                log_debug_errno(k, "Failed to write '%s' to /sys/power/disk: %m", *mode);
+                if (r >= 0)
                         r = k;
         }
 
@@ -114,11 +120,10 @@ static int write_state(FILE **f, char **states) {
                 int k;
 
                 k = write_string_stream(*f, *state, 0);
-                if (k == 0)
+                if (k >= 0)
                         return 0;
-                log_debug_errno(k, "Failed to write '%s' to /sys/power/state: %m",
-                                *state);
-                if (r == 0)
+                log_debug_errno(k, "Failed to write '%s' to /sys/power/state: %m", *state);
+                if (r >= 0)
                         r = k;
 
                 fclose(*f);
@@ -131,7 +136,6 @@ static int write_state(FILE **f, char **states) {
 }
 
 static int execute(char **modes, char **states) {
-
         char *arguments[] = {
                 NULL,
                 (char*) "pre",
@@ -162,7 +166,7 @@ static int execute(char **modes, char **states) {
                         return log_error_errno(r, "Failed to write mode to /sys/power/disk: %m");;
         }
 
-        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL, NULL, arguments);
+        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL, NULL, arguments, NULL);
 
         log_struct(LOG_INFO,
                    "MESSAGE_ID=" SD_MESSAGE_SLEEP_START_STR,
@@ -179,7 +183,7 @@ static int execute(char **modes, char **states) {
                    "SLEEP=%s", arg_verb);
 
         arguments[1] = (char*) "post";
-        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL, NULL, arguments);
+        execute_directories(dirs, DEFAULT_TIMEOUT_USEC, NULL, NULL, arguments, NULL);
 
         return r;
 }
@@ -216,13 +220,11 @@ static int execute_s2h(usec_t hibernate_delay_sec) {
         char time_str[DECIMAL_STR_MAX(uint64_t)];
         int r;
 
-        r = parse_sleep_config("suspend", &suspend_modes, &suspend_states,
-                               NULL);
+        r = parse_sleep_config("suspend", NULL, &suspend_modes, &suspend_states, NULL);
         if (r < 0)
                 return r;
 
-        r = parse_sleep_config("hibernate", &hibernate_modes,
-                               &hibernate_states, NULL);
+        r = parse_sleep_config("hibernate", NULL, &hibernate_modes, &hibernate_states, NULL);
         if (r < 0)
                 return r;
 
@@ -261,18 +263,30 @@ static int execute_s2h(usec_t hibernate_delay_sec) {
         return r;
 }
 
-static void help(void) {
+static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd-suspend.service", "8", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%s COMMAND\n\n"
                "Suspend the system, hibernate the system, or both.\n\n"
-               "Commands:\n"
-               "  -h --help            Show this help and exit\n"
-               "  --version            Print version string and exit\n"
-               "  suspend              Suspend the system\n"
-               "  hibernate            Hibernate the system\n"
-               "  hybrid-sleep         Both hibernate and suspend the system\n"
+               "  -h --help              Show this help and exit\n"
+               "  --version              Print version string and exit\n"
+               "\nCommands:\n"
+               "  suspend                Suspend the system\n"
+               "  hibernate              Hibernate the system\n"
+               "  hybrid-sleep           Both hibernate and suspend the system\n"
                "  suspend-then-hibernate Initially suspend and then hibernate\n"
-               "                       the system after a fixed period of time\n"
-               , program_invocation_short_name);
+               "                         the system after a fixed period of time\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -294,8 +308,7 @@ static int parse_argv(int argc, char *argv[]) {
         while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0)
                 switch(c) {
                 case 'h':
-                        help();
-                        return 0; /* done */
+                        return help();
 
                 case ARG_VERSION:
                         return version();
@@ -315,10 +328,7 @@ static int parse_argv(int argc, char *argv[]) {
 
         arg_verb = argv[optind];
 
-        if (!streq(arg_verb, "suspend") &&
-            !streq(arg_verb, "hibernate") &&
-            !streq(arg_verb, "hybrid-sleep") &&
-            !streq(arg_verb, "suspend-then-hibernate")) {
+        if (!STR_IN_SET(arg_verb, "suspend", "hibernate", "hybrid-sleep", "suspend-then-hibernate")) {
                 log_error("Unknown command '%s'.", arg_verb);
                 return -EINVAL;
         }
@@ -327,6 +337,7 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
+        bool allow;
         _cleanup_strv_free_ char **modes = NULL, **states = NULL;
         usec_t delay = 0;
         int r;
@@ -339,14 +350,20 @@ int main(int argc, char *argv[]) {
         if (r <= 0)
                 goto finish;
 
-        r = parse_sleep_config(arg_verb, &modes, &states, &delay);
+        r = parse_sleep_config(arg_verb, &allow, &modes, &states, &delay);
         if (r < 0)
                 goto finish;
+
+        if (!allow) {
+                log_error("Sleep mode \"%s\" is disabled by configuration, refusing.", arg_verb);
+                return EXIT_FAILURE;
+        }
 
         if (streq(arg_verb, "suspend-then-hibernate"))
                 r = execute_s2h(delay);
         else
                 r = execute(modes, states);
+
 finish:
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

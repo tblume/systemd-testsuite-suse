@@ -23,6 +23,7 @@
 #include "def.h"
 #include "device-nodes.h"
 #include "dirent-util.h"
+#include "env-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
@@ -77,31 +78,6 @@ bool display_is_local(const char *display) {
                 display[1] <= '9';
 }
 
-int socket_from_display(const char *display, char **path) {
-        size_t k;
-        char *f, *c;
-
-        assert(display);
-        assert(path);
-
-        if (!display_is_local(display))
-                return -EINVAL;
-
-        k = strspn(display+1, "0123456789");
-
-        f = new(char, STRLEN("/tmp/.X11-unix/X") + k + 1);
-        if (!f)
-                return -ENOMEM;
-
-        c = stpcpy(f, "/tmp/.X11-unix/X");
-        memcpy(c, display+1, k);
-        c[k] = 0;
-
-        *path = f;
-
-        return 0;
-}
-
 bool kexec_loaded(void) {
        _cleanup_free_ char *s = NULL;
 
@@ -131,6 +107,7 @@ int prot_from_flags(int flags) {
 
 bool in_initrd(void) {
         struct statfs s;
+        int r;
 
         if (saved_in_initrd >= 0)
                 return saved_in_initrd;
@@ -145,9 +122,16 @@ bool in_initrd(void) {
          * emptying when transititioning to the main systemd.
          */
 
-        saved_in_initrd = access("/etc/initrd-release", F_OK) >= 0 &&
-                          statfs("/", &s) >= 0 &&
-                          is_temporary_fs(&s);
+        r = getenv_bool_secure("SYSTEMD_IN_INITRD");
+        if (r < 0 && r != -ENXIO)
+                log_debug_errno(r, "Failed to parse $SYSTEMD_IN_INITRD, ignoring: %m");
+
+        if (r >= 0)
+                saved_in_initrd = r > 0;
+        else
+                saved_in_initrd = access("/etc/initrd-release", F_OK) >= 0 &&
+                                  statfs("/", &s) >= 0 &&
+                                  is_temporary_fs(&s);
 
         return saved_in_initrd;
 }
@@ -158,7 +142,7 @@ void in_initrd_force(bool value) {
 
 /* hey glibc, APIs with callbacks without a user pointer are so useless */
 void *xbsearch_r(const void *key, const void *base, size_t nmemb, size_t size,
-                 int (*compar) (const void *, const void *, void *), void *arg) {
+                 __compar_d_fn_t compar, void *arg) {
         size_t l, u, idx;
         const void *p;
         int comparison;
@@ -254,6 +238,11 @@ int container_get_leader(const char *machine, pid_t *pid) {
 
         assert(machine);
         assert(pid);
+
+        if (streq(machine, ".host")) {
+                *pid = 1;
+                return 0;
+        }
 
         if (!machine_name_is_valid(machine))
                 return -EINVAL;

@@ -95,7 +95,7 @@ static int arg_crash_chvt = -1;
 static bool arg_crash_shell = false;
 static bool arg_crash_reboot = false;
 static char *arg_confirm_spawn = NULL;
-static ShowStatus arg_show_status = _SHOW_STATUS_UNSET;
+static ShowStatus arg_show_status = _SHOW_STATUS_INVALID;
 static bool arg_switched_root = false;
 static bool arg_no_pager = false;
 static bool arg_service_watchdogs = true;
@@ -109,6 +109,7 @@ static usec_t arg_default_start_limit_interval = DEFAULT_START_LIMIT_INTERVAL;
 static unsigned arg_default_start_limit_burst = DEFAULT_START_LIMIT_BURST;
 static usec_t arg_runtime_watchdog = 0;
 static usec_t arg_shutdown_watchdog = 10 * USEC_PER_MINUTE;
+static char *arg_early_core_pattern = NULL;
 static char *arg_watchdog_device = NULL;
 static char **arg_default_environment = NULL;
 static struct rlimit *arg_default_rlimit[_RLIMIT_MAX] = {};
@@ -351,6 +352,16 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 else
                         arg_dump_core = r;
 
+        } else if (proc_cmdline_key_streq(key, "systemd.early_core_pattern")) {
+
+                if (proc_cmdline_value_missing(key, value))
+                        return 0;
+
+                if (path_is_absolute(value))
+                        (void) parse_path_argument_and_warn(value, false, &arg_early_core_pattern);
+                else
+                        log_warning("Specified core pattern '%s' is not an absolute path, ignoring.", value);
+
         } else if (proc_cmdline_key_streq(key, "systemd.crash_chvt")) {
 
                 if (!value)
@@ -466,11 +477,11 @@ static int parse_proc_cmdline_item(const char *key, const char *value, void *dat
                 if (proc_cmdline_value_missing(key, value))
                         return 0;
 
-                parse_path_argument_and_warn(value, false, &arg_watchdog_device);
+                (void) parse_path_argument_and_warn(value, false, &arg_watchdog_device);
 
         } else if (streq(key, "quiet") && !value) {
 
-                if (arg_show_status == _SHOW_STATUS_UNSET)
+                if (arg_show_status == _SHOW_STATUS_INVALID)
                         arg_show_status = SHOW_STATUS_AUTO;
 
         } else if (streq(key, "debug") && !value) {
@@ -604,8 +615,8 @@ static int config_parse_output_restricted(
                 return 0;
         }
 
-        if (IN_SET(t, EXEC_OUTPUT_SOCKET, EXEC_OUTPUT_NAMED_FD, EXEC_OUTPUT_FILE)) {
-                log_syntax(unit, LOG_ERR, filename, line, 0, "Standard output types socket, fd:, file: are not supported as defaults, ignoring: %s", rvalue);
+        if (IN_SET(t, EXEC_OUTPUT_SOCKET, EXEC_OUTPUT_NAMED_FD, EXEC_OUTPUT_FILE, EXEC_OUTPUT_FILE_APPEND)) {
+                log_syntax(unit, LOG_ERR, filename, line, 0, "Standard output types socket, fd:, file:, append: are not supported as defaults, ignoring: %s", rvalue);
                 return 0;
         }
 
@@ -838,19 +849,15 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_LOG_LEVEL:
                         r = log_set_max_level_from_string(optarg);
-                        if (r < 0) {
-                                log_error("Failed to parse log level %s.", optarg);
-                                return r;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse log level \"%s\": %m", optarg);
 
                         break;
 
                 case ARG_LOG_TARGET:
                         r = log_set_target_from_string(optarg);
-                        if (r < 0) {
-                                log_error("Failed to parse log target %s.", optarg);
-                                return r;
-                        }
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse log target \"%s\": %m", optarg);
 
                         break;
 
@@ -858,10 +865,9 @@ static int parse_argv(int argc, char *argv[]) {
 
                         if (optarg) {
                                 r = log_show_color_from_string(optarg);
-                                if (r < 0) {
-                                        log_error("Failed to parse log color setting %s.", optarg);
-                                        return r;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse log color setting \"%s\": %m",
+                                                               optarg);
                         } else
                                 log_show_color(true);
 
@@ -870,10 +876,9 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_LOG_LOCATION:
                         if (optarg) {
                                 r = log_show_location_from_string(optarg);
-                                if (r < 0) {
-                                        log_error("Failed to parse log location setting %s.", optarg);
-                                        return r;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse log location setting \"%s\": %m",
+                                                               optarg);
                         } else
                                 log_show_location(true);
 
@@ -881,26 +886,24 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_DEFAULT_STD_OUTPUT:
                         r = exec_output_from_string(optarg);
-                        if (r < 0) {
-                                log_error("Failed to parse default standard output setting %s.", optarg);
-                                return r;
-                        } else
-                                arg_default_std_output = r;
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse default standard output setting \"%s\": %m",
+                                                       optarg);
+                        arg_default_std_output = r;
                         break;
 
                 case ARG_DEFAULT_STD_ERROR:
                         r = exec_output_from_string(optarg);
-                        if (r < 0) {
-                                log_error("Failed to parse default standard error output setting %s.", optarg);
-                                return r;
-                        } else
-                                arg_default_std_error = r;
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse default standard error output setting \"%s\": %m",
+                                                       optarg);
+                        arg_default_std_error = r;
                         break;
 
                 case ARG_UNIT:
                         r = free_and_strdup(&arg_default_unit, optarg);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to set default unit %s: %m", optarg);
+                                return log_error_errno(r, "Failed to set default unit \"%s\": %m", optarg);
 
                         break;
 
@@ -938,7 +941,8 @@ static int parse_argv(int argc, char *argv[]) {
                         else {
                                 r = parse_boolean(optarg);
                                 if (r < 0)
-                                        return log_error_errno(r, "Failed to parse dump core boolean: %s", optarg);
+                                        return log_error_errno(r, "Failed to parse dump core boolean: \"%s\": %m",
+                                                               optarg);
                                 arg_dump_core = r;
                         }
                         break;
@@ -946,7 +950,8 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_CRASH_CHVT:
                         r = parse_crash_chvt(optarg);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse crash virtual terminal index: %s", optarg);
+                                return log_error_errno(r, "Failed to parse crash virtual terminal index: \"%s\": %m",
+                                                       optarg);
                         break;
 
                 case ARG_CRASH_SHELL:
@@ -955,7 +960,8 @@ static int parse_argv(int argc, char *argv[]) {
                         else {
                                 r = parse_boolean(optarg);
                                 if (r < 0)
-                                        return log_error_errno(r, "Failed to parse crash shell boolean: %s", optarg);
+                                        return log_error_errno(r, "Failed to parse crash shell boolean: \"%s\": %m",
+                                                               optarg);
                                 arg_crash_shell = r;
                         }
                         break;
@@ -966,7 +972,8 @@ static int parse_argv(int argc, char *argv[]) {
                         else {
                                 r = parse_boolean(optarg);
                                 if (r < 0)
-                                        return log_error_errno(r, "Failed to parse crash shell boolean: %s", optarg);
+                                        return log_error_errno(r, "Failed to parse crash shell boolean: \"%s\": %m",
+                                                               optarg);
                                 arg_crash_reboot = r;
                         }
                         break;
@@ -976,23 +983,24 @@ static int parse_argv(int argc, char *argv[]) {
 
                         r = parse_confirm_spawn(optarg, &arg_confirm_spawn);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse confirm spawn option: %m");
+                                return log_error_errno(r, "Failed to parse confirm spawn option: \"%s\": %m",
+                                                       optarg);
                         break;
 
                 case ARG_SERVICE_WATCHDOGS:
                         r = parse_boolean(optarg);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse service watchdogs boolean: %s", optarg);
+                                return log_error_errno(r, "Failed to parse service watchdogs boolean: \"%s\": %m",
+                                                       optarg);
                         arg_service_watchdogs = r;
                         break;
 
                 case ARG_SHOW_STATUS:
                         if (optarg) {
                                 r = parse_show_status(optarg, &arg_show_status);
-                                if (r < 0) {
-                                        log_error("Failed to parse show status boolean %s.", optarg);
-                                        return r;
-                                }
+                                if (r < 0)
+                                        return log_error_errno(r, "Failed to parse show status boolean: \"%s\": %m",
+                                                               optarg);
                         } else
                                 arg_show_status = SHOW_STATUS_YES;
                         break;
@@ -1002,8 +1010,10 @@ static int parse_argv(int argc, char *argv[]) {
                         FILE *f;
 
                         r = safe_atoi(optarg, &fd);
-                        if (r < 0 || fd < 0) {
-                                log_error("Failed to parse deserialize option %s.", optarg);
+                        if (r < 0)
+                                log_error_errno(r, "Failed to parse deserialize option \"%s\": %m", optarg);
+                        if (fd < 0) {
+                                log_error("Invalid deserialize fd: %d", fd);
                                 return -EINVAL;
                         }
 
@@ -1011,7 +1021,7 @@ static int parse_argv(int argc, char *argv[]) {
 
                         f = fdopen(fd, "r");
                         if (!f)
-                                return log_error_errno(errno, "Failed to open serialization fd: %m");
+                                return log_error_errno(errno, "Failed to open serialization fd %d: %m", fd);
 
                         safe_fclose(arg_serialization);
                         arg_serialization = f;
@@ -1026,7 +1036,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_MACHINE_ID:
                         r = set_machine_id(optarg);
                         if (r < 0)
-                                return log_error_errno(r, "MachineID '%s' is not valid.", optarg);
+                                return log_error_errno(r, "MachineID '%s' is not valid: %m", optarg);
                         break;
 
                 case 'h':
@@ -1067,6 +1077,12 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 static int help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("systemd", "1", &link);
+        if (r < 0)
+                return log_oom();
 
         printf("%s [OPTIONS...]\n\n"
                "Starts up and maintains the system or user services.\n\n"
@@ -1090,20 +1106,28 @@ static int help(void) {
                "     --log-color[=BOOL]          Highlight important log messages\n"
                "     --log-location[=BOOL]       Include code location in log messages\n"
                "     --default-standard-output=  Set default standard output for services\n"
-               "     --default-standard-error=   Set default standard error output for services\n",
-               program_invocation_short_name);
+               "     --default-standard-error=   Set default standard error output for services\n"
+               "\nSee the %s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
 
         return 0;
 }
 
-static int prepare_reexecute(Manager *m, FILE **_f, FDSet **_fds, bool switching_root) {
+static int prepare_reexecute(
+                Manager *m,
+                FILE **ret_f,
+                FDSet **ret_fds,
+                bool switching_root) {
+
         _cleanup_fdset_free_ FDSet *fds = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int r;
 
         assert(m);
-        assert(_f);
-        assert(_fds);
+        assert(ret_f);
+        assert(ret_fds);
 
         r = manager_open_serialization(m, &f);
         if (r < 0)
@@ -1132,8 +1156,8 @@ static int prepare_reexecute(Manager *m, FILE **_f, FDSet **_fds, bool switching
         if (r < 0)
                 return log_error_errno(r, "Failed to disable O_CLOEXEC for serialization fds: %m");
 
-        *_f = TAKE_PTR(f);
-        *_fds = TAKE_PTR(fds);
+        *ret_f = TAKE_PTR(f);
+        *ret_fds = TAKE_PTR(fds);
 
         return 0;
 }
@@ -1182,7 +1206,7 @@ static int bump_rlimit_memlock(struct rlimit *saved_rlimit) {
         if (getrlimit(RLIMIT_MEMLOCK, saved_rlimit) < 0)
                 return log_warning_errno(errno, "Reading RLIMIT_MEMLOCK failed, ignoring: %m");
 
-        r = setrlimit_closest(RLIMIT_MEMLOCK, &RLIMIT_MAKE_CONST(1024ULL*1024ULL*16ULL));
+        r = setrlimit_closest(RLIMIT_MEMLOCK, &RLIMIT_MAKE_CONST(1024ULL*1024ULL*64ULL));
         if (r < 0)
                 return log_warning_errno(r, "Setting RLIMIT_MEMLOCK failed, ignoring: %m");
 
@@ -1219,7 +1243,7 @@ static int status_welcome(void) {
         _cleanup_free_ char *pretty_name = NULL, *ansi_color = NULL;
         int r;
 
-        if (arg_show_status <= 0)
+        if (IN_SET(arg_show_status, SHOW_STATUS_NO, SHOW_STATUS_AUTO))
                 return 0;
 
         r = parse_os_release(NULL,
@@ -1474,11 +1498,27 @@ static void initialize_coredump(bool skip_setup) {
         if (setrlimit(RLIMIT_CORE, &RLIMIT_MAKE_CONST(RLIM_INFINITY)) < 0)
                 log_warning_errno(errno, "Failed to set RLIMIT_CORE: %m");
 
-        /* But at the same time, turn off the core_pattern logic by default, so that no coredumps are stored
-         * until the systemd-coredump tool is enabled via sysctl. */
+        /* But at the same time, turn off the core_pattern logic by default, so that no
+         * coredumps are stored until the systemd-coredump tool is enabled via
+         * sysctl. However it can be changed via the kernel command line later so core
+         * dumps can still be generated during early startup and in initramfs. */
         if (!skip_setup)
                 disable_coredumps();
 #endif
+}
+
+static void initialize_core_pattern(bool skip_setup) {
+        int r;
+
+        if (skip_setup || !arg_early_core_pattern)
+                return;
+
+        if (getpid_cached() != 1)
+                return;
+
+        r = write_string_file("/proc/sys/kernel/core_pattern", arg_early_core_pattern, 0);
+        if (r < 0)
+                log_warning_errno(r, "Failed to write '%s' to /proc/sys/kernel/core_pattern, ignoring: %m", arg_early_core_pattern);
 }
 
 static void do_reexecute(
@@ -1633,7 +1673,7 @@ static int invoke_main_loop(
                         return log_emergency_errno(r, "Failed to run main loop: %m");
                 }
 
-                switch (m->exit_code) {
+                switch ((ManagerObjective) r) {
 
                 case MANAGER_RELOAD: {
                         LogTarget saved_log_target;
@@ -1660,7 +1700,8 @@ static int invoke_main_loop(
 
                         r = manager_reload(m);
                         if (r < 0)
-                                log_warning_errno(r, "Failed to reload, ignoring: %m");
+                                /* Reloading failed before the point of no return. Let's continue running as if nothing happened. */
+                                m->objective = MANAGER_OK;
 
                         break;
                 }
@@ -1724,19 +1765,19 @@ static int invoke_main_loop(
                 case MANAGER_POWEROFF:
                 case MANAGER_HALT:
                 case MANAGER_KEXEC: {
-                        static const char * const table[_MANAGER_EXIT_CODE_MAX] = {
-                                [MANAGER_EXIT] = "exit",
-                                [MANAGER_REBOOT] = "reboot",
+                        static const char * const table[_MANAGER_OBJECTIVE_MAX] = {
+                                [MANAGER_EXIT]     = "exit",
+                                [MANAGER_REBOOT]   = "reboot",
                                 [MANAGER_POWEROFF] = "poweroff",
-                                [MANAGER_HALT] = "halt",
-                                [MANAGER_KEXEC] = "kexec"
+                                [MANAGER_HALT]     = "halt",
+                                [MANAGER_KEXEC]    = "kexec",
                         };
 
                         log_notice("Shutting down.");
 
                         *ret_reexecute = false;
                         *ret_retval = m->return_value;
-                        assert_se(*ret_shutdown_verb = table[m->exit_code]);
+                        assert_se(*ret_shutdown_verb = table[m->objective]);
                         *ret_fds = NULL;
                         *ret_switch_root_dir = *ret_switch_root_init = NULL;
 
@@ -1744,7 +1785,7 @@ static int invoke_main_loop(
                 }
 
                 default:
-                        assert_not_reached("Unknown exit code.");
+                        assert_not_reached("Unknown or unexpected manager objective.");
                 }
         }
 }
@@ -1985,7 +2026,7 @@ static int load_configuration(int argc, char **argv, const char **ret_error_mess
         }
 
         /* Initialize the show status setting if it hasn't been set explicitly yet */
-        if (arg_show_status == _SHOW_STATUS_UNSET)
+        if (arg_show_status == _SHOW_STATUS_INVALID)
                 arg_show_status = SHOW_STATUS_YES;
 
         return 0;
@@ -2315,7 +2356,7 @@ int main(int argc, char *argv[]) {
                 skip_setup = true;
 
         if (arg_action == ACTION_HELP) {
-                retval = help();
+                retval = help() < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
                 goto finish;
         } else if (arg_action == ACTION_VERSION) {
                 retval = version();
@@ -2336,6 +2377,9 @@ int main(int argc, char *argv[]) {
         assert_se(chdir("/") == 0);
 
         if (arg_action == ACTION_RUN) {
+
+                /* A core pattern might have been specified via the cmdline.  */
+                initialize_core_pattern(skip_setup);
 
                 /* Close logging fds, in order not to confuse collecting passed fds and terminal logic below */
                 log_close();
@@ -2373,8 +2417,8 @@ int main(int argc, char *argv[]) {
         m->timestamps[MANAGER_TIMESTAMP_KERNEL] = kernel_timestamp;
         m->timestamps[MANAGER_TIMESTAMP_INITRD] = initrd_timestamp;
         m->timestamps[MANAGER_TIMESTAMP_USERSPACE] = userspace_timestamp;
-        m->timestamps[MANAGER_TIMESTAMP_SECURITY_START] = security_start_timestamp;
-        m->timestamps[MANAGER_TIMESTAMP_SECURITY_FINISH] = security_finish_timestamp;
+        m->timestamps[manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_SECURITY_START)] = security_start_timestamp;
+        m->timestamps[manager_timestamp_initrd_mangle(MANAGER_TIMESTAMP_SECURITY_FINISH)] = security_finish_timestamp;
 
         set_manager_defaults(m);
         set_manager_settings(m);
@@ -2387,7 +2431,6 @@ int main(int argc, char *argv[]) {
 
         r = manager_startup(m, arg_serialization, fds);
         if (r < 0) {
-                log_error_errno(r, "Failed to fully start up daemon: %m");
                 error_message = "Failed to start up manager";
                 goto finish;
         }

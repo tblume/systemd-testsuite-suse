@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#include "libudev.h"
 #include "sd-bus.h"
 #include "sd-event.h"
 
@@ -22,6 +23,8 @@ typedef struct Unit Unit;
 
 typedef struct Manager Manager;
 
+/* An externally visible state. We don't actually maintain this as state variable, but derive it from various fields
+ * when requested */
 typedef enum ManagerState {
         MANAGER_INITIALIZING,
         MANAGER_STARTING,
@@ -33,7 +36,7 @@ typedef enum ManagerState {
         _MANAGER_STATE_INVALID = -1
 } ManagerState;
 
-typedef enum ManagerExitCode {
+typedef enum ManagerObjective {
         MANAGER_OK,
         MANAGER_EXIT,
         MANAGER_RELOAD,
@@ -43,15 +46,36 @@ typedef enum ManagerExitCode {
         MANAGER_HALT,
         MANAGER_KEXEC,
         MANAGER_SWITCH_ROOT,
-        _MANAGER_EXIT_CODE_MAX,
-        _MANAGER_EXIT_CODE_INVALID = -1
-} ManagerExitCode;
+        _MANAGER_OBJECTIVE_MAX,
+        _MANAGER_OBJECTIVE_INVALID = -1
+} ManagerObjective;
 
 typedef enum StatusType {
         STATUS_TYPE_EPHEMERAL,
         STATUS_TYPE_NORMAL,
         STATUS_TYPE_EMERGENCY,
 } StatusType;
+
+/* Notes:
+ * 1. TIMESTAMP_FIRMWARE, TIMESTAMP_LOADER, TIMESTAMP_KERNEL, TIMESTAMP_INITRD,
+ *    TIMESTAMP_SECURITY_START, and TIMESTAMP_SECURITY_FINISH are set only when
+ *    the manager is system and not running under container environment.
+ *
+ * 2. The monotonic timestamp of TIMESTAMP_KERNEL is always zero.
+ *
+ * 3. The realtime timestamp of TIMESTAMP_KERNEL will be unset if the system does not
+ *    have RTC.
+ *
+ * 4. TIMESTAMP_FIRMWARE and TIMESTAMP_LOADER will be unset if the system does not
+ *    have RTC, or systemd is built without EFI support.
+ *
+ * 5. The monotonic timestamps of TIMESTAMP_FIRMWARE and TIMESTAMP_LOADER are stored as
+ *    negative of the actual value.
+ *
+ * 6. TIMESTAMP_USERSPACE is the timestamp of when the manager was started.
+ *
+ * 7. TIMESTAMP_INITRD_* are set only when the system is booted with an initrd.
+ */
 
 typedef enum ManagerTimestamp {
         MANAGER_TIMESTAMP_FIRMWARE,
@@ -67,6 +91,13 @@ typedef enum ManagerTimestamp {
         MANAGER_TIMESTAMP_GENERATORS_FINISH,
         MANAGER_TIMESTAMP_UNITS_LOAD_START,
         MANAGER_TIMESTAMP_UNITS_LOAD_FINISH,
+
+        MANAGER_TIMESTAMP_INITRD_SECURITY_START,
+        MANAGER_TIMESTAMP_INITRD_SECURITY_FINISH,
+        MANAGER_TIMESTAMP_INITRD_GENERATORS_START,
+        MANAGER_TIMESTAMP_INITRD_GENERATORS_FINISH,
+        MANAGER_TIMESTAMP_INITRD_UNITS_LOAD_START,
+        MANAGER_TIMESTAMP_INITRD_UNITS_LOAD_FINISH,
         _MANAGER_TIMESTAMP_MAX,
         _MANAGER_TIMESTAMP_INVALID = -1,
 } ManagerTimestamp;
@@ -77,14 +108,15 @@ typedef enum ManagerTimestamp {
 #include "show-status.h"
 #include "unit-name.h"
 
-enum {
-        /* 0 = run normally */
-        MANAGER_TEST_RUN_MINIMAL        = 1 << 1,  /* create basic data structures */
-        MANAGER_TEST_RUN_BASIC          = 1 << 2,  /* interact with the environment */
-        MANAGER_TEST_RUN_ENV_GENERATORS = 1 << 3,  /* also run env generators  */
-        MANAGER_TEST_RUN_GENERATORS     = 1 << 4,  /* also run unit generators */
+typedef enum ManagerTestRunFlags {
+        MANAGER_TEST_NORMAL             = 0,       /* run normally */
+        MANAGER_TEST_RUN_MINIMAL        = 1 << 0,  /* create basic data structures */
+        MANAGER_TEST_RUN_BASIC          = 1 << 1,  /* interact with the environment */
+        MANAGER_TEST_RUN_ENV_GENERATORS = 1 << 2,  /* also run env generators  */
+        MANAGER_TEST_RUN_GENERATORS     = 1 << 3,  /* also run unit generators */
         MANAGER_TEST_FULL = MANAGER_TEST_RUN_BASIC | MANAGER_TEST_RUN_ENV_GENERATORS | MANAGER_TEST_RUN_GENERATORS,
-};
+} ManagerTestRunFlags;
+
 assert_cc((MANAGER_TEST_FULL & UINT8_MAX) == MANAGER_TEST_FULL);
 
 struct Manager {
@@ -129,6 +161,9 @@ struct Manager {
 
         /* Target units whose default target dependencies haven't been set yet */
         LIST_HEAD(Unit, target_deps_queue);
+
+        /* Units that might be subject to StopWhenUnneeded= clean-up */
+        LIST_HEAD(Unit, stop_when_unneeded_queue);
 
         sd_event *event;
 
@@ -183,8 +218,6 @@ struct Manager {
         usec_t shutdown_watchdog;
 
         dual_timestamp timestamps[_MANAGER_TIMESTAMP_MAX];
-
-        struct udev* udev;
 
         /* Data specific to the device subsystem */
         struct udev_monitor* udev_monitor;
@@ -250,9 +283,9 @@ struct Manager {
         usec_t etc_localtime_mtime;
         bool etc_localtime_accessible:1;
 
-        /* Flags */
-        ManagerExitCode exit_code:5;
+        ManagerObjective objective:5;
 
+        /* Flags */
         bool dispatching_load_queue:1;
         bool dispatching_dbus_queue:1;
 
@@ -267,7 +300,7 @@ struct Manager {
         /* Have we ever changed the "kernel.pid_max" sysctl? */
         bool sysctl_pid_max_changed:1;
 
-        unsigned test_run_flags:8;
+        ManagerTestRunFlags test_run_flags:8;
 
         /* If non-zero, exit with the following value when the systemd
          * process terminate. Useful for containers: systemd-nspawn could get
@@ -375,10 +408,12 @@ struct Manager {
 
 #define MANAGER_IS_FINISHED(m) (dual_timestamp_is_set((m)->timestamps + MANAGER_TIMESTAMP_FINISH))
 
-/* The exit code is set to OK as soon as we enter the main loop, and set otherwise as soon as we are done with it */
-#define MANAGER_IS_RUNNING(m) ((m)->exit_code == MANAGER_OK)
+/* The objective is set to OK as soon as we enter the main loop, and set otherwise as soon as we are done with it */
+#define MANAGER_IS_RUNNING(m) ((m)->objective == MANAGER_OK)
 
-int manager_new(UnitFileScope scope, unsigned test_run_flags, Manager **m);
+#define MANAGER_IS_TEST_RUN(m) ((m)->test_run_flags != 0)
+
+int manager_new(UnitFileScope scope, ManagerTestRunFlags test_run_flags, Manager **m);
 Manager* manager_free(Manager *m);
 DEFINE_TRIVIAL_CLEANUP_FUNC(Manager*, manager_free);
 
@@ -479,3 +514,4 @@ void manager_disable_confirm_spawn(void);
 
 const char *manager_timestamp_to_string(ManagerTimestamp m) _const_;
 ManagerTimestamp manager_timestamp_from_string(const char *s) _pure_;
+ManagerTimestamp manager_timestamp_initrd_mangle(ManagerTimestamp s);

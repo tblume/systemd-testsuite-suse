@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
-
 #include "sd-netlink.h"
 
 #include "list.h"
@@ -44,6 +43,7 @@ typedef enum NetDevKind {
         NETDEV_KIND_VXCAN,
         NETDEV_KIND_WIREGUARD,
         NETDEV_KIND_NETDEVSIM,
+        NETDEV_KIND_FOU,
         _NETDEV_KIND_MAX,
         _NETDEV_KIND_INVALID = -1
 } NetDevKind;
@@ -72,7 +72,7 @@ typedef struct Condition Condition;
 typedef struct NetDev {
         Manager *manager;
 
-        int n_ref;
+        unsigned n_ref;
 
         char *filename;
 

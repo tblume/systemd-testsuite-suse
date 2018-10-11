@@ -6,7 +6,8 @@ test_hashmap_ordered_c = custom_target(
         input : [awkscript, 'test-hashmap-plain.c'],
         output : 'test-hashmap-ordered.c',
         command : [awk, '-f', '@INPUT0@', '@INPUT1@'],
-        capture : true)
+        capture : true,
+        build_by_default : want_tests != 'false')
 
 test_include_dir = include_directories('.')
 
@@ -26,14 +27,16 @@ test_libsystemd_sym_c = custom_target(
         input : [libsystemd_sym_path] + systemd_headers,
         output : 'test-libsystemd-sym.c',
         command : [generate_sym_test_py, libsystemd_sym_path] + systemd_headers,
-        capture : true)
+        capture : true,
+        build_by_default : want_tests != 'false')
 
 test_libudev_sym_c = custom_target(
         'test-libudev-sym.c',
         input : [libudev_sym_path, libudev_h_path],
         output : 'test-libudev-sym.c',
         command : [generate_sym_test_py, '@INPUT0@', '@INPUT1@'],
-        capture : true)
+        capture : true,
+        build_by_default : want_tests != 'false')
 
 test_dlopen_c = files('test-dlopen.c')
 
@@ -185,6 +188,10 @@ tests += [
          []],
 
         [['src/test/test-util.c'],
+         [],
+         []],
+
+        [['src/test/test-json.c'],
          [],
          []],
 
@@ -627,7 +634,19 @@ tests += [
           libblkid,
           libkmod,
           libacl],
-         '', 'manual'],
+         '', 'manual', '-DLOG_REALM=LOG_REALM_UDEV'],
+
+        [['src/test/test-udev-build-argv.c'],
+         [libudev_core,
+          libudev_static,
+          libsystemd_network,
+          libshared],
+         [threads,
+          librt,
+          libblkid,
+          libkmod,
+          libacl],
+         '', '', '-DLOG_REALM=LOG_REALM_UDEV'],
 
         [['src/test/test-id128.c'],
          [],
@@ -645,7 +664,7 @@ tests += [
         [['src/test/test-nss.c'],
          [],
          [libdl],
-         '', 'manual'],
+         'ENABLE_NSS', 'manual'],
 
         [['src/test/test-umount.c',
           'src/core/mount-setup.c',
@@ -656,6 +675,10 @@ tests += [
          [libmount]],
 
         [['src/test/test-bus-util.c'],
+         [],
+         []],
+
+        [['src/test/test-sd-hwdb.c'],
          [],
          []],
 ]
@@ -756,8 +779,7 @@ tests += [
           libshared],
          [threads,
           libxz,
-          liblz4],
-         '', '', '-DCATALOG_DIR="@0@"'.format(build_catalog_dir)],
+          liblz4]],
 
         [['src/journal/test-compress.c'],
          [libjournal_core,
@@ -782,6 +804,10 @@ tests += [
 ############################################################
 
 tests += [
+        [['src/libsystemd/sd-bus/test-bus-address.c'],
+         [],
+         [threads]],
+
         [['src/libsystemd/sd-bus/test-bus-marshal.c'],
          [],
          [threads,
@@ -868,6 +894,10 @@ tests += [
          [threads]],
 
         [['src/libsystemd/sd-login/test-login.c'],
+         [],
+         []],
+
+        [['src/libsystemd/sd-device/test-sd-device.c'],
          [],
          []],
 ]

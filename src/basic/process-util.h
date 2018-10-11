@@ -108,7 +108,7 @@ static inline void* PID_TO_PTR(pid_t pid) {
 
 void valgrind_summary_hack(void);
 
-int pid_compare_func(const void *a, const void *b);
+int pid_compare_func(const pid_t *a, const pid_t *b);
 
 static inline bool nice_is_valid(int n) {
         return n >= PRIO_MIN && n < PRIO_MAX;
@@ -132,13 +132,6 @@ static inline bool ioprio_priority_is_valid(int i) {
 
 static inline bool pid_is_valid(pid_t p) {
         return p > 0;
-}
-
-static inline int sched_policy_to_string_alloc_with_check(int n, char **s) {
-        if (!sched_policy_is_valid(n))
-                return -EINVAL;
-
-        return sched_policy_to_string_alloc(n, s);
 }
 
 int ioprio_parse_priority(const char *s, int *ret);

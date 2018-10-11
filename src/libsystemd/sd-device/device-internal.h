@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
+#include "sd-device.h"
 
 #include "hashmap.h"
 #include "set.h"
 
 struct sd_device {
-        uint64_t n_ref;
+        unsigned n_ref;
 
         sd_device *parent;
         bool parent_set; /* no need to try to reload parent */

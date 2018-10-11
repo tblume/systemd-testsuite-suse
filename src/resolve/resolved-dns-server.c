@@ -81,8 +81,7 @@ int dns_server_new(
         s->linked = true;
 
 #if ENABLE_DNS_OVER_TLS
-        /* Do not verify cerificate */
-        gnutls_certificate_allocate_credentials(&s->tls_cert_cred);
+        dnstls_server_init(s);
 #endif
 
         /* A new DNS server that isn't fallback is added and the one
@@ -99,39 +98,20 @@ int dns_server_new(
         return 0;
 }
 
-DnsServer* dns_server_ref(DnsServer *s)  {
-        if (!s)
-                return NULL;
-
-        assert(s->n_ref > 0);
-        s->n_ref++;
-
-        return s;
-}
-
-DnsServer* dns_server_unref(DnsServer *s)  {
-        if (!s)
-                return NULL;
-
-        assert(s->n_ref > 0);
-        s->n_ref--;
-
-        if (s->n_ref > 0)
-                return NULL;
+static DnsServer* dns_server_free(DnsServer *s)  {
+        assert(s);
 
         dns_stream_unref(s->stream);
 
 #if ENABLE_DNS_OVER_TLS
-        if (s->tls_cert_cred)
-                gnutls_certificate_free_credentials(s->tls_cert_cred);
-
-        if (s->tls_session_data.data)
-                gnutls_free(s->tls_session_data.data);
+        dnstls_server_free(s);
 #endif
 
         free(s->server_string);
         return mfree(s);
 }
+
+DEFINE_TRIVIAL_REF_UNREF_FUNC(DnsServer, dns_server, dns_server_free);
 
 void dns_server_unlink(DnsServer *s) {
         assert(s);
@@ -164,6 +144,8 @@ void dns_server_unlink(DnsServer *s) {
                 LIST_REMOVE(servers, s->manager->fallback_dns_servers, s);
                 s->manager->n_dns_servers--;
                 break;
+        default:
+                assert_not_reached("Unknown server type");
         }
 
         s->linked = false;
@@ -627,19 +609,17 @@ static int dns_server_compare_func(const void *a, const void *b) {
         const DnsServer *x = a, *y = b;
         int r;
 
-        if (x->family < y->family)
-                return -1;
-        if (x->family > y->family)
-                return 1;
+        r = CMP(x->family, y->family);
+        if (r != 0)
+                return r;
 
         r = memcmp(&x->address, &y->address, FAMILY_ADDRESS_SIZE(x->family));
         if (r != 0)
                 return r;
 
-        if (x->ifindex < y->ifindex)
-                return -1;
-        if (x->ifindex > y->ifindex)
-                return 1;
+        r = CMP(x->ifindex, y->ifindex);
+        if (r != 0)
+                return r;
 
         return 0;
 }

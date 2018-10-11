@@ -14,8 +14,16 @@
 #include "resolved-def.h"
 #include "string-util.h"
 #include "strv.h"
+#include "terminal-util.h"
 
-static void resolvconf_help(void) {
+static int resolvconf_help(void) {
+        _cleanup_free_ char *link = NULL;
+        int r;
+
+        r = terminal_urlify_man("resolvectl", "1", &link);
+        if (r < 0)
+                return log_oom();
+
         printf("%1$s -a INTERFACE < FILE\n"
                "%1$s -d INTERFACE\n"
                "\n"
@@ -34,7 +42,12 @@ static void resolvconf_help(void) {
                "implementations are not supported and will cause the invocation to fail: -u,\n"
                "-I, -i, -l, -R, -r, -v, -V, --enable-updates, --disable-updates,\n"
                "--updates-are-enabled.\n"
-               , program_invocation_short_name);
+               "\nSee the %2$s for details.\n"
+               , program_invocation_short_name
+               , link
+        );
+
+        return 0;
 }
 
 static int parse_nameserver(const char *string) {
@@ -53,6 +66,8 @@ static int parse_nameserver(const char *string) {
 
                 if (strv_push(&arg_set_dns, word) < 0)
                         return log_oom();
+
+                word = NULL;
         }
 
         return 0;
@@ -107,7 +122,6 @@ int resolvconf_parse_argv(int argc, char *argv[]) {
                 TYPE_EXCLUSIVE, /* -x */
         } type = TYPE_REGULAR;
 
-        const char *dot, *iface;
         int c, r;
 
         assert(argc >= 0);
@@ -125,8 +139,7 @@ int resolvconf_parse_argv(int argc, char *argv[]) {
                 switch(c) {
 
                 case 'h':
-                        resolvconf_help();
-                        return 0; /* done */;
+                        return resolvconf_help();
 
                 case ARG_VERSION:
                         return version();
@@ -200,30 +213,11 @@ int resolvconf_parse_argv(int argc, char *argv[]) {
                 return -EINVAL;
         }
 
-        dot = strchr(argv[optind], '.');
-        if (dot) {
-                iface = strndupa(argv[optind], dot - argv[optind]);
-                log_debug("Ignoring protocol specifier '%s'.", dot + 1);
-        } else
-                iface = argv[optind];
+        r = ifname_mangle(argv[optind], false);
+        if (r <= 0)
+                return r;
+
         optind++;
-
-        if (parse_ifindex(iface, &arg_ifindex) < 0) {
-                int ifi;
-
-                ifi = if_nametoindex(iface);
-                if (ifi <= 0) {
-                        if (errno == ENODEV && arg_ifindex_permissive) {
-                                log_debug("Interface '%s' not found, but -f specified, ignoring.", iface);
-                                return 0; /* done */
-                        }
-
-                        return log_error_errno(errno, "Unknown interface '%s': %m", iface);
-                }
-
-                arg_ifindex = ifi;
-                arg_ifname = iface;
-        }
 
         if (arg_mode == MODE_SET_LINK) {
                 unsigned n = 0;

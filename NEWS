@@ -1,5 +1,32 @@
 systemd System and Service Manager
 
+CHANGES WITH 240 in spe:
+
+        * A new service type has been added: Type=exec. It's very similar to
+          Type=simple and ensures the service manager will wait for both fork()
+          and execve() of the main service binary to complete before proceeding
+          with follow-up units. This is primarily useful so that the manager
+          propagates any errors in the preparation phase of service execution
+          back to the job that requested the unit to be started. For example,
+          consider a service that has ExecStart= set to a file system binary
+          that doesn't exist. With Type=simple starting the unit would
+          typically succeed instantly, as only fork() has to complete
+          successfully and execve() is not waited for, and hence its failure is
+          seen "too late". With the new Type=exec service type starting the
+          unit will fail, as the execve() will be waited for and will fail,
+          which is then propagated back to the start job.
+
+          NOTE: with the next release 241 of systemd we intend to change the
+          systemd-run tool to default to Type=exec for transient services
+          started by it. This should be mostly safe, but in specific corner
+          cases might result in problems, as the systemd-run tool will then
+          block on NSS calls (such as user name lookups due to User=) done
+          between the fork() and execve(), which under specific circumstances
+          might cause problems. It is recommended to specify "-p Type=simple"
+          explicitly in the few cases where this applies. For regular,
+          non-transient services (i.e. those defined with unit files on disk)
+          we will continue to default to Type=simple.
+
 CHANGES WITH 239:
 
         * NETWORK INTERFACE DEVICE NAMING CHANGES: systemd-udevd's "net_id"
@@ -82,7 +109,28 @@ CHANGES WITH 239:
 
         * systemd-resolved.service and systemd-networkd.service now set
           DynamicUser=yes. The users systemd-resolve and systemd-network are
-          not created by systemd-sysusers.
+          not created by systemd-sysusers anymore.
+
+          NOTE: This has a chance of breaking nss-ldap and similar NSS modules
+          that embedd a network facing module into any process using getpwuid()
+          or related call: the dynamic allocation of the user ID for
+          systemd-resolved.service means the service manager has to check NSS
+          if the user name is already taken when forking off the service. Since
+          the user in the common case won't be defined in /etc/passwd the
+          lookup is likely to trigger nss-ldap which in turn might use NSS to
+          ask systemd-resolved for hostname lookups. This will hence result in
+          a deadlock: a user name lookup in order to start
+          systemd-resolved.service will result in a host name lookup for which
+          systemd-resolved.service needs to be started already. There are
+          multiple ways to work around this problem: pre-allocate the
+          "systemd-resolve" user on such systems, so that nss-ldap won't be
+          triggered; or use a different NSS package that doesn't do networking
+          in-process but provides a local asynchronous name cache; or configure
+          the NSS package to avoid lookups for UIDs in the range `pkg-config
+          systemd --variable=dynamicuidmin` … `pkg-config systemd
+          --variable=dynamicuidmax`, so that it does not consider itself
+          authoritative for the same UID range systemd allocates dynamic users
+          from.
 
         * The systemd-resolve tool has been renamed to resolvectl (it also
           remains available under the old name, for compatibility), and its
@@ -300,13 +348,13 @@ CHANGES WITH 239:
         * New documentation has been added to document cgroups delegation,
           portable services and the various code quality tools we have set up:
 
-          https://github.com/systemd/systemd/blob/master/doc/CGROUP_DELEGATION.md
-          https://github.com/systemd/systemd/blob/master/doc/PORTABLE_SERVICES.md
-          https://github.com/systemd/systemd/blob/master/doc/CODE_QUALITY.md
+          https://github.com/systemd/systemd/blob/master/docs/CGROUP_DELEGATION.md
+          https://github.com/systemd/systemd/blob/master/docs/PORTABLE_SERVICES.md
+          https://github.com/systemd/systemd/blob/master/docs/CODE_QUALITY.md
 
         * The Boot Loader Specification has been added to the source tree.
 
-          https://github.com/systemd/systemd/blob/master/doc/BOOT_LOADER_SPECIFICATION.md
+          https://github.com/systemd/systemd/blob/master/docs/BOOT_LOADER_SPECIFICATION.md
 
           While moving it into our source tree we have updated it and further
           changes are now accepted through the usual github PR workflow.
@@ -546,10 +594,9 @@ CHANGES WITH 237:
           different from what the documentation said, and not particularly
           useful, as repeated systemd-tmpfiles invocations would not be
           idempotent and grow such files without bounds. With this release
-          behaviour has been altered slightly, to match what the documentation
-          says: lines of this type only have an effect if the indicated files
-          don't exist yet, and only then the argument string is written to the
-          file.
+          behaviour has been altered to match what the documentation says:
+          lines of this type only have an effect if the indicated files don't
+          exist yet, and only then the argument string is written to the file.
 
         * FUTURE INCOMPATIBILITY: In systemd v238 we intend to slightly change
           systemd-tmpfiles behaviour: previously, read-only files owned by root
@@ -1622,7 +1669,7 @@ CHANGES WITH 233:
         * Documentation has been added that lists all of systemd's low-level
           environment variables:
 
-          https://github.com/systemd/systemd/blob/master/doc/ENVIRONMENT.md
+          https://github.com/systemd/systemd/blob/master/docs/ENVIRONMENT.md
 
         * sd-daemon gained a new API sd_is_socket_sockaddr() for determining
           whether a specific socket file descriptor matches a specified socket
@@ -3327,11 +3374,10 @@ CHANGES WITH 226:
           correct dequeuing of real-time signals, without losing
           signal events.
 
-        * When systemd requests a PolicyKit decision when managing
-          units it will now add additional fields to the request,
-          including unit name and desired operation. This enables more
-          powerful PolicyKit policies, that make decisions depending
-          on these parameters.
+        * When systemd requests a polkit decision when managing units it
+          will now add additional fields to the request, including unit
+          name and desired operation. This enables more powerful polkit
+          policies, that make decisions depending on these parameters.
 
         * nspawn learnt support for .nspawn settings files, that may
           accompany the image files or directories of containers, and
@@ -3366,13 +3412,12 @@ CHANGES WITH 225:
           options and allows other programs to query the values.
 
         * SELinux access control when enabling/disabling units is no
-          longer enforced with this release. The previous
-          implementation was incorrect, and a new corrected
-          implementation is not yet available. As unit file operations
-          are still protected via PolicyKit and D-Bus policy this is
-          not a security problem. Yet, distributions which care about
-          optimal SELinux support should probably not stabilize on
-          this release.
+          longer enforced with this release. The previous implementation
+          was incorrect, and a new corrected implementation is not yet
+          available. As unit file operations are still protected via
+          polkit and D-Bus policy this is not a security problem. Yet,
+          distributions which care about optimal SELinux support should
+          probably not stabilize on this release.
 
         * sd-bus gained support for matches of type "arg0has=", that
           test for membership of strings in string arrays sent in bus
@@ -3744,11 +3789,10 @@ CHANGES WITH 220:
         * systemd-importd gained support for verifying downloaded
           images with gpg2 (previously only gpg1 was supported).
 
-        * systemd-machined, systemd-logind, systemd: most bus calls
-          are now accessible to unprivileged processes via
-          PolicyKit. Also, systemd-logind will now allow users to kill
-          their own sessions without further privileges or
-          authorization.
+        * systemd-machined, systemd-logind, systemd: most bus calls are
+          now accessible to unprivileged processes via polkit. Also,
+          systemd-logind will now allow users to kill their own sessions
+          without further privileges or authorization.
 
         * systemd-shutdownd has been removed. This service was
           previously responsible for implementing scheduled shutdowns
@@ -4530,11 +4574,11 @@ CHANGES WITH 217:
           directly from now on, again.
 
         * Support for the new ALLOW_INTERACTIVE_AUTHORIZATION D-Bus
-          message flag has been added for all of systemd's PolicyKit
-          authenticated method calls has been added. In particular
-          this now allows optional interactive authorization via
-          PolicyKit for many of PID1's privileged operations such as
-          unit file enabling and disabling.
+          message flag has been added for all of systemd's polkit
+          authenticated method calls has been added. In particular this
+          now allows optional interactive authorization via polkit for
+          many of PID1's privileged operations such as unit file
+          enabling and disabling.
 
         * "udevadm hwdb --update" learnt a new switch "--usr" for
           placing the rebuilt hardware database in /usr instead of
@@ -4613,11 +4657,11 @@ CHANGES WITH 216:
           well as the user/group databases, which should enhance
           compatibility with certain tools like grpck.
 
-        * A number of bus APIs of PID 1 now optionally consult
-          PolicyKit to permit access for otherwise unprivileged
-          clients under certain conditions. Note that this currently
-          doesn't support interactive authentication yet, but this is
-          expected to be added eventually, too.
+        * A number of bus APIs of PID 1 now optionally consult polkit to
+          permit access for otherwise unprivileged clients under certain
+          conditions. Note that this currently doesn't support
+          interactive authentication yet, but this is expected to be
+          added eventually, too.
 
         * /etc/machine-info now has new fields for configuring the
           deployment environment of the machine, as well as the
@@ -7090,8 +7134,8 @@ CHANGES WITH 198:
           the rest of the package. It also has been updated to work
           correctly in initrds.
 
-        * Policykit previously has been runtime optional, and is now
-          also compile time optional via a configure switch.
+        * polkit previously has been runtime optional, and is now also
+          compile time optional via a configure switch.
 
         * systemd-analyze has been reimplemented in C. Also "systemctl
           dot" has moved into systemd-analyze.
@@ -7259,9 +7303,9 @@ CHANGES WITH 197:
           user/vendor or is automatically determined from ACPI and DMI
           information if possible.
 
-        * A number of PolicyKit actions are now bound together with
-          "imply" rules. This should simplify creating UIs because
-          many actions will now authenticate similar ones as well.
+        * A number of polkit actions are now bound together with "imply"
+          rules. This should simplify creating UIs because many actions
+          will now authenticate similar ones as well.
 
         * Unit files learnt a new condition ConditionACPower= which
           may be used to conditionalize a unit depending on whether an
@@ -7400,14 +7444,13 @@ CHANGES WITH 196:
           to maintain the necessary patches downstream, or find a
           different solution. (Talk to us if you have questions!)
 
-        * Various systemd components will now bypass PolicyKit checks
-          for root and otherwise handle properly if PolicyKit is not
-          found to be around. This should fix most issues for
-          PolicyKit-less systems. Quite frankly this should have been
-          this way since day one. It is absolutely our intention to
-          make systemd work fine on PolicyKit-less systems, and we
-          consider it a bug if something does not work as it should if
-          PolicyKit is not around.
+        * Various systemd components will now bypass polkit checks for
+          root and otherwise handle properly if polkit is not found to
+          be around. This should fix most issues for polkit-less
+          systems. Quite frankly this should have been this way since
+          day one. It is absolutely our intention to make systemd work
+          fine on polkit-less systems, and we consider it a bug if
+          something does not work as it should if polkit is not around.
 
         * For embedded systems it is now possible to build udev and
           systemd without blkid and/or kmod support.

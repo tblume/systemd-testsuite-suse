@@ -15,7 +15,6 @@
 #include <linux/neighbour.h>
 #include <linux/oom.h>
 #include <linux/rtnetlink.h>
-#include <linux/stat.h>
 #include <net/ethernet.h>
 #include <stdlib.h>
 #include <sys/resource.h>
@@ -24,6 +23,10 @@
 #include <sys/syscall.h>
 #include <uchar.h>
 #include <unistd.h>
+
+#if WANT_LINUX_STAT_H
+#include <linux/stat.h>
+#endif
 
 #if HAVE_AUDIT
 #include <libaudit.h>
@@ -1180,9 +1183,7 @@ struct input_mask {
 #define KEY_ALS_TOGGLE 0x230
 #endif
 
-#if ! HAVE_KEY_SERIAL_T
 typedef int32_t key_serial_t;
-#endif
 
 #ifndef KEYCTL_JOIN_SESSION_KEYRING
 #define KEYCTL_JOIN_SESSION_KEYRING 1
@@ -1406,6 +1407,45 @@ struct statx {
  * name nor any other. */
 #ifndef TASK_COMM_LEN
 #define TASK_COMM_LEN 16
+#endif
+
+#ifndef FOU_GENL_NAME
+#define FOU_GENL_NAME           "fou"
+#endif
+
+#ifndef FOU_GENL_VERSION
+#define FOU_GENL_VERSION        0x1
+#endif
+
+#if !HAVE_FOU_ATTR_REMCSUM_NOPARTIAL
+#define FOU_ATTR_UNSPEC 0
+#define FOU_ATTR_PORT 1
+#define FOU_ATTR_AF 2
+#define FOU_ATTR_IPPROTO 3
+#define FOU_ATTR_TYPE 4
+#define FOU_ATTR_REMCSUM_NOPARTIAL 5
+#define __FOU_ATTR_MAX 6
+
+#define FOU_ATTR_MAX (__FOU_ATTR_MAX - 1)
+#endif
+
+#if !HAVE_FOU_CMD_GET
+#define FOU_CMD_UNSPEC 0
+#define FOU_CMD_ADD 1
+#define FOU_CMD_DEL 2
+#define FOU_CMD_GET 3
+#define __FOU_CMD_MAX 4
+
+#define FOU_CMD_MAX (__FOU_CMD_MAX - 1)
+#endif
+
+#if !HAVE_FOU_ENCAP_GUE
+#define FOU_ENCAP_UNSPEC 0
+#define FOU_ENCAP_DIRECT 1
+#define FOU_ENCAP_GUE 2
+#define __FOU_ENCAP_MAX 3
+
+#define FOU_ENCAP_MAX (__FOU_ENCAP_MAX - 1)
 #endif
 
 #include "missing_syscall.h"

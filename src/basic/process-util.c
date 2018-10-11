@@ -336,15 +336,33 @@ int rename_process(const char name[]) {
 
                 /* Now, let's tell the kernel about this new memory */
                 if (prctl(PR_SET_MM, PR_SET_MM_ARG_START, (unsigned long) nn, 0, 0) < 0) {
-                        log_debug_errno(errno, "PR_SET_MM_ARG_START failed, proceeding without: %m");
-                        (void) munmap(nn, nn_size);
-                        goto use_saved_argv;
-                }
+                        /* HACK: prctl() API is kind of dumb on this point.  The existing end address may already be
+                         * below the desired start address, in which case the kernel may have kicked this back due
+                         * to a range-check failure (see linux/kernel/sys.c:validate_prctl_map() to see this in
+                         * action).  The proper solution would be to have a prctl() API that could set both start+end
+                         * simultaneously, or at least let us query the existing address to anticipate this condition
+                         * and respond accordingly.  For now, we can only guess at the cause of this failure and try
+                         * a workaround--which will briefly expand the arg space to something potentially huge before
+                         * resizing it to what we want. */
+                        log_debug_errno(errno, "PR_SET_MM_ARG_START failed, attempting PR_SET_MM_ARG_END hack: %m");
 
-                /* And update the end pointer to the new end, too. If this fails, we don't really know what to do, it's
-                 * pretty unlikely that we can rollback, hence we'll just accept the failure, and continue. */
-                if (prctl(PR_SET_MM, PR_SET_MM_ARG_END, (unsigned long) nn + l + 1, 0, 0) < 0)
-                        log_debug_errno(errno, "PR_SET_MM_ARG_END failed, proceeding without: %m");
+                        if (prctl(PR_SET_MM, PR_SET_MM_ARG_END, (unsigned long) nn + l + 1, 0, 0) < 0) {
+                                log_debug_errno(errno, "PR_SET_MM_ARG_END hack failed, proceeding without: %m");
+                                (void) munmap(nn, nn_size);
+                                goto use_saved_argv;
+                        }
+
+                        if (prctl(PR_SET_MM, PR_SET_MM_ARG_START, (unsigned long) nn, 0, 0) < 0) {
+                                log_debug_errno(errno, "PR_SET_MM_ARG_START still failed, proceeding without: %m");
+                                goto use_saved_argv;
+                        }
+                } else {
+                        /* And update the end pointer to the new end, too. If this fails, we don't really know what
+                         * to do, it's pretty unlikely that we can rollback, hence we'll just accept the failure,
+                         * and continue. */
+                        if (prctl(PR_SET_MM, PR_SET_MM_ARG_END, (unsigned long) nn + l + 1, 0, 0) < 0)
+                                log_debug_errno(errno, "PR_SET_MM_ARG_END failed, proceeding without: %m");
+                }
 
                 if (mm)
                         (void) munmap(mm, mm_size);
@@ -425,7 +443,7 @@ int is_kernel_thread(pid_t pid) {
                 q += l;
         }
 
-        /* Skip preceeding whitespace */
+        /* Skip preceding whitespace */
         l = strspn(q, WHITESPACE);
         if (l < 1)
                 return -EINVAL;
@@ -1104,16 +1122,9 @@ void valgrind_summary_hack(void) {
 #endif
 }
 
-int pid_compare_func(const void *a, const void *b) {
-        const pid_t *p = a, *q = b;
-
+int pid_compare_func(const pid_t *a, const pid_t *b) {
         /* Suitable for usage in qsort() */
-
-        if (*p < *q)
-                return -1;
-        if (*p > *q)
-                return 1;
-        return 0;
+        return CMP(*a, *b);
 }
 
 int ioprio_parse_priority(const char *s, int *ret) {
@@ -1153,7 +1164,7 @@ void reset_cached_pid(void) {
 /* We use glibc __register_atfork() + __dso_handle directly here, as they are not included in the glibc
  * headers. __register_atfork() is mostly equivalent to pthread_atfork(), but doesn't require us to link against
  * libpthread, as it is part of glibc anyway. */
-extern int __register_atfork(void (*prepare) (void), void (*parent) (void), void (*child) (void), void * __dso_handle);
+extern int __register_atfork(void (*prepare) (void), void (*parent) (void), void (*child) (void), void *dso_handle);
 extern void* __dso_handle __attribute__ ((__weak__));
 
 pid_t getpid_cached(void) {

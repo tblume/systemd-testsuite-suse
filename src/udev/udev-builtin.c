@@ -29,7 +29,7 @@ static const struct udev_builtin *builtins[] = {
 #endif
 };
 
-void udev_builtin_init(struct udev *udev) {
+void udev_builtin_init(void) {
         unsigned int i;
 
         if (initialized)
@@ -37,12 +37,12 @@ void udev_builtin_init(struct udev *udev) {
 
         for (i = 0; i < ELEMENTSOF(builtins); i++)
                 if (builtins[i] && builtins[i]->init)
-                        builtins[i]->init(udev);
+                        builtins[i]->init();
 
         initialized = true;
 }
 
-void udev_builtin_exit(struct udev *udev) {
+void udev_builtin_exit(void) {
         unsigned int i;
 
         if (!initialized)
@@ -50,21 +50,21 @@ void udev_builtin_exit(struct udev *udev) {
 
         for (i = 0; i < ELEMENTSOF(builtins); i++)
                 if (builtins[i] && builtins[i]->exit)
-                        builtins[i]->exit(udev);
+                        builtins[i]->exit();
 
         initialized = false;
 }
 
-bool udev_builtin_validate(struct udev *udev) {
+bool udev_builtin_validate(void) {
         unsigned int i;
 
         for (i = 0; i < ELEMENTSOF(builtins); i++)
-                if (builtins[i] && builtins[i]->validate && builtins[i]->validate(udev))
+                if (builtins[i] && builtins[i]->validate && builtins[i]->validate())
                         return true;
         return false;
 }
 
-void udev_builtin_list(struct udev *udev) {
+void udev_builtin_list(void) {
         unsigned int i;
 
         for (i = 0; i < ELEMENTSOF(builtins); i++)
@@ -102,18 +102,18 @@ enum udev_builtin_cmd udev_builtin_lookup(const char *command) {
 }
 
 int udev_builtin_run(struct udev_device *dev, enum udev_builtin_cmd cmd, const char *command, bool test) {
-        char arg[UTIL_PATH_SIZE];
-        int argc;
-        char *argv[128];
+        _cleanup_strv_free_ char **argv = NULL;
 
         if (!builtins[cmd])
                 return -EOPNOTSUPP;
 
+        argv = strv_split_full(command, NULL, SPLIT_QUOTES | SPLIT_RELAX);
+        if (!argv)
+                return -ENOMEM;
+
         /* we need '0' here to reset the internal state */
         optind = 0;
-        strscpy(arg, sizeof(arg), command);
-        udev_build_argv(udev_device_get_udev(dev), arg, &argc, argv);
-        return builtins[cmd]->cmd(dev, argc, argv, test);
+        return builtins[cmd]->cmd(dev, strv_length(argv), argv, test);
 }
 
 int udev_builtin_add_property(struct udev_device *dev, bool test, const char *key, const char *val) {

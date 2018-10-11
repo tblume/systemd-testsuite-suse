@@ -391,15 +391,10 @@ static int user_stop_slice(User *u) {
         assert(u);
 
         r = manager_stop_unit(u->manager, u->slice, &error, &job);
-        if (r < 0) {
-                log_error("Failed to stop user slice: %s", bus_error_message(&error, r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to stop user slice: %s", bus_error_message(&error, r));
 
-        free(u->slice_job);
-        u->slice_job = job;
-
-        return r;
+        return free_and_replace(u->slice_job, job);
 }
 
 static int user_stop_service(User *u) {
@@ -410,13 +405,10 @@ static int user_stop_service(User *u) {
         assert(u);
 
         r = manager_stop_unit(u->manager, u->service, &error, &job);
-        if (r < 0) {
-                log_error("Failed to stop user service: %s", bus_error_message(&error, r));
-                return r;
-        }
+        if (r < 0)
+                return log_error_errno(r, "Failed to stop user service: %s", bus_error_message(&error, r));
 
-        free_and_replace(u->service_job, job);
-        return r;
+        return free_and_replace(u->service_job, job);
 }
 
 int user_stop(User *u, bool force) {
@@ -711,17 +703,19 @@ int config_parse_tmpfs_size(
         assert(data);
 
         /* First, try to parse as percentage */
-        r = parse_percent(rvalue);
-        if (r > 0 && r < 100)
-                *sz = physical_memory_scale(r, 100U);
+        r = parse_permille(rvalue);
+        if (r > 0 && r < 1000)
+                *sz = physical_memory_scale(r, 1000U);
         else {
                 uint64_t k;
 
                 /* If the passed argument was not a percentage, or out of range, parse as byte size */
 
                 r = parse_size(rvalue, 1024, &k);
-                if (r < 0 || k <= 0 || (uint64_t) (size_t) k != k) {
-                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse size value, ignoring: %s", rvalue);
+                if (r >= 0 && (k <= 0 || (uint64_t) (size_t) k != k))
+                        r = -ERANGE;
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, r, "Failed to parse size value '%s', ignoring: %m", rvalue);
                         return 0;
                 }
 
@@ -751,7 +745,7 @@ int config_parse_compat_user_tasks_max(
         log_syntax(unit, LOG_NOTICE, filename, line, 0,
                    "Support for option %s= has been removed.",
                    lvalue);
-        log_info("Hint: try creating /etc/systemd/system/user-.slice/50-limits.conf with:\n"
+        log_info("Hint: try creating /etc/systemd/system/user-.slice.d/50-limits.conf with:\n"
                  "        [Slice]\n"
                  "        TasksMax=%s",
                  rvalue);

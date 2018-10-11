@@ -570,7 +570,7 @@ int parse_fractional_part_u(const char **p, size_t digits, unsigned *res) {
 
         s = *p;
 
-        /* accept any number of digits, strtoull is limted to 19 */
+        /* accept any number of digits, strtoull is limited to 19 */
         for (i=0; i < digits; i++,s++) {
                 if (*s < '0' || *s > '9') {
                         if (i == 0)
@@ -637,6 +637,8 @@ int parse_permille_unbounded(const char *p) {
                 r = safe_atoi(n, &v);
                 if (r < 0)
                         return r;
+                if (v < 0)
+                        return -ERANGE;
         } else {
                 pc = endswith(p, "%");
                 if (!pc)
@@ -657,14 +659,13 @@ int parse_permille_unbounded(const char *p) {
                 r = safe_atoi(n, &v);
                 if (r < 0)
                         return r;
+                if (v < 0)
+                        return -ERANGE;
                 if (v > (INT_MAX - q) / 10)
                         return -ERANGE;
 
                 v = v * 10 + q;
         }
-
-        if (v < 0)
-                return -ERANGE;
 
         return v;
 }

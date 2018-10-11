@@ -1,7 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0+ */
-/*
- *
- */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -23,34 +20,19 @@
 #include "udev.h"
 
 static int node_symlink(struct udev_device *dev, const char *node, const char *slink) {
-        struct stat stats;
-        char target[UTIL_PATH_SIZE];
-        char *s;
-        size_t l;
+        _cleanup_free_ char *slink_dirname = NULL, *target = NULL;
         char slink_tmp[UTIL_PATH_SIZE + 32];
-        int i = 0;
-        int tail = 0;
-        int err = 0;
+        struct stat stats;
+        int r, err = 0;
+
+        slink_dirname = dirname_malloc(slink);
+        if (!slink_dirname)
+                return log_oom();
 
         /* use relative link */
-        target[0] = '\0';
-        while (node[i] && (node[i] == slink[i])) {
-                if (node[i] == '/')
-                        tail = i+1;
-                i++;
-        }
-        s = target;
-        l = sizeof(target);
-        while (slink[i] != '\0') {
-                if (slink[i] == '/')
-                        l = strpcpy(&s, l, "../");
-                i++;
-        }
-        l = strscpy(s, l, &node[tail]);
-        if (l == 0) {
-                err = -EINVAL;
-                goto exit;
-        }
+        r = path_make_relative(slink_dirname, node, &target);
+        if (r < 0)
+                return log_error_errno(r, "Failed to get relative path from '%s' to '%s': %m", slink, node);
 
         /* preserve link with correct target, do not replace node of other device */
         if (lstat(slink, &stats) == 0) {
@@ -116,7 +98,6 @@ exit:
 
 /* find device node of device with highest priority */
 static const char *link_find_prioritized(struct udev_device *dev, bool add, const char *stackdir, char *buf, size_t bufsize) {
-        struct udev *udev = udev_device_get_udev(dev);
         DIR *dir;
         struct dirent *dent;
         int priority = 0;
@@ -145,7 +126,7 @@ static const char *link_find_prioritized(struct udev_device *dev, bool add, cons
                 if (streq(dent->d_name, udev_device_get_id_filename(dev)))
                         continue;
 
-                dev_db = udev_device_new_from_device_id(udev, dent->d_name);
+                dev_db = udev_device_new_from_device_id(NULL, dent->d_name);
                 if (dev_db != NULL) {
                         const char *devnode;
 
