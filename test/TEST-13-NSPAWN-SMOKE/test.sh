@@ -7,23 +7,39 @@ TEST_NO_NSPAWN=1
 SKIP_INITRD=yes
 . $TEST_BASE_DIR/test-functions
 
+test_run() {
+    ret=1
+    systemctl daemon-reload
+    systemctl start testsuite.service || return 1
+    systemctl status --full testsuite.service
+    if [ -z "$TEST_NO_NSPAWN" ]; then
+        if run_nspawn; then
+            check_result_nspawn || return 1
+        else
+            dwarn "can't run systemd-nspawn, skipping"
+        fi
+    fi
+    test -s /failed && ret=$(($ret+1))
+    [[ -e /testok ]] && ret=0
+    return $ret
+}
+
 test_setup() {
-    create_empty_image
     mkdir -p $TESTDIR/root
-    mount ${LOOPDEV}p1 $TESTDIR/root
+    initdir=$TESTDIR/root
+    STRIP_BINARIES=no
 
     # Create what will eventually be our root filesystem onto an overlay
     (
         LOG_LEVEL=5
-        eval $(udevadm info --export --query=env --name=${LOOPDEV}p2)
 
         setup_basic_environment
         dracut_install busybox chmod rmdir unshare
 
-        cp create-busybox-container $initdir/
+	cp create-busybox-container /
 
-        ./create-busybox-container $initdir/nc-container
-        initdir="$initdir/nc-container" dracut_install nc
+        /create-busybox-container /nc-container
+        initdir="/nc-container" dracut_install nc
 
         # setup the testsuite service
         cat >$initdir/etc/systemd/system/testsuite.service <<EOF
@@ -32,7 +48,8 @@ Description=Testsuite service
 After=multi-user.target
 
 [Service]
-ExecStart=/test-nspawn.sh
+ExecStart=$initdir/test-nspawn.sh
+ExecStartPost=/bin/sh -x -c 'echo -e "\nfailed:" > /failed; systemctl --state=failed --no-pager >> /failed; echo -e "\ntestresult:\nOK" > /testok'
 Type=oneshot
 EOF
 
@@ -70,14 +87,14 @@ function check_bind_tmp_path {
     local _root="/var/lib/machines/bind-tmp-path"
     /create-busybox-container "$_root"
     >/tmp/bind
-    systemd-nspawn --register=no -D "$_root" --bind=/tmp/bind /bin/sh -c 'test -e /tmp/bind'
+    systemd-nspawn --bind /lib64 --register=no -D "$_root" --bind=/tmp/bind /bin/sh -c 'test -e /tmp/bind'
 }
 
 function check_notification_socket {
     # https://github.com/systemd/systemd/issues/4944
     local _cmd='echo a | $(busybox which nc) -U -u -w 1 /run/systemd/nspawn/notify'
-    systemd-nspawn --register=no -D /nc-container /bin/sh -x -c "$_cmd"
-    systemd-nspawn --register=no -D /nc-container -U /bin/sh -x -c "$_cmd"
+    systemd-nspawn --bind /lib64 --register=no -D /nc-container /bin/sh -x -c "$_cmd"
+    systemd-nspawn --bind /lib64 --register=no -D /nc-container -U /bin/sh -x -c "$_cmd"
 }
 
 function run {
@@ -92,16 +109,16 @@ function run {
 
     local _root="/var/lib/machines/unified-$1-cgns-$2-api-vfs-writable-$3"
     /create-busybox-container "$_root"
-    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" -b
-    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" --private-network -b
+    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind /lib64 --register=no -D "$_root" -b
+    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind /lib64 --register=no -D "$_root" --private-network -b
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" -U -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind /lib64 --register=no -D "$_root" -U -b; then
        [[ "$is_user_ns_supported" = "yes" && "$3" = "network" ]] && return 1
     else
        [[ "$is_user_ns_supported" = "no" && "$3" = "network" ]] && return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" --private-network -U -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind /lib64 --register=no -D "$_root" --private-network -U -b; then
        [[ "$is_user_ns_supported" = "yes" && "$3" = "yes" ]] && return 1
     else
        [[ "$is_user_ns_supported" = "no" && "$3" = "yes" ]] && return 1
@@ -125,11 +142,23 @@ touch /testok
 EOF
 
         chmod 0755 $initdir/test-nspawn.sh
+        for service in testsuite.service; do
+            cp $initdir/etc/systemd/system/$service /etc/systemd/system/
+        done
         setup_testsuite
     ) || return 1
+}
 
-    ddebug "umount $TESTDIR/root"
-    umount $TESTDIR/root
+test_cleanup() {
+    for service in testsuite.service; do
+         rm /etc/systemd/system/$service
+    done
+    rm /create-busybox-container
+    rm -r /nc-container
+    [[ -e /testok ]] && rm /testok
+    [[ -e /failed ]] && rm /failed
+    return 0
+
 }
 
 do_test "$@"
