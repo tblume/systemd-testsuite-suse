@@ -6,7 +6,7 @@ TEST_DESCRIPTION="https://github.com/systemd/systemd/issues/2730"
 . $TEST_BASE_DIR/test-functions
 SKIP_INITRD=yes
 QEMU_TIMEOUT=180
-FSTYPE=ext4
+FSTYPE=btrfs
 
 check_result_qemu() {
     ret=1
@@ -63,7 +63,7 @@ Before=local-fs.target
 [Mount]
 What=/dev/sda1
 Where=/
-Type=ext4
+Type=btrfs
 Options=errors=remount-ro,noatime
 
 [Install]
