@@ -23,7 +23,7 @@ test_setup() {
         cp create-busybox-container $initdir/
 
         ./create-busybox-container $initdir/nc-container
-        initdir="$initdir/nc-container" dracut_install nc ip
+        initdir="$initdir/nc-container" dracut_install socat ip
 
         # setup the testsuite service
         cat >$initdir/etc/systemd/system/testsuite.service <<EOF
@@ -72,14 +72,14 @@ function check_bind_tmp_path {
     local _root="/var/lib/machines/bind-tmp-path"
     /create-busybox-container "$_root"
     >/tmp/bind
-    systemd-nspawn --register=no -D "$_root" --bind=/tmp/bind /bin/sh -c 'test -e /tmp/bind'
+    systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" --bind=/tmp/bind /bin/sh -c 'test -e /tmp/bind'
 }
 
 function check_notification_socket {
     # https://github.com/systemd/systemd/issues/4944
-    local _cmd='echo a | $(busybox which nc) -U -u -w 1 /run/systemd/nspawn/notify'
-    systemd-nspawn --register=no -D /nc-container /bin/sh -x -c "$_cmd"
-    systemd-nspawn --register=no -D /nc-container -U /bin/sh -x -c "$_cmd"
+    local _cmd='echo a | $(busybox which socat) -U /run/systemd/nspawn/notify -'
+    systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D /nc-container /bin/sh -x -c "$_cmd"
+    systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D /nc-container -U /bin/sh -x -c "$_cmd"
 }
 
 function run {
@@ -94,16 +94,16 @@ function run {
 
     local _root="/var/lib/machines/unified-$1-cgns-$2-api-vfs-writable-$3"
     /create-busybox-container "$_root"
-    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" -b
-    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" --private-network -b
+    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" -b
+    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" --private-network -b
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" -U -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" -U -b; then
        [[ "$is_user_ns_supported" = "yes" && "$3" = "network" ]] && return 1
     else
        [[ "$is_user_ns_supported" = "no" && "$3" = "network" ]] && return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" --private-network -U -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" --private-network -U -b; then
        [[ "$is_user_ns_supported" = "yes" && "$3" = "yes" ]] && return 1
     else
        [[ "$is_user_ns_supported" = "no" && "$3" = "yes" ]] && return 1
@@ -112,42 +112,42 @@ function run {
     local _netns_opt="--network-namespace-path=/proc/self/ns/net"
 
     # --network-namespace-path and network-related options cannot be used together
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" --network-interface=lo -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" --network-interface=lo -b; then
        return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" --network-macvlan=lo -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" --network-macvlan=lo -b; then
        return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" --network-ipvlan=lo -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" --network-ipvlan=lo -b; then
        return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" --network-veth -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" --network-veth -b; then
        return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" --network-veth-extra=lo -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" --network-veth-extra=lo -b; then
        return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" --network-bridge=lo -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" --network-bridge=lo -b; then
        return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" --network-zone=zone -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" --network-zone=zone -b; then
        return 1
     fi
 
-    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" --private-network -b; then
+    if UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" --private-network -b; then
        return 1
     fi
 
     # test --network-namespace-path works with a network namespace created by "ip netns"
     ip netns add nspawn_test
     _netns_opt="--network-namespace-path=/run/netns/nspawn_test"
-    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --register=no -D "$_root" "$_netns_opt" /bin/ip a | grep -v -E '^1: lo.*UP'
+    UNIFIED_CGROUP_HIERARCHY="$1" SYSTEMD_NSPAWN_USE_CGNS="$2" SYSTEMD_NSPAWN_API_VFS_WRITABLE="$3" systemd-nspawn --bind=/lib64 --bind=/usr/lib64 --register=no -D "$_root" "$_netns_opt" /bin/ip a | grep -v -E '^1: lo.*UP'
     local r=$?
     ip netns del nspawn_test
 
