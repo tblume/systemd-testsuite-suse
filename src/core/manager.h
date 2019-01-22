@@ -4,8 +4,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-#include "libudev.h"
 #include "sd-bus.h"
+#include "sd-device.h"
 #include "sd-event.h"
 
 #include "cgroup-util.h"
@@ -212,7 +212,8 @@ struct Manager {
         LookupPaths lookup_paths;
         Set *unit_path_cache;
 
-        char **environment;
+        char **transient_environment;  /* The environment, as determined from config files, kernel cmdline and environment generators */
+        char **client_environment;     /* Environment variables created by clients through the bus API */
 
         usec_t runtime_watchdog;
         usec_t shutdown_watchdog;
@@ -220,8 +221,7 @@ struct Manager {
         dual_timestamp timestamps[_MANAGER_TIMESTAMP_MAX];
 
         /* Data specific to the device subsystem */
-        struct udev_monitor* udev_monitor;
-        sd_event_source *udev_event_source;
+        sd_device_monitor *device_monitor;
         Hashmap *devices_by_sysfs;
 
         /* Data specific to the mount subsystem */
@@ -248,7 +248,7 @@ struct Manager {
 
         /* This is used during reloading: before the reload we queue
          * the reply message here, and afterwards we send it */
-        sd_bus_message *queued_message;
+        sd_bus_message *pending_reload_message;
 
         Hashmap *watch_bus;  /* D-Bus names => Unit object n:1 */
 
@@ -287,7 +287,6 @@ struct Manager {
 
         /* Flags */
         bool dispatching_load_queue:1;
-        bool dispatching_dbus_queue:1;
 
         bool taint_usr:1;
 
@@ -338,9 +337,6 @@ struct Manager {
 
         /* non-zero if we are reloading or reexecuting, */
         int n_reloading;
-        /* A set which contains all jobs that started before reload and finished
-         * during it */
-        Set *pending_finished_jobs;
 
         unsigned n_installed_jobs;
         unsigned n_failed_jobs;
@@ -443,7 +439,11 @@ void manager_clear_jobs(Manager *m);
 
 unsigned manager_dispatch_load_queue(Manager *m);
 
-int manager_environment_add(Manager *m, char **minus, char **plus);
+int manager_default_environment(Manager *m);
+int manager_transient_environment_add(Manager *m, char **plus);
+int manager_client_environment_modify(Manager *m, char **minus, char **plus);
+int manager_get_effective_environment(Manager *m, char ***ret);
+
 int manager_set_default_rlimits(Manager *m, struct rlimit **default_rlimit);
 
 int manager_loop(Manager *m);

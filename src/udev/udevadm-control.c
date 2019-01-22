@@ -21,9 +21,12 @@
 
 #include "parse-util.h"
 #include "process-util.h"
+#include "syslog-util.h"
 #include "time-util.h"
-#include "udev.h"
 #include "udevadm.h"
+#include "udev-ctrl.h"
+#include "util.h"
+#include "virt.h"
 
 static int help(void) {
         printf("%s control OPTION\n\n"
@@ -68,6 +71,11 @@ int control_main(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
+        if (running_in_chroot() > 0) {
+                log_info("Running in chroot, ignoring request.");
+                return 0;
+        }
+
         if (argc <= 1)
                 log_error("Option missing");
 
@@ -82,18 +90,15 @@ int control_main(int argc, char *argv[], void *userdata) {
                         if (r < 0)
                                 return r;
                         break;
-                case 'l': {
-                        int i;
+                case 'l':
+                        r = log_level_from_string(optarg);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse log priority '%s': %m", optarg);
 
-                        i = util_log_priority(optarg);
-                        if (i < 0)
-                                return log_error_errno(i, "invalid number '%s'", optarg);
-
-                        r = udev_ctrl_send_set_log_level(uctrl, i, timeout);
+                        r = udev_ctrl_send_set_log_level(uctrl, r, timeout);
                         if (r < 0)
                                 return r;
                         break;
-                }
                 case 's':
                         r = udev_ctrl_send_stop_exec_queue(uctrl, timeout);
                         if (r < 0)

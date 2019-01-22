@@ -458,8 +458,7 @@ static int enumerator_scan_dir_and_add_devices(sd_device_enumerator *enumerator,
         FOREACH_DIRENT_ALL(dent, dir, return -errno) {
                 _cleanup_(sd_device_unrefp) sd_device *device = NULL;
                 char syspath[strlen(path) + 1 + strlen(dent->d_name) + 1];
-                dev_t devnum;
-                int ifindex, initialized, k;
+                int initialized, k;
 
                 if (dent->d_name[0] == '.')
                         continue;
@@ -478,9 +477,9 @@ static int enumerator_scan_dir_and_add_devices(sd_device_enumerator *enumerator,
                         continue;
                 }
 
-                k = sd_device_get_is_initialized(device, &initialized);
-                if (k < 0) {
-                        r = k;
+                initialized = sd_device_get_is_initialized(device);
+                if (initialized < 0) {
+                        r = initialized;
                         continue;
                 }
 
@@ -496,8 +495,8 @@ static int enumerator_scan_dir_and_add_devices(sd_device_enumerator *enumerator,
                  */
                 if (!enumerator->match_allow_uninitialized &&
                     !initialized &&
-                    (sd_device_get_devnum(device, &devnum) >= 0 ||
-                     (sd_device_get_ifindex(device, &ifindex) >= 0 && ifindex > 0)))
+                    (sd_device_get_devnum(device, NULL) >= 0 ||
+                     sd_device_get_ifindex(device, NULL) >= 0))
                         continue;
 
                 if (!match_parent(enumerator, device))
@@ -555,7 +554,7 @@ static int enumerator_scan_dir(sd_device_enumerator *enumerator, const char *bas
         if (!dir)
                 return -errno;
 
-        log_debug("  device-enumerator: scanning %s", path);
+        log_debug("sd-device-enumerator: Scanning %s", path);
 
         FOREACH_DIRENT_ALL(dent, dir, return -errno) {
                 int k;
@@ -587,10 +586,9 @@ static int enumerator_scan_devices_tag(sd_device_enumerator *enumerator, const c
 
         dir = opendir(path);
         if (!dir) {
-                if (errno == ENOENT)
-                        return 0;
-                else
-                        return log_error_errno(errno, "sd-device-enumerator: could not open tags directory %s: %m", path);
+                if (errno != ENOENT)
+                        return log_debug_errno(errno, "sd-device-enumerator: Failed to open tags directory %s: %m", path);
+                return 0;
         }
 
         /* TODO: filter away subsystems? */
@@ -715,7 +713,7 @@ static int parent_crawl_children(sd_device_enumerator *enumerator, const char *p
 
         dir = opendir(path);
         if (!dir)
-                return log_debug_errno(errno, "sd-device-enumerate: could not open parent directory %s: %m", path);
+                return log_debug_errno(errno, "sd-device-enumerator: Failed to open parent directory %s: %m", path);
 
         FOREACH_DIRENT_ALL(dent, dir, return -errno) {
                 _cleanup_free_ char *child = NULL;
@@ -738,7 +736,7 @@ static int parent_crawl_children(sd_device_enumerator *enumerator, const char *p
                 if (maxdepth > 0)
                         parent_crawl_children(enumerator, child, maxdepth - 1);
                 else
-                        log_debug("device-enumerate: max depth reached, %s: ignoring devices", child);
+                        log_debug("sd-device-enumerator: Max depth reached, %s: ignoring devices", child);
         }
 
         return r;
@@ -766,30 +764,57 @@ static int enumerator_scan_devices_children(sd_device_enumerator *enumerator) {
 static int enumerator_scan_devices_all(sd_device_enumerator *enumerator) {
         int r = 0;
 
-        log_debug("device-enumerator: scan all dirs");
+        log_debug("sd-device-enumerator: Scan all dirs");
 
         if (access("/sys/subsystem", F_OK) >= 0) {
                 /* we have /subsystem/, forget all the old stuff */
                 r = enumerator_scan_dir(enumerator, "subsystem", "devices", NULL);
                 if (r < 0)
-                        return log_debug_errno(r, "device-enumerator: failed to scan /sys/subsystem: %m");
+                        return log_debug_errno(r, "sd-device-enumerator: Failed to scan /sys/subsystem: %m");
         } else {
                 int k;
 
                 k = enumerator_scan_dir(enumerator, "bus", "devices", NULL);
                 if (k < 0) {
-                        log_debug_errno(k, "device-enumerator: failed to scan /sys/bus: %m");
+                        log_debug_errno(k, "sd-device-enumerator: Failed to scan /sys/bus: %m");
                         r = k;
                 }
 
                 k = enumerator_scan_dir(enumerator, "class", NULL, NULL);
                 if (k < 0) {
-                        log_debug_errno(k, "device-enumerator: failed to scan /sys/class: %m");
+                        log_debug_errno(k, "sd-device-enumerator: Failed to scan /sys/class: %m");
                         r = k;
                 }
         }
 
         return r;
+}
+
+static void device_enumerator_dedup_devices(sd_device_enumerator *enumerator) {
+        sd_device **a, **b, **end;
+
+        assert(enumerator);
+
+        if (enumerator->n_devices <= 1)
+                return;
+
+        a = enumerator->devices + 1;
+        b = enumerator->devices;
+        end = enumerator->devices + enumerator->n_devices;
+
+        for (; a < end; a++) {
+                const char *devpath_a, *devpath_b;
+
+                assert_se(sd_device_get_devpath(*a, &devpath_a) >= 0);
+                assert_se(sd_device_get_devpath(*b, &devpath_b) >= 0);
+
+                if (path_equal(devpath_a, devpath_b))
+                        sd_device_unref(*a);
+                else
+                        *(++b) = *a;
+        }
+
+        enumerator->n_devices = b - enumerator->devices + 1;
 }
 
 int device_enumerator_scan_devices(sd_device_enumerator *enumerator) {
@@ -822,6 +847,7 @@ int device_enumerator_scan_devices(sd_device_enumerator *enumerator) {
         }
 
         typesafe_qsort(enumerator->devices, enumerator->n_devices, device_compare);
+        device_enumerator_dedup_devices(enumerator);
 
         enumerator->scan_uptodate = true;
         enumerator->type = DEVICE_ENUMERATION_TYPE_DEVICES;
@@ -877,7 +903,7 @@ int device_enumerator_scan_subsystems(sd_device_enumerator *enumerator) {
         if (match_subsystem(enumerator, "module")) {
                 k = enumerator_scan_dir_and_add_devices(enumerator, "module", NULL, NULL);
                 if (k < 0) {
-                        log_debug_errno(k, "device-enumerator: failed to scan modules: %m");
+                        log_debug_errno(k, "sd-device-enumerator: Failed to scan modules: %m");
                         r = k;
                 }
         }
@@ -891,7 +917,7 @@ int device_enumerator_scan_subsystems(sd_device_enumerator *enumerator) {
         if (match_subsystem(enumerator, "subsystem")) {
                 k = enumerator_scan_dir_and_add_devices(enumerator, subsysdir, NULL, NULL);
                 if (k < 0) {
-                        log_debug_errno(k, "device-enumerator: failed to scan subsystems: %m");
+                        log_debug_errno(k, "sd-device-enumerator: Failed to scan subsystems: %m");
                         r = k;
                 }
         }
@@ -900,12 +926,13 @@ int device_enumerator_scan_subsystems(sd_device_enumerator *enumerator) {
         if (match_subsystem(enumerator, "drivers")) {
                 k = enumerator_scan_dir(enumerator, subsysdir, "drivers", "drivers");
                 if (k < 0) {
-                        log_debug_errno(k, "device-enumerator: failed to scan drivers: %m");
+                        log_debug_errno(k, "sd-device-enumerator: Failed to scan drivers: %m");
                         r = k;
                 }
         }
 
         typesafe_qsort(enumerator->devices, enumerator->n_devices, device_compare);
+        device_enumerator_dedup_devices(enumerator);
 
         enumerator->scan_uptodate = true;
         enumerator->type = DEVICE_ENUMERATION_TYPE_SUBSYSTEMS;

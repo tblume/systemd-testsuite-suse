@@ -7,12 +7,12 @@
 #include <sys/capability.h>
 #include <unistd.h>
 
-#include "alloc-util.h"
 #include "all-units.h"
+#include "alloc-util.h"
 #include "capability-util.h"
 #include "conf-parser.h"
+#include "env-file.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "fs-util.h"
 #include "hashmap.h"
 #include "hostname-util.h"
@@ -26,6 +26,7 @@
 #include "strv.h"
 #include "test-helper.h"
 #include "tests.h"
+#include "tmpfile-util.h"
 #include "user-util.h"
 #include "util.h"
 
@@ -529,9 +530,9 @@ static void test_load_env_file_1(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_1, sizeof(env_file_1)) == sizeof(env_file_1));
+        assert_se(write(fd, env_file_1, strlen(env_file_1)) == strlen(env_file_1));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(streq(data[0], "a=a"));
         assert_se(streq(data[1], "b=bc"));
@@ -551,9 +552,9 @@ static void test_load_env_file_2(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_2, sizeof(env_file_2)) == sizeof(env_file_2));
+        assert_se(write(fd, env_file_2, strlen(env_file_2)) == strlen(env_file_2));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(streq(data[0], "a=a"));
         assert_se(data[1] == NULL);
@@ -568,9 +569,9 @@ static void test_load_env_file_3(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_3, sizeof(env_file_3)) == sizeof(env_file_3));
+        assert_se(write(fd, env_file_3, strlen(env_file_3)) == strlen(env_file_3));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(data == NULL);
 }
@@ -583,9 +584,9 @@ static void test_load_env_file_4(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_4, sizeof(env_file_4)) == sizeof(env_file_4));
+        assert_se(write(fd, env_file_4, strlen(env_file_4)) == strlen(env_file_4));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(streq(data[0], "HWMON_MODULES=coretemp f71882fg"));
         assert_se(streq(data[1], "MODULE_0=coretemp"));
@@ -602,9 +603,9 @@ static void test_load_env_file_5(void) {
 
         fd = mkostemp_safe(name);
         assert_se(fd >= 0);
-        assert_se(write(fd, env_file_5, sizeof(env_file_5)) == sizeof(env_file_5));
+        assert_se(write(fd, env_file_5, strlen(env_file_5)) == strlen(env_file_5));
 
-        r = load_env_file(NULL, name, NULL, &data);
+        r = load_env_file(NULL, name, &data);
         assert_se(r == 0);
         assert_se(streq(data[0], "a="));
         assert_se(streq(data[1], "b="));
@@ -621,11 +622,13 @@ static void test_install_printf(void) {
         UnitFileInstallInfo i3 = { .name = name3, .path = path3, };
         UnitFileInstallInfo i4 = { .name = name3, .path = path3, };
 
-        _cleanup_free_ char *mid = NULL, *bid = NULL, *host = NULL, *uid = NULL, *user = NULL;
+        _cleanup_free_ char *mid = NULL, *bid = NULL, *host = NULL, *gid = NULL, *group = NULL, *uid = NULL, *user = NULL;
 
         assert_se(specifier_machine_id('m', NULL, NULL, &mid) >= 0 && mid);
         assert_se(specifier_boot_id('b', NULL, NULL, &bid) >= 0 && bid);
         assert_se(host = gethostname_malloc());
+        assert_se(group = gid_to_name(getgid()));
+        assert_se(asprintf(&gid, UID_FMT, getgid()) >= 0);
         assert_se(user = uid_to_name(getuid()));
         assert_se(asprintf(&uid, UID_FMT, getuid()) >= 0);
 
@@ -652,6 +655,8 @@ static void test_install_printf(void) {
         expect(i, "%p", "name");
         expect(i, "%i", "");
         expect(i, "%j", "name");
+        expect(i, "%g", group);
+        expect(i, "%G", gid);
         expect(i, "%u", user);
         expect(i, "%U", uid);
 
@@ -659,12 +664,16 @@ static void test_install_printf(void) {
         expect(i, "%b", bid);
         expect(i, "%H", host);
 
+        expect(i2, "%g", group);
+        expect(i2, "%G", gid);
         expect(i2, "%u", user);
         expect(i2, "%U", uid);
 
         expect(i3, "%n", "name@inst.service");
         expect(i3, "%N", "name@inst");
         expect(i3, "%p", "name");
+        expect(i3, "%g", group);
+        expect(i3, "%G", gid);
         expect(i3, "%u", user);
         expect(i3, "%U", uid);
 
@@ -672,6 +681,8 @@ static void test_install_printf(void) {
         expect(i3, "%b", bid);
         expect(i3, "%H", host);
 
+        expect(i4, "%g", group);
+        expect(i4, "%G", gid);
         expect(i4, "%u", user);
         expect(i4, "%U", uid);
 }

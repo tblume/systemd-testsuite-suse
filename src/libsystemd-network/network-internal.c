@@ -255,11 +255,10 @@ int config_parse_ifalias(const char *unit,
                 return 0;
         }
 
-        free(*s);
-        if (*n)
-                *s = TAKE_PTR(n);
+        if (isempty(n))
+                *s = mfree(*s);
         else
-                *s = NULL;
+                free_and_replace(*s, n);
 
         return 0;
 }
@@ -294,7 +293,7 @@ int config_parse_hwaddr(const char *unit,
                 return 0;
         }
 
-        *hwaddr = TAKE_PTR(n);
+        free_and_replace(*hwaddr, n);
 
         return 0;
 }
@@ -368,36 +367,6 @@ int config_parse_hwaddrs(const char *unit,
         r = set_move(*hwaddrs, s);
         if (r < 0)
                 return log_oom();
-
-        return 0;
-}
-
-int config_parse_iaid(const char *unit,
-                      const char *filename,
-                      unsigned line,
-                      const char *section,
-                      unsigned section_line,
-                      const char *lvalue,
-                      int ltype,
-                      const char *rvalue,
-                      void *data,
-                      void *userdata) {
-        uint32_t iaid;
-        int r;
-
-        assert(filename);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        r = safe_atou32(rvalue, &iaid);
-        if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, r,
-                           "Unable to read IAID, ignoring assignment: %s", rvalue);
-                return 0;
-        }
-
-        *((uint32_t *)data) = iaid;
 
         return 0;
 }

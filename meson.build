@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1+
 
 project('systemd', 'c',
-        version : '239',
+        version : '240',
         license : 'LGPLv2+',
         default_options: [
                 'c_std=gnu99',
@@ -12,20 +12,19 @@ project('systemd', 'c',
         meson_version : '>= 0.46',
        )
 
-libsystemd_version = '0.23.0'
-libudev_version = '1.6.11'
+libsystemd_version = '0.24.0'
+libudev_version = '1.6.12'
 
 # We need the same data in two different formats, ugh!
 # Also, for hysterical reasons, we use different variable
 # names, sometimes. Not all variables are included in every
 # set. Ugh, ugh, ugh!
 conf = configuration_data()
-conf.set_quoted('PACKAGE_STRING',  meson.project_name() + ' ' + meson.project_version())
-conf.set_quoted('PACKAGE_VERSION', meson.project_version())
+conf.set('PROJECT_VERSION',        meson.project_version())
 
 substs = configuration_data()
-substs.set('PACKAGE_URL',          'https://www.freedesktop.org/wiki/Software/systemd')
-substs.set('PACKAGE_VERSION',      meson.project_version())
+substs.set('PROJECT_URL',          'https://www.freedesktop.org/wiki/Software/systemd')
+substs.set('PROJECT_VERSION',      meson.project_version())
 
 want_ossfuzz = get_option('oss-fuzz')
 want_libfuzzer = get_option('llvm-fuzz')
@@ -72,6 +71,10 @@ sysvinit_path = get_option('sysvinit-path')
 sysvrcnd_path = get_option('sysvrcnd-path')
 conf.set10('HAVE_SYSV_COMPAT', sysvinit_path != '' and sysvrcnd_path != '',
            description : 'SysV init scripts and rcN.d links are supported')
+
+conf.set10('BUMP_PROC_SYS_FS_FILE_MAX', get_option('bump-proc-sys-fs-file-max'))
+conf.set10('BUMP_PROC_SYS_FS_NR_OPEN',  get_option('bump-proc-sys-fs-nr-open'))
+conf.set('HIGH_RLIMIT_NOFILE',          512*1024)
 
 # join_paths ignore the preceding arguments if an absolute component is
 # encountered, so this should canonicalize various paths when they are
@@ -223,11 +226,12 @@ conf.set_quoted('ROOTLIBEXECDIR',                             rootlibexecdir)
 conf.set_quoted('BOOTLIBDIR',                                 bootlibdir)
 conf.set_quoted('SYSTEMD_PULL_PATH',                          join_paths(rootlibexecdir, 'systemd-pull'))
 conf.set_quoted('SYSTEMD_IMPORT_PATH',                        join_paths(rootlibexecdir, 'systemd-import'))
+conf.set_quoted('SYSTEMD_IMPORT_FS_PATH',                     join_paths(rootlibexecdir, 'systemd-import-fs'))
 conf.set_quoted('SYSTEMD_EXPORT_PATH',                        join_paths(rootlibexecdir, 'systemd-export'))
 conf.set_quoted('VENDOR_KEYRING_PATH',                        join_paths(rootlibexecdir, 'import-pubring.gpg'))
 conf.set_quoted('USER_KEYRING_PATH',                          join_paths(pkgsysconfdir, 'import-pubring.gpg'))
 conf.set_quoted('DOCUMENT_ROOT',                              join_paths(pkgdatadir, 'gatewayd'))
-conf.set('MEMORY_ACCOUNTING_DEFAULT',                         memory_accounting_default ? 'true' : 'false')
+conf.set10('MEMORY_ACCOUNTING_DEFAULT',                       memory_accounting_default)
 conf.set_quoted('MEMORY_ACCOUNTING_DEFAULT_YES_NO',           memory_accounting_default ? 'yes' : 'no')
 
 substs.set('prefix',                                          prefixdir)
@@ -269,6 +273,7 @@ substs.set('SYSTEM_SYSVRCND_PATH',                            sysvrcnd_path)
 substs.set('RC_LOCAL_SCRIPT_PATH_START',                      get_option('rc-local'))
 substs.set('RC_LOCAL_SCRIPT_PATH_STOP',                       get_option('halt-local'))
 substs.set('MEMORY_ACCOUNTING_DEFAULT',                       memory_accounting_default ? 'yes' : 'no')
+substs.set('HIGH_RLIMIT_NOFILE',                              conf.get('HIGH_RLIMIT_NOFILE'))
 
 #####################################################################
 
@@ -281,10 +286,8 @@ want_tests = get_option('tests')
 slow_tests = want_tests != 'false' and get_option('slow-tests')
 install_tests = get_option('install-tests')
 
-cxx = find_program('c++', required : fuzzer_build)
-if cxx.found()
+if add_languages('cpp', required : fuzzer_build)
         #  Used only for tests
-        add_languages('cpp')
         cxx_cmd = ' '.join(meson.get_compiler('cpp').cmd_array())
 else
         cxx_cmd = ''
@@ -391,11 +394,11 @@ if cc.compiles('''
            struct timespec now;
            return 0;
    }
-''', name : '-Werror=shadow with local shadowing')
+''', args: '-Werror=shadow', name : '-Werror=shadow with local shadowing')
         add_project_arguments('-Werror=shadow', language : 'c')
 endif
 
-cpp = ' '.join(cc.cmd_array() + get_option('c_args')) + ' -E'
+cpp = ' '.join(cc.cmd_array()) + ' -E'
 
 #####################################################################
 # compilation result tests
@@ -420,8 +423,8 @@ decl_headers = '''
 
 foreach decl : ['char16_t',
                 'char32_t',
-                'struct ethtool_link_settings',
                 'struct fib_rule_uid_range',
+                'struct fib_rule_port_range',
                 'struct statx',
                ]
 
@@ -444,34 +447,89 @@ endforeach
 
 conf.set10('WANT_LINUX_STAT_H', want_linux_stat_h)
 
-foreach decl : [['IFLA_INET6_ADDR_GEN_MODE',         'linux/if_link.h'],
-                ['IN6_ADDR_GEN_MODE_STABLE_PRIVACY', 'linux/if_link.h'],
-                ['IFLA_VRF_TABLE',                   'linux/if_link.h'],
-                ['IFLA_MACVLAN_FLAGS',               'linux/if_link.h'],
-                ['IFLA_IPVLAN_FLAGS',                'linux/if_link.h'],
-                ['IFLA_PHYS_PORT_ID',                'linux/if_link.h'],
-                ['IFLA_BOND_AD_INFO',                'linux/if_link.h'],
-                ['IFLA_VLAN_PROTOCOL',               'linux/if_link.h'],
-                ['IFLA_VXLAN_REMCSUM_NOPARTIAL',     'linux/if_link.h'],
-                ['IFLA_VXLAN_GPE',                   'linux/if_link.h'],
-                ['IFLA_GENEVE_LABEL',                'linux/if_link.h'],
+foreach decl : [['ETHTOOL_LINK_MODE_10baseT_Half_BIT',      'linux/ethtool.h'],
+                ['ETHTOOL_LINK_MODE_25000baseCR_Full_BIT',  'linux/ethtool.h'],
+                ['ETHTOOL_LINK_MODE_50000baseSR2_Full_BIT', 'linux/ethtool.h'],
+                ['ETHTOOL_LINK_MODE_1000baseX_Full_BIT',    'linux/ethtool.h'],
+                ['ETHTOOL_LINK_MODE_2500baseT_Full_BIT',    'linux/ethtool.h'],
+                ['ETHTOOL_LINK_MODE_FEC_NONE_BIT',          'linux/ethtool.h'],
+                ['FRA_TUN_ID',                              'linux/fib_rules.h'],
+                ['FRA_SUPPRESS_PREFIXLEN',                  'linux/fib_rules.h'],
+                ['FRA_PAD',                                 'linux/fib_rules.h'],
+                ['FRA_L3MDEV',                              'linux/fib_rules.h'],
+                ['FRA_UID_RANGE',                           'linux/fib_rules.h'],
+                ['FRA_DPORT_RANGE',                         'linux/fib_rules.h'],
+                ['FOU_ATTR_REMCSUM_NOPARTIAL',              'linux/fou.h'],
+                ['FOU_CMD_GET',                             'linux/fou.h'],
+                ['IFA_FLAGS',                               'linux/if_addr.h'],
+                ['IFLA_BRIDGE_VLAN_TUNNEL_INFO',            'linux/if_bridge.h'],
+                ['IFLA_INET6_ADDR_GEN_MODE',                'linux/if_link.h'],
+                ['IN6_ADDR_GEN_MODE_STABLE_PRIVACY',        'linux/if_link.h'],
+                ['IN6_ADDR_GEN_MODE_RANDOM',                'linux/if_link.h'],
+                ['IFLA_IPVLAN_MODE',                        'linux/if_link.h'],
+                ['IPVLAN_MODE_L3S',                         'linux/if_link.h'],
+                ['IFLA_IPVLAN_FLAGS',                       'linux/if_link.h'],
+                ['IFLA_PHYS_PORT_ID',                       'linux/if_link.h'],
+                ['IFLA_CARRIER_CHANGES',                    'linux/if_link.h'],
+                ['IFLA_PHYS_SWITCH_ID',                     'linux/if_link.h'],
+                ['IFLA_LINK_NETNSID',                       'linux/if_link.h'],
+                ['IFLA_PHYS_PORT_NAME',                     'linux/if_link.h'],
+                ['IFLA_PROTO_DOWN',                         'linux/if_link.h'],
+                ['IFLA_GSO_MAX_SIZE',                       'linux/if_link.h'],
+                ['IFLA_PAD',                                'linux/if_link.h'],
+                ['IFLA_XDP',                                'linux/if_link.h'],
+                ['IFLA_EVENT',                              'linux/if_link.h'],
+                ['IFLA_IF_NETNSID',                         'linux/if_link.h'],
+                ['IFLA_TARGET_NETNSID',                     'linux/if_link.h'],
+                ['IFLA_NEW_IFINDEX',                        'linux/if_link.h'],
+                ['IFLA_MAX_MTU',                            'linux/if_link.h'],
+                ['IFLA_BOND_ACTIVE_SLAVE',                  'linux/if_link.h'],
+                ['IFLA_BOND_AD_INFO',                       'linux/if_link.h'],
+                ['IFLA_BOND_AD_ACTOR_SYSTEM',               'linux/if_link.h'],
+                ['IFLA_BOND_TLB_DYNAMIC_LB',                'linux/if_link.h'],
+                ['IFLA_VXLAN_UDP_ZERO_CSUM6_RX',            'linux/if_link.h'],
+                ['IFLA_VXLAN_REMCSUM_NOPARTIAL',            'linux/if_link.h'],
+                ['IFLA_VXLAN_COLLECT_METADATA',             'linux/if_link.h'],
+                ['IFLA_VXLAN_LABEL',                        'linux/if_link.h'],
+                ['IFLA_VXLAN_GPE',                          'linux/if_link.h'],
+                ['IFLA_VXLAN_TTL_INHERIT',                  'linux/if_link.h'],
+                ['IFLA_GENEVE_TOS',                         'linux/if_link.h'],
+                ['IFLA_GENEVE_COLLECT_METADATA',            'linux/if_link.h'],
+                ['IFLA_GENEVE_REMOTE6',                     'linux/if_link.h'],
+                ['IFLA_GENEVE_UDP_ZERO_CSUM6_RX',           'linux/if_link.h'],
+                ['IFLA_GENEVE_LABEL',                       'linux/if_link.h'],
+                ['IFLA_GENEVE_TTL_INHERIT',                 'linux/if_link.h'],
+                ['IFLA_BR_MAX_AGE',                         'linux/if_link.h'],
+                ['IFLA_BR_PRIORITY',                        'linux/if_link.h'],
+                ['IFLA_BR_VLAN_PROTOCOL',                   'linux/if_link.h'],
+                ['IFLA_BR_VLAN_DEFAULT_PVID',               'linux/if_link.h'],
+                ['IFLA_BR_VLAN_STATS_ENABLED',              'linux/if_link.h'],
+                ['IFLA_BR_MCAST_STATS_ENABLED',             'linux/if_link.h'],
+                ['IFLA_BR_MCAST_MLD_VERSION',               'linux/if_link.h'],
+                ['IFLA_BR_VLAN_STATS_PER_PORT',             'linux/if_link.h'],
+                ['IFLA_BRPORT_LEARNING_SYNC',               'linux/if_link.h'],
+                ['IFLA_BRPORT_PROXYARP_WIFI',               'linux/if_link.h'],
+                ['IFLA_BRPORT_MULTICAST_ROUTER',            'linux/if_link.h'],
+                ['IFLA_BRPORT_PAD',                         'linux/if_link.h'],
+                ['IFLA_BRPORT_MCAST_FLOOD',                 'linux/if_link.h'],
+                ['IFLA_BRPORT_VLAN_TUNNEL',                 'linux/if_link.h'],
+                ['IFLA_BRPORT_BCAST_FLOOD',                 'linux/if_link.h'],
+                ['IFLA_BRPORT_NEIGH_SUPPRESS',              'linux/if_link.h'],
+                ['IFLA_BRPORT_ISOLATED',                    'linux/if_link.h'],
+                ['IFLA_BRPORT_BACKUP_PORT',                 'linux/if_link.h'],
+                ['IFLA_VRF_TABLE',                          'linux/if_link.h'],
                 # if_tunnel.h is buggy and cannot be included on its own
-                ['IFLA_VTI_REMOTE',                  'linux/if_tunnel.h', '#include <net/if.h>'],
-                ['IFLA_IPTUN_ENCAP_DPORT',           'linux/if_tunnel.h', '#include <net/if.h>'],
-                ['IFLA_GRE_ENCAP_DPORT',             'linux/if_tunnel.h', '#include <net/if.h>'],
-                ['IFLA_BRIDGE_VLAN_INFO',            'linux/if_bridge.h'],
-                ['IFLA_BRPORT_PROXYARP',             'linux/if_link.h'],
-                ['IFLA_BRPORT_LEARNING_SYNC',        'linux/if_link.h'],
-                ['IFLA_BR_VLAN_DEFAULT_PVID',        'linux/if_link.h'],
-                ['IPVLAN_F_PRIVATE',                 'linux/if_link.h'],
-                ['NDA_IFINDEX',                      'linux/neighbour.h'],
-                ['IFA_FLAGS',                        'linux/if_addr.h'],
-                ['FRA_UID_RANGE',                    'linux/fib_rules.h'],
-                ['LO_FLAGS_PARTSCAN',                'linux/loop.h'],
-                ['VXCAN_INFO_PEER',                  'linux/can/vxcan.h'],
-                ['FOU_ATTR_REMCSUM_NOPARTIAL',       'linux/fou.h'],
-                ['FOU_CMD_GET',                      'linux/fou.h'],
-                ['FOU_ENCAP_GUE',                    'linux/fou.h'],
+                ['IFLA_VTI_FWMARK',                         'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_IPTUN_ENCAP_DPORT',                  'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_IPTUN_COLLECT_METADATA',             'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_IPTUN_FWMARK',                       'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_GRE_ENCAP_DPORT',                    'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_GRE_COLLECT_METADATA',               'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_GRE_IGNORE_DF',                      'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_GRE_FWMARK',                         'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_GRE_ERSPAN_INDEX',                   'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['IFLA_GRE_ERSPAN_HWID',                    'linux/if_tunnel.h', '#include <net/if.h>'],
+                ['LO_FLAGS_PARTSCAN',                       'linux/loop.h'],
                ]
         prefix = decl.length() > 2 ? decl[2] : ''
         have = cc.has_header_symbol(decl[1], decl[0], prefix : prefix)
@@ -522,6 +580,11 @@ else
 endif
 
 #####################################################################
+
+vcs_tagger = [meson.source_root() + '/tools/meson-vcs-tag.sh',
+              meson.source_root(),
+              get_option('version-tag'),
+              meson.project_version()]
 
 sed = find_program('sed')
 awk = find_program('awk')
@@ -602,9 +665,11 @@ if not cc.has_header('sys/capability.h')
         error('POSIX caps headers not found')
 endif
 foreach header : ['crypt.h',
-                  'linux/btrfs.h',
+                  'linux/btrfs_tree.h',
+                  'linux/fou.h',
                   'linux/memfd.h',
                   'linux/vm_sockets.h',
+                  'linux/can/vxcan.h',
                   'sys/auxv.h',
                   'valgrind/memcheck.h',
                   'valgrind/valgrind.h',
@@ -630,6 +695,9 @@ elif default_hierarchy == 'hybrid'
 else
         conf.set('DEFAULT_HIERARCHY', 'CGROUP_UNIFIED_ALL')
 endif
+
+default_net_naming_scheme = get_option('default-net-naming-scheme')
+conf.set_quoted('DEFAULT_NET_NAMING_SCHEME', default_net_naming_scheme)
 
 time_epoch = get_option('time-epoch')
 if time_epoch == -1
@@ -764,6 +832,17 @@ ntp_servers = get_option('ntp-servers')
 conf.set_quoted('NTP_SERVERS', ntp_servers)
 substs.set('NTP_SERVERS', ntp_servers)
 
+default_locale = get_option('default-locale')
+if default_locale == ''
+        if not meson.is_cross_build()
+                choose_default_locale_sh = find_program('tools/choose-default-locale.sh')
+                default_locale = run_command(choose_default_locale_sh).stdout().strip()
+        else
+                default_locale = 'C.UTF-8'
+        endif
+endif
+conf.set_quoted('SYSTEMD_DEFAULT_LOCALE', default_locale)
+
 conf.set_quoted('GETTEXT_PACKAGE', meson.project_name())
 
 substs.set('SUSHELL', get_option('debug-shell'))
@@ -771,17 +850,25 @@ substs.set('DEBUGTTY', get_option('debug-tty'))
 
 enable_debug_hashmap = false
 enable_debug_mmap_cache = false
+enable_debug_siphash = false
+enable_debug_udev = false
 foreach name : get_option('debug-extra')
         if name == 'hashmap'
                 enable_debug_hashmap = true
         elif name == 'mmap-cache'
                 enable_debug_mmap_cache = true
+        elif name == 'siphash'
+                enable_debug_siphash = true
+        elif name == 'udev'
+                enable_debug_udev = true
         else
                 message('unknown debug option "@0@", ignoring'.format(name))
         endif
 endforeach
 conf.set10('ENABLE_DEBUG_HASHMAP', enable_debug_hashmap)
 conf.set10('ENABLE_DEBUG_MMAP_CACHE', enable_debug_mmap_cache)
+conf.set10('ENABLE_DEBUG_SIPHASH', enable_debug_siphash)
+conf.set10('ENABLE_DEBUG_UDEV', enable_debug_udev)
 
 conf.set10('VALGRIND', get_option('valgrind'))
 conf.set10('LOG_TRACE', get_option('log-trace'))
@@ -1087,6 +1174,7 @@ conf.set10('HAVE_XZ', have)
 want_lz4 = get_option('lz4')
 if want_lz4 != 'false' and not fuzzer_build
         liblz4 = dependency('liblz4',
+                            version : '>= 1.3.0',
                             required : want_lz4 == 'true')
         have = liblz4.found()
 else
@@ -1182,7 +1270,9 @@ if dns_over_tls != 'false'
         endif
         have = have_gnutls or have_openssl
 else
-        have = have_gnutls = have_openssl = false
+        have = false
+        have_gnutls = false
+        have_openssl = false
 endif
 conf.set10('ENABLE_DNS_OVER_TLS', have)
 conf.set10('DNS_OVER_TLS_USE_GNUTLS', have_gnutls)
@@ -1355,14 +1445,18 @@ includes = include_directories('src/basic',
                                'src/core',
                                'src/libsystemd/sd-bus',
                                'src/libsystemd/sd-device',
+                               'src/libsystemd/sd-event',
                                'src/libsystemd/sd-hwdb',
                                'src/libsystemd/sd-id128',
                                'src/libsystemd/sd-netlink',
                                'src/libsystemd/sd-network',
+                               'src/libsystemd/sd-resolve',
                                'src/libsystemd-network',
                                '.')
 
 add_project_arguments('-include', 'config.h', language : 'c')
+
+generate_gperfs = find_program('tools/generate-gperfs.py')
 
 subdir('po')
 subdir('catalog')
@@ -1383,7 +1477,7 @@ libjournal_core = static_library(
 libsystemd_sym_path = '@0@/@1@'.format(meson.current_source_dir(), libsystemd_sym)
 libsystemd = shared_library(
         'systemd',
-        'src/systemd/sd-id128.h', # pick a header file at random to work around old meson bug
+        disable_mempool_c,
         version : libsystemd_version,
         include_directories : includes,
         link_args : ['-shared',
@@ -1409,6 +1503,7 @@ install_libsystemd_static = static_library(
         journal_client_sources,
         basic_sources,
         basic_gcrypt_sources,
+        disable_mempool_c,
         include_directories : includes,
         build_by_default : static_libsystemd != 'false',
         install : static_libsystemd != 'false',
@@ -1465,6 +1560,7 @@ subdir('test')
 test_dlopen = executable(
         'test-dlopen',
         test_dlopen_c,
+        disable_mempool_c,
         include_directories : includes,
         link_with : [libbasic],
         dependencies : [libdl],
@@ -1485,6 +1581,7 @@ foreach tuple : [['myhostname', 'ENABLE_NSS_MYHOSTNAME'],
                 nss = shared_library(
                         'nss_' + module,
                         'src/nss-@0@/nss-@0@.c'.format(module),
+                        disable_mempool_c,
                         version : '2',
                         include_directories : includes,
                         # Note that we link NSS modules with '-z nodelete' so that mempools never get orphaned
@@ -1604,6 +1701,14 @@ executable('systemd-debug-generator',
            install : true,
            install_dir : systemgeneratordir)
 
+executable('systemd-run-generator',
+           'src/run-generator/run-generator.c',
+           include_directories : includes,
+           link_with : [libshared],
+           install_rpath : rootlibexecdir,
+           install : true,
+           install_dir : systemgeneratordir)
+
 executable('systemd-fstab-generator',
            'src/fstab-generator/fstab-generator.c',
            'src/core/mount-setup.c',
@@ -1648,7 +1753,7 @@ endif
 if conf.get('HAVE_BLKID') == 1
         executable('systemd-gpt-auto-generator',
                    'src/gpt-auto-generator/gpt-auto-generator.c',
-                   'src/basic/blkid-util.h',
+                   'src/shared/blkid-util.h',
                    include_directories : includes,
                    link_with : [libshared],
                    dependencies : libblkid,
@@ -1759,15 +1864,15 @@ if conf.get('ENABLE_LOGIND') == 1
                              args : pam_systemd.full_path())
                 endif
         endif
-endif
 
-executable('systemd-user-runtime-dir',
-           user_runtime_dir_sources,
-           include_directories : includes,
-           link_with : [libshared, liblogind_core],
-           install_rpath : rootlibexecdir,
-           install : true,
-           install_dir : rootlibexecdir)
+        executable('systemd-user-runtime-dir',
+                   user_runtime_dir_sources,
+                   include_directories : includes,
+                   link_with : [libshared],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootlibexecdir)
+endif
 
 if conf.get('HAVE_PAM') == 1
         executable('systemd-user-sessions',
@@ -1788,7 +1893,33 @@ if conf.get('ENABLE_EFI') == 1 and conf.get('HAVE_BLKID') == 1
                          install_rpath : rootlibexecdir,
                          install : true)
         public_programs += exe
+
+        executable('systemd-bless-boot',
+                   'src/boot/bless-boot.c',
+                   include_directories : includes,
+                   link_with : [libshared],
+                   dependencies : [libblkid],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : rootlibexecdir)
+
+        executable('systemd-bless-boot-generator',
+                   'src/boot/bless-boot-generator.c',
+                   include_directories : includes,
+                   link_with : [libshared],
+                   install_rpath : rootlibexecdir,
+                   install : true,
+                   install_dir : systemgeneratordir)
 endif
+
+executable('systemd-boot-check-no-failures',
+           'src/boot/boot-check-no-failures.c',
+           include_directories : includes,
+           link_with : [libshared],
+           dependencies : [libblkid],
+           install_rpath : rootlibexecdir,
+           install : true,
+           install_dir : rootlibexecdir)
 
 exe = executable('systemd-socket-activate', 'src/activate/activate.c',
                  include_directories : includes,
@@ -2074,6 +2205,14 @@ if conf.get('ENABLE_IMPORTD') == 1
                                     install : true,
                                     install_dir : rootlibexecdir)
 
+        systemd_import_fs = executable('systemd-import-fs',
+                                    systemd_import_fs_sources,
+                                    include_directories : includes,
+                                    link_with : [libshared],
+                                    install_rpath : rootlibexecdir,
+                                    install : true,
+                                    install_dir : rootlibexecdir)
+
         systemd_export = executable('systemd-export',
                                     systemd_export_sources,
                                     include_directories : includes,
@@ -2085,7 +2224,8 @@ if conf.get('ENABLE_IMPORTD') == 1
                                     install_rpath : rootlibexecdir,
                                     install : true,
                                     install_dir : rootlibexecdir)
-        public_programs += [systemd_pull, systemd_import, systemd_export]
+
+        public_programs += [systemd_pull, systemd_import, systemd_import_fs, systemd_export]
 endif
 
 if conf.get('ENABLE_REMOTE') == 1 and conf.get('HAVE_LIBCURL') == 1
@@ -2259,6 +2399,9 @@ executable('systemd-sleep',
            install_rpath : rootlibexecdir,
            install : true,
            install_dir : rootlibexecdir)
+
+install_data('src/sleep/sleep.conf',
+             install_dir : pkgsysconfdir)
 
 exe = executable('systemd-sysctl',
                  'src/sysctl/sysctl.c',
@@ -2733,6 +2876,7 @@ endif
 
 fuzzer_exes = []
 
+if get_option('tests') != 'false'
 foreach tuple : fuzzers
         sources = tuple[0]
         link_with = tuple[1].length() > 0 ? tuple[1] : [libshared]
@@ -2757,6 +2901,7 @@ foreach tuple : fuzzers
                 c_args : defs,
                 install : false)
 endforeach
+endif
 
 run_target('fuzzers',
         depends : fuzzer_exes,
@@ -2782,11 +2927,8 @@ subdir('shell-completion/zsh')
 subdir('docs/sysvinit')
 subdir('docs/var-log')
 
-# FIXME: figure out if the warning is true:
-# https://github.com/mesonbuild/meson/wiki/Reference-manual#install_subdir
 install_subdir('factory/etc',
                install_dir : factorydir)
-
 
 install_data('xorg/50-systemd-user.sh',
              install_dir : xinitrcdir)
@@ -2796,10 +2938,10 @@ install_data('LICENSE.GPL2',
              'LICENSE.LGPL2.1',
              'NEWS',
              'README',
-             'docs/CODING_STYLE',
+             'docs/CODING_STYLE.md',
              'docs/DISTRO_PORTING.md',
              'docs/ENVIRONMENT.md',
-             'docs/HACKING',
+             'docs/HACKING.md',
              'docs/TRANSIENT-SETTINGS.md',
              'docs/TRANSLATORS.md',
              'docs/UIDS-GIDS.md',
@@ -2919,10 +3061,6 @@ run_target(
         depends : [man, libsystemd, libudev],
         command : [meson_check_api_docs_sh, libsystemd.full_path(), libudev.full_path()])
 
-run_target(
-        'make-index-md',
-        command : ['sh', '@0@/tools/make-index-md.sh'.format(meson.source_root()), meson.source_root()])
-
 ############################################################
 
 status = [
@@ -2971,7 +3109,9 @@ status = [
         'default DNSSEC mode:               @0@'.format(default_dnssec),
         'default DNS-over-TLS mode:         @0@'.format(default_dns_over_tls),
         'default cgroup hierarchy:          @0@'.format(default_hierarchy),
-        'default KillUserProcesses setting: @0@'.format(kill_user_processes)]
+        'default net.naming-scheme setting: @0@'.format(default_net_naming_scheme),
+        'default KillUserProcesses setting: @0@'.format(kill_user_processes),
+        'default locale:                    @0@'.format(default_locale)]
 
 alt_dns_servers = '\n                                            '.join(dns_servers.split(' '))
 alt_ntp_servers = '\n                                            '.join(ntp_servers.split(' '))
@@ -2984,6 +3124,10 @@ alt_time_epoch = run_command('date', '-Is', '-u', '-d',
 status += [
         'time epoch:                        @0@ (@1@)'.format(time_epoch, alt_time_epoch)]
 
+status += [
+        'static libsystemd:                 @0@'.format(static_libsystemd),
+        'static libudev:                    @0@'.format(static_libudev)]
+
 # TODO:
 # CFLAGS:   ${OUR_CFLAGS} ${CFLAGS}
 # CPPFLAGS: ${OUR_CPPFLAGS} ${CPPFLAGS}
@@ -2995,7 +3139,7 @@ if conf.get('ENABLE_EFI') == 1
         if have_gnu_efi
                 status += [
                         'EFI machine type:                  @0@'.format(EFI_MACHINE_TYPE_NAME),
-                        'EFI CC                             @0@'.format(efi_cc),
+                        'EFI CC                             @0@'.format(' '.join(efi_cc)),
                         'EFI lib directory:                 @0@'.format(efi_libdir),
                         'EFI lds directory:                 @0@'.format(efi_ldsdir),
                         'EFI include directory:             @0@'.format(efi_incdir)]
@@ -3081,8 +3225,12 @@ foreach tuple : [
         ['gshadow'],
         ['debug hashmap'],
         ['debug mmap cache'],
+        ['debug siphash'],
+        ['debug udev'],
         ['valgrind',         conf.get('VALGRIND') == 1],
         ['trace logging',    conf.get('LOG_TRACE') == 1],
+        ['link-udev-shared',      get_option('link-udev-shared')],
+        ['link-systemctl-shared', get_option('link-systemctl-shared')],
 ]
 
         if tuple.length() >= 2

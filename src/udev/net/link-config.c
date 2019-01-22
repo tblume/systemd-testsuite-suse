@@ -8,11 +8,12 @@
 #include "alloc-util.h"
 #include "conf-files.h"
 #include "conf-parser.h"
+#include "device-util.h"
 #include "ethtool-util.h"
 #include "fd-util.h"
 #include "link-config.h"
 #include "log.h"
-#include "missing.h"
+#include "missing_network.h"
 #include "netlink-util.h"
 #include "network-internal.h"
 #include "parse-util.h"
@@ -255,13 +256,13 @@ int link_config_get(link_config_ctx *ctx, sd_device *device, link_config **ret) 
 
                                 if (name_assign_type == NET_NAME_ENUM) {
                                         log_warning("Config file %s applies to device based on potentially unpredictable interface name '%s'",
-                                                  link->filename, sysname);
+                                                    link->filename, sysname);
                                         *ret = link;
 
                                         return 0;
                                 } else if (name_assign_type == NET_NAME_RENAMED) {
                                         log_warning("Config file %s matches device based on renamed interface name '%s', ignoring",
-                                                  link->filename, sysname);
+                                                    link->filename, sysname);
 
                                         continue;
                                 }
@@ -271,13 +272,11 @@ int link_config_get(link_config_ctx *ctx, sd_device *device, link_config **ret) 
                                   link->filename, sysname);
 
                         *ret = link;
-
                         return 0;
                 }
         }
 
         *ret = NULL;
-
         return -ENOENT;
 }
 
@@ -302,7 +301,7 @@ static bool should_rename(sd_device *device, bool respect_predictable) {
         unsigned type;
         int r;
 
-        /* if we can't get the assgin type, assume we should rename */
+        /* if we can't get the assign type, assume we should rename */
         if (sd_device_get_sysattr_value(device, "name_assign_type", &s) < 0)
                 return true;
 
@@ -311,16 +310,11 @@ static bool should_rename(sd_device *device, bool respect_predictable) {
                 return true;
 
         switch (type) {
-        case NET_NAME_USER:
-        case NET_NAME_RENAMED:
-                /* these were already named by userspace, do not touch again */
-                return false;
         case NET_NAME_PREDICTABLE:
                 /* the kernel claims to have given a predictable name */
                 if (respect_predictable)
                         return false;
                 _fallthrough_;
-        case NET_NAME_ENUM:
         default:
                 /* the name is known to be bad, or of an unknown type */
                 return true;
@@ -374,13 +368,12 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
         if (r < 0) {
 
                 if (config->port != _NET_DEV_PORT_INVALID)
-                        log_warning_errno(r,  "Could not set port (%s) of %s: %m", port_to_string(config->port), old_name);
+                        log_warning_errno(r, "Could not set port (%s) of %s: %m", port_to_string(config->port), old_name);
 
-                if (config->advertise)
-                        log_warning_errno(r, "Could not set advertise mode to 0x%X: %m", config->advertise);
+                if (!eqzero(config->advertise))
+                        log_warning_errno(r, "Could not set advertise mode: %m"); /* TODO: include modes in the log message. */
 
                 if (config->speed) {
-
                         speed = DIV_ROUND_UP(config->speed, 1000000);
                         if (r == -EOPNOTSUPP) {
                                 r = ethtool_set_speed(&ctx->ethtool_fd, old_name, speed, config->duplex);
@@ -410,9 +403,7 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
 
         r = sd_device_get_ifindex(device, &ifindex);
         if (r < 0)
-                return log_warning_errno(r, "Could not find ifindex: %m");
-        if (ifindex <= 0)
-                return log_warning_errno(EINVAL, "Invalid ifindex '%d'", ifindex);
+                return log_device_warning_errno(device, r, "Could not find ifindex: %m");
 
         if (ctx->enable_name_policy && config->name_policy) {
                 NamePolicy *policy;
@@ -444,12 +435,8 @@ int link_config_apply(link_config_ctx *ctx, link_config *config,
                 }
         }
 
-        if (should_rename(device, respect_predictable)) {
-                /* if not set by policy, fall back manually set name */
-                if (!new_name)
-                        new_name = config->name;
-        } else
-                new_name = NULL;
+        if (!new_name && should_rename(device, respect_predictable))
+                new_name = config->name;
 
         switch (config->mac_policy) {
                 case MACPOLICY_PERSISTENT:

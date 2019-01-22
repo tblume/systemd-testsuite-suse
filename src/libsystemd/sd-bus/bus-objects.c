@@ -9,6 +9,7 @@
 #include "bus-slot.h"
 #include "bus-type.h"
 #include "bus-util.h"
+#include "missing_capability.h"
 #include "set.h"
 #include "string-util.h"
 #include "strv.h"
@@ -164,7 +165,7 @@ static int add_subtree_to_set(
                 sd_bus *bus,
                 const char *prefix,
                 struct node *n,
-                unsigned int flags,
+                unsigned flags,
                 Set *s,
                 sd_bus_error *error) {
 
@@ -213,7 +214,7 @@ static int get_child_nodes(
                 sd_bus *bus,
                 const char *prefix,
                 struct node *n,
-                unsigned int flags,
+                unsigned flags,
                 Set **_s,
                 sd_bus_error *error) {
 
@@ -1582,9 +1583,7 @@ _public_ int sd_bus_add_fallback(
         return bus_add_object(bus, slot, true, prefix, callback, userdata);
 }
 
-static void vtable_member_hash_func(const void *a, struct siphash *state) {
-        const struct vtable_member *m = a;
-
+static void vtable_member_hash_func(const struct vtable_member *m, struct siphash *state) {
         assert(m);
 
         string_hash_func(m->path, state);
@@ -1592,8 +1591,7 @@ static void vtable_member_hash_func(const void *a, struct siphash *state) {
         string_hash_func(m->member, state);
 }
 
-static int vtable_member_compare_func(const void *a, const void *b) {
-        const struct vtable_member *x = a, *y = b;
+static int vtable_member_compare_func(const struct vtable_member *x, const struct vtable_member *y) {
         int r;
 
         assert(x);
@@ -1610,10 +1608,7 @@ static int vtable_member_compare_func(const void *a, const void *b) {
         return strcmp(x->member, y->member);
 }
 
-static const struct hash_ops vtable_member_hash_ops = {
-        .hash = vtable_member_hash_func,
-        .compare = vtable_member_compare_func
-};
+DEFINE_PRIVATE_HASH_OPS(vtable_member_hash_ops, struct vtable_member, vtable_member_hash_func, vtable_member_compare_func);
 
 static int add_object_vtable_internal(
                 sd_bus *bus,

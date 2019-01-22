@@ -23,6 +23,7 @@
 #include "missing.h"
 #include "network-util.h"
 #include "ratelimit.h"
+#include "resolve-private.h"
 #include "socket-util.h"
 #include "string-util.h"
 #include "strv.h"
@@ -320,7 +321,7 @@ static int manager_adjust_clock(Manager *m, double offset, int leap_sec) {
 }
 
 static bool manager_sample_spike_detection(Manager *m, double offset, double delay) {
-        unsigned int i, idx_cur, idx_new, idx_min;
+        unsigned i, idx_cur, idx_new, idx_min;
         double jitter;
         double j;
 
@@ -471,10 +472,9 @@ static int manager_receive_response(sd_event_source *source, int fd, uint32_t re
                         break;
                 }
         }
-        if (!recv_time) {
-                log_error("Invalid packet timestamp.");
-                return -EINVAL;
-        }
+        if (!recv_time)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Invalid packet timestamp.");
 
         if (!m->pending) {
                 log_debug("Unexpected reply. Ignoring.");
@@ -629,8 +629,6 @@ static int manager_receive_response(sd_event_source *source, int fd, uint32_t re
 
 static int manager_listen_setup(Manager *m) {
         union sockaddr_union addr = {};
-        static const int tos = IPTOS_LOWDELAY;
-        static const int on = 1;
         int r;
 
         assert(m);
@@ -651,11 +649,11 @@ static int manager_listen_setup(Manager *m) {
         if (r < 0)
                 return -errno;
 
-        r = setsockopt(m->server_socket, SOL_SOCKET, SO_TIMESTAMPNS, &on, sizeof(on));
+        r = setsockopt_int(m->server_socket, SOL_SOCKET, SO_TIMESTAMPNS, true);
         if (r < 0)
-                return -errno;
+                return r;
 
-        (void) setsockopt(m->server_socket, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+        (void) setsockopt_int(m->server_socket, IPPROTO_IP, IP_TOS, IPTOS_LOWDELAY);
 
         return sd_event_add_io(m->event, &m->event_receive, m->server_socket, EPOLLIN, manager_receive_response, m);
 }
@@ -727,8 +725,7 @@ void manager_set_server_address(Manager *m, ServerAddress *a) {
         }
 }
 
-static int manager_resolve_handler(sd_resolve_query *q, int ret, const struct addrinfo *ai, void *userdata) {
-        Manager *m = userdata;
+static int manager_resolve_handler(sd_resolve_query *q, int ret, const struct addrinfo *ai, Manager *m) {
         int r;
 
         assert(q);
@@ -876,7 +873,7 @@ int manager_connect(Manager *m) {
 
                 log_debug("Resolving %s...", m->current_server_name->string);
 
-                r = sd_resolve_getaddrinfo(m->resolve, &m->resolve_query, m->current_server_name->string, "123", &hints, manager_resolve_handler, m);
+                r = resolve_getaddrinfo(m->resolve, &m->resolve_query, m->current_server_name->string, "123", &hints, manager_resolve_handler, NULL, m);
                 if (r < 0)
                         return log_error_errno(r, "Failed to create resolver: %m");
 

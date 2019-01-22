@@ -16,6 +16,7 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "parse-util.h"
+#include "path-util.h"
 #include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
@@ -404,7 +405,7 @@ static int verify_esp(
                 sd_id128_t *ret_uuid) {
 #if HAVE_BLKID
         _cleanup_(blkid_free_probep) blkid_probe b = NULL;
-        char t[DEV_NUM_PATH_MAX];
+        _cleanup_free_ char *node = NULL;
         const char *v;
 #endif
         uint64_t pstart = 0, psize = 0;
@@ -468,9 +469,11 @@ static int verify_esp(
                 goto finish;
 
 #if HAVE_BLKID
-        xsprintf_dev_num_path(t, "block", st.st_dev);
+        r = device_path_make_major_minor(S_IFBLK, st.st_dev, &node);
+        if (r < 0)
+                return log_error_errno(r, "Failed to format major/minor device path: %m");
         errno = 0;
-        b = blkid_new_probe_from_filename(t);
+        b = blkid_new_probe_from_filename(node);
         if (!b)
                 return log_error_errno(errno ?: ENOMEM, "Failed to open file system \"%s\": %m", p);
 
@@ -590,6 +593,18 @@ int find_esp_and_warn(
                 goto found;
         }
 
+        path = getenv("SYSTEMD_ESP_PATH");
+        if (path) {
+                if (!path_is_valid(path) || !path_is_absolute(path))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "$SYSTEMD_ESP_PATH does not refer to absolute path, refusing to use it: %s",
+                                               path);
+
+                /* Note: when the user explicitly configured things with an env var we won't validate the mount
+                 * point. After all we want this to be useful for testing. */
+                goto found;
+        }
+
         FOREACH_STRING(path, "/efi", "/boot", "/boot/efi") {
 
                 r = verify_esp(path, true, unprivileged_mode, ret_part, ret_pstart, ret_psize, ret_uuid);
@@ -636,10 +651,9 @@ int find_default_boot_entry(
         if (r < 0)
                 return log_error_errno(r, "Failed to load bootspec config from \"%s/loader\": %m", where);
 
-        if (config->default_entry < 0) {
-                log_error("No entry suitable as default, refusing to guess.");
-                return -ENOENT;
-        }
+        if (config->default_entry < 0)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOENT),
+                                       "No entry suitable as default, refusing to guess.");
 
         *e = &config->entries[config->default_entry];
         log_debug("Found default boot entry in file \"%s\"", (*e)->path);

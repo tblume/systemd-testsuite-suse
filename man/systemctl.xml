@@ -136,6 +136,10 @@
           <para>When listing units with <command>list-dependencies</command>, recursively show
           dependencies of all dependent units (by default only dependencies of target units are
           shown).</para>
+
+          <para>When used with <command>status</command>, show journal messages in full, even if they include
+          unprintable characters or are very long. By default, fields with unprintable characters are
+          abbreviated as "blob data". (Note that the pager may escape unprintable characters again.)</para>
         </listitem>
       </varlistentry>
 
@@ -555,19 +559,19 @@
         <term><option>--runtime</option></term>
 
         <listitem>
-          <para>When used with <command>set-property</command>, make changes only
-          temporarily, so that they are lost on the next reboot.</para>
-
-          <para>Similarily, when used with <command>enable</command>, <command>mask</command>,
-          <command>edit</command> and related commands, make temporary changes, which are lost on
-          the next reboot. Changes are not made in subdirectories of <filename>/etc</filename>, but
-          in <filename>/run</filename>. The immediate effect is identical, however since the latter
+          <para>When used with <command>enable</command>,
+          <command>disable</command>, <command>edit</command>,
+          (and related commands), make changes only temporarily, so
+          that they are lost on the next reboot. This will have the
+          effect that changes are not made in subdirectories of
+          <filename>/etc</filename> but in <filename>/run</filename>,
+          with identical immediate effects, however, since the latter
           is lost on reboot, the changes are lost too.</para>
 
-          <para>Note: this option cannot be used with <command>disable</command>,
-          <command>unmask</command>, <command>preset</command>, or <command>preset-all</command>,
-          because those operations sometimes need to remove symlinks under <filename>/etc</filename>
-          to have the desired effect, which would cause a persistent change.</para>
+          <para>Similarly, when used with
+          <command>set-property</command>, make changes only
+          temporarily, so that they are lost on the next
+          reboot.</para>
         </listitem>
       </varlistentry>
 
@@ -590,9 +594,8 @@
         <term><option>--lines=</option></term>
 
         <listitem>
-          <para>When used with <command>status</command>, controls the
-          number of journal lines to show, counting from the most
-          recent ones. Takes a positive integer argument. Defaults to
+          <para>When used with <command>status</command>, controls the number of journal lines to show, counting from
+          the most recent ones. Takes a positive integer argument, or 0 to disable journal output. Defaults to
           10.</para>
         </listitem>
       </varlistentry>
@@ -1059,6 +1062,12 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
             terminating abnormally or timing out), it will automatically enter the <literal>failed</literal> state and
             its exit code and status is recorded for introspection by the administrator until the service is
             stopped/re-started or reset with this command.</para>
+
+            <para>In addition to resetting the <literal>failed</literal> state of a unit it also resets various other
+            per-unit properties: the start rate limit counter of all unit types is reset to zero, as is the restart
+            counter of service units. Thus, if a unit's start limit (as configured with
+            <varname>StartLimitIntervalSec=</varname>/<varname>StartLimitBurst=</varname>) is hit and the unit refuses
+            to be started again, use this command to make it startable again.</para>
           </listitem>
         </varlistentry>
 
@@ -1086,6 +1095,10 @@ Jan 12 10:46:45 example.com bluetoothd[8900]: gatt-time-server: Input/output err
             <option>--after</option>, <option>--before</option>
             may be used to change what types of dependencies
             are shown.</para>
+
+            <para>Note that this command only lists units currently loaded into memory by the service manager. In
+            particular, this command is not suitable to get a comprehensive list at all reverse dependencies on a
+            specific unit, as it won't list the dependencies declared by units currently not loaded.</para>
           </listitem>
         </varlistentry>
       </variablelist>

@@ -246,6 +246,24 @@ int efi_get_variable(
         return 0;
 }
 
+int efi_get_variable_string(sd_id128_t vendor, const char *name, char **p) {
+        _cleanup_free_ void *s = NULL;
+        size_t ss = 0;
+        int r;
+        char *x;
+
+        r = efi_get_variable(vendor, name, NULL, &s, &ss);
+        if (r < 0)
+                return r;
+
+        x = utf16_to_utf8(s, ss);
+        if (!x)
+                return -ENOMEM;
+
+        *p = x;
+        return 0;
+}
+
 int efi_set_variable(
                 sd_id128_t vendor,
                 const char *name,
@@ -326,22 +344,14 @@ finish:
         return r;
 }
 
-int efi_get_variable_string(sd_id128_t vendor, const char *name, char **p) {
-        _cleanup_free_ void *s = NULL;
-        size_t ss = 0;
-        int r;
-        char *x;
+int efi_set_variable_string(sd_id128_t vendor, const char *name, const char *v) {
+        _cleanup_free_ char16_t *u16 = NULL;
 
-        r = efi_get_variable(vendor, name, NULL, &s, &ss);
-        if (r < 0)
-                return r;
-
-        x = utf16_to_utf8(s, ss);
-        if (!x)
+        u16 = utf8_to_utf16(v, strlen(v));
+        if (!u16)
                 return -ENOMEM;
 
-        *p = x;
-        return 0;
+        return efi_set_variable(vendor, name, u16, (char16_strlen(u16) + 1) * sizeof(char16_t));
 }
 
 static size_t utf16_size(const uint16_t *s) {
@@ -412,9 +422,13 @@ int efi_get_boot_option(
 
         if (header->path_len > 0) {
                 uint8_t *dbuf;
-                size_t dnext;
+                size_t dnext, doff;
 
-                dbuf = buf + offsetof(struct boot_option, title) + title_size;
+                doff = offsetof(struct boot_option, title) + title_size;
+                dbuf = buf + doff;
+                if (header->path_len > l - doff)
+                        return -EINVAL;
+
                 dnext = 0;
                 while (dnext < header->path_len) {
                         struct device_path *dpath;
@@ -451,6 +465,9 @@ int efi_get_boot_option(
                         /* Sub-Type 4 – File Path */
                         if (dpath->sub_type == MEDIA_FILEPATH_DP && !p && path) {
                                 p = utf16_to_utf8(dpath->path, dpath->length-4);
+                                if (!p)
+                                        return  -ENOMEM;
+
                                 efi_tilt_backslashes(p);
                                 continue;
                         }
@@ -613,7 +630,7 @@ int efi_set_boot_order(uint16_t *order, size_t n) {
         return efi_set_variable(EFI_VENDOR_GLOBAL, "BootOrder", order, n * sizeof(uint16_t));
 }
 
-static int boot_id_hex(const char s[4]) {
+static int boot_id_hex(const char s[static 4]) {
         int id = 0, i;
 
         for (i = 0; i < 4; i++)
@@ -754,6 +771,16 @@ int efi_loader_get_device_part_uuid(sd_id128_t *u) {
         return 0;
 }
 
+bool efi_loader_entry_name_valid(const char *s) {
+        if (isempty(s))
+                return false;
+
+        if (strlen(s) > FILENAME_MAX) /* Make sure entry names fit in filenames */
+                return false;
+
+        return in_charset(s, ALPHANUMERICAL "-");
+}
+
 int efi_loader_get_entries(char ***ret) {
         _cleanup_free_ char16_t *entries = NULL;
         _cleanup_strv_free_ char **l = NULL;
@@ -772,7 +799,7 @@ int efi_loader_get_entries(char ***ret) {
         /* The variable contains a series of individually NUL terminated UTF-16 strings. */
 
         for (i = 0, start = 0;; i++) {
-                char *decoded;
+                _cleanup_free_ char *decoded = NULL;
                 bool end;
 
                 /* Is this the end of the variable's data? */
@@ -788,9 +815,12 @@ int efi_loader_get_entries(char ***ret) {
                 if (!decoded)
                         return -ENOMEM;
 
-                r = strv_consume(&l, decoded);
-                if (r < 0)
-                        return r;
+                if (efi_loader_entry_name_valid(decoded)) {
+                        r = strv_consume(&l, TAKE_PTR(decoded));
+                        if (r < 0)
+                                return r;
+                } else
+                        log_debug("Ignoring invalid loader entry '%s'.", decoded);
 
                 /* We reached the end of the variable */
                 if (end)
@@ -801,6 +831,55 @@ int efi_loader_get_entries(char ***ret) {
         }
 
         *ret = TAKE_PTR(l);
+        return 0;
+}
+
+int efi_loader_get_features(uint64_t *ret) {
+        _cleanup_free_ void *v = NULL;
+        size_t s;
+        int r;
+
+        if (!is_efi_boot()) {
+                *ret = 0;
+                return 0;
+        }
+
+        r = efi_get_variable(EFI_VENDOR_LOADER, "LoaderFeatures", NULL, &v, &s);
+        if (r == -ENOENT) {
+                _cleanup_free_ char *info = NULL;
+
+                /* The new (v240+) LoaderFeatures variable is not supported, let's see if it's systemd-boot at all */
+                r = efi_get_variable_string(EFI_VENDOR_LOADER, "LoaderInfo", &info);
+                if (r < 0) {
+                        if (r != -ENOENT)
+                                return r;
+
+                        /* Variable not set, definitely means not systemd-boot */
+
+                } else if (first_word(info, "systemd-boot")) {
+
+                        /* An older systemd-boot version. Let's hardcode the feature set, since it was pretty
+                         * static in all its versions. */
+
+                        *ret = EFI_LOADER_FEATURE_CONFIG_TIMEOUT |
+                                EFI_LOADER_FEATURE_ENTRY_DEFAULT |
+                                EFI_LOADER_FEATURE_ENTRY_ONESHOT;
+
+                        return 0;
+                }
+
+                /* No features supported */
+                *ret = 0;
+                return 0;
+        }
+        if (r < 0)
+                return r;
+
+        if (s != sizeof(uint64_t))
+                return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "LoaderFeatures EFI variable doesn't have the right size.");
+
+        memcpy(ret, v, sizeof(uint64_t));
         return 0;
 }
 

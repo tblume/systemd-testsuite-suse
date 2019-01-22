@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "alloc-util.h"
+#include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
@@ -57,8 +58,9 @@ int socket_address_parse(SocketAddress *a, const char *s) {
         assert(a);
         assert(s);
 
-        zero(*a);
-        a->type = SOCK_STREAM;
+        *a = (SocketAddress) {
+                .type = SOCK_STREAM,
+        };
 
         if (*s == '[') {
                 uint16_t port;
@@ -96,7 +98,9 @@ int socket_address_parse(SocketAddress *a, const char *s) {
                 size_t l;
 
                 l = strlen(s);
-                if (l >= sizeof(a->sockaddr.un.sun_path))
+                if (l >= sizeof(a->sockaddr.un.sun_path)) /* Note that we refuse non-NUL-terminated sockets when
+                                                           * parsing (the kernel itself is less strict here in what it
+                                                           * accepts) */
                         return -EINVAL;
 
                 a->sockaddr.un.sun_family = AF_UNIX;
@@ -108,7 +112,11 @@ int socket_address_parse(SocketAddress *a, const char *s) {
                 size_t l;
 
                 l = strlen(s+1);
-                if (l >= sizeof(a->sockaddr.un.sun_path) - 1)
+                if (l >= sizeof(a->sockaddr.un.sun_path) - 1) /* Note that we refuse non-NUL-terminated sockets here
+                                                               * when parsing, even though abstract namespace sockets
+                                                               * explicitly allow embedded NUL bytes and don't consider
+                                                               * them special. But it's simply annoying to debug such
+                                                               * sockets. */
                         return -EINVAL;
 
                 a->sockaddr.un.sun_family = AF_UNIX;
@@ -254,8 +262,11 @@ int socket_address_parse_netlink(SocketAddress *a, const char *s) {
         return 0;
 }
 
-int socket_address_verify(const SocketAddress *a) {
+int socket_address_verify(const SocketAddress *a, bool strict) {
         assert(a);
+
+        /* With 'strict' we enforce additional sanity constraints which are not set by the standard,
+         * but should only apply to sockets we create ourselves. */
 
         switch (socket_address_family(a)) {
 
@@ -286,18 +297,28 @@ int socket_address_verify(const SocketAddress *a) {
         case AF_UNIX:
                 if (a->size < offsetof(struct sockaddr_un, sun_path))
                         return -EINVAL;
+                if (a->size > sizeof(struct sockaddr_un) + !strict)
+                        /* If !strict, allow one extra byte, since getsockname() on Linux will append
+                         * a NUL byte if we have path sockets that are above sun_path's full size. */
+                        return -EINVAL;
 
-                if (a->size > offsetof(struct sockaddr_un, sun_path)) {
+                if (a->size > offsetof(struct sockaddr_un, sun_path) &&
+                    a->sockaddr.un.sun_path[0] != 0 &&
+                    strict) {
+                        /* Only validate file system sockets here, and only in strict mode */
+                        const char *e;
 
-                        if (a->sockaddr.un.sun_path[0] != 0) {
-                                char *e;
-
-                                /* path */
-                                e = memchr(a->sockaddr.un.sun_path, 0, sizeof(a->sockaddr.un.sun_path));
-                                if (!e)
-                                        return -EINVAL;
-
+                        e = memchr(a->sockaddr.un.sun_path, 0, sizeof(a->sockaddr.un.sun_path));
+                        if (e) {
+                                /* If there's an embedded NUL byte, make sure the size of the socket address matches it */
                                 if (a->size != offsetof(struct sockaddr_un, sun_path) + (e - a->sockaddr.un.sun_path) + 1)
+                                        return -EINVAL;
+                        } else {
+                                /* If there's no embedded NUL byte, then then the size needs to match the whole
+                                 * structure or the structure with one extra NUL byte suffixed. (Yeah, Linux is awful,
+                                 * and considers both equivalent: getsockname() even extends sockaddr_un beyond its
+                                 * size if the path is non NUL terminated.)*/
+                                if (!IN_SET(a->size, sizeof(a->sockaddr.un.sun_path), sizeof(a->sockaddr.un.sun_path)+1))
                                         return -EINVAL;
                         }
                 }
@@ -337,7 +358,10 @@ int socket_address_print(const SocketAddress *a, char **ret) {
         assert(a);
         assert(ret);
 
-        r = socket_address_verify(a);
+        r = socket_address_verify(a, false); /* We do non-strict validation, because we want to be
+                                              * able to pretty-print any socket the kernel considers
+                                              * valid. We still need to do validation to know if we
+                                              * can meaningfully print the address. */
         if (r < 0)
                 return r;
 
@@ -370,8 +394,8 @@ bool socket_address_equal(const SocketAddress *a, const SocketAddress *b) {
         assert(b);
 
         /* Invalid addresses are unequal to all */
-        if (socket_address_verify(a) < 0 ||
-            socket_address_verify(b) < 0)
+        if (socket_address_verify(a, false) < 0 ||
+            socket_address_verify(b, false) < 0)
                 return false;
 
         if (a->type != b->type)
@@ -482,6 +506,10 @@ const char* socket_address_get_path(const SocketAddress *a) {
         if (a->sockaddr.un.sun_path[0] == 0)
                 return NULL;
 
+        /* Note that this is only safe because we know that there's an extra NUL byte after the sockaddr_un
+         * structure. On Linux AF_UNIX file system socket addresses don't have to be NUL terminated if they take up the
+         * full sun_path space. */
+        assert_cc(sizeof(union sockaddr_union) >= sizeof(struct sockaddr_un)+1);
         return a->sockaddr.un.sun_path;
 }
 
@@ -551,7 +579,13 @@ int sockaddr_port(const struct sockaddr *_sa, unsigned *ret_port) {
         }
 }
 
-int sockaddr_pretty(const struct sockaddr *_sa, socklen_t salen, bool translate_ipv6, bool include_port, char **ret) {
+int sockaddr_pretty(
+                const struct sockaddr *_sa,
+                socklen_t salen,
+                bool translate_ipv6,
+                bool include_port,
+                char **ret) {
+
         union sockaddr_union *sa = (union sockaddr_union*) _sa;
         char *p;
         int r;
@@ -622,42 +656,51 @@ int sockaddr_pretty(const struct sockaddr *_sa, socklen_t salen, bool translate_
         }
 
         case AF_UNIX:
-                if (salen <= offsetof(struct sockaddr_un, sun_path)) {
+                if (salen <= offsetof(struct sockaddr_un, sun_path) ||
+                    (sa->un.sun_path[0] == 0 && salen == offsetof(struct sockaddr_un, sun_path) + 1))
+                        /* The name must have at least one character (and the leading NUL does not count) */
                         p = strdup("<unnamed>");
-                        if (!p)
-                                return -ENOMEM;
+                else {
+                        /* Note that we calculate the path pointer here through the .un_buffer[] field, in order to
+                         * outtrick bounds checking tools such as ubsan, which are too smart for their own good: on
+                         * Linux the kernel may return sun_path[] data one byte longer than the declared size of the
+                         * field. */
+                        char *path = (char*) sa->un_buffer + offsetof(struct sockaddr_un, sun_path);
+                        size_t path_len = salen - offsetof(struct sockaddr_un, sun_path);
 
-                } else if (sa->un.sun_path[0] == 0) {
-                        /* abstract */
+                        if (path[0] == 0) {
+                                /* Abstract socket. When parsing address information from, we
+                                 * explicitly reject overly long paths and paths with embedded NULs.
+                                 * But we might get such a socket from the outside. Let's return
+                                 * something meaningful and printable in this case. */
 
-                        /* FIXME: We assume we can print the
-                         * socket path here and that it hasn't
-                         * more than one NUL byte. That is
-                         * actually an invalid assumption */
+                                _cleanup_free_ char *e = NULL;
 
-                        p = new(char, sizeof(sa->un.sun_path)+1);
-                        if (!p)
-                                return -ENOMEM;
+                                e = cescape_length(path + 1, path_len - 1);
+                                if (!e)
+                                        return -ENOMEM;
 
-                        p[0] = '@';
-                        memcpy(p+1, sa->un.sun_path+1, sizeof(sa->un.sun_path)-1);
-                        p[sizeof(sa->un.sun_path)] = 0;
+                                p = strjoin("@", e);
+                        } else {
+                                if (path[path_len - 1] == '\0')
+                                        /* We expect a terminating NUL and don't print it */
+                                        path_len --;
 
-                } else {
-                        p = strndup(sa->un.sun_path, sizeof(sa->un.sun_path));
-                        if (!p)
-                                return -ENOMEM;
+                                p = cescape_length(path, path_len);
+                        }
                 }
+                if (!p)
+                        return -ENOMEM;
 
                 break;
 
         case AF_VSOCK:
-                if (include_port)
-                        r = asprintf(&p,
-                                     "vsock:%u:%u",
-                                     sa->vm.svm_cid,
-                                     sa->vm.svm_port);
-                else
+                if (include_port) {
+                        if (sa->vm.svm_cid == VMADDR_CID_ANY)
+                                r = asprintf(&p, "vsock::%u", sa->vm.svm_port);
+                        else
+                                r = asprintf(&p, "vsock:%u:%u", sa->vm.svm_cid, sa->vm.svm_port);
+                } else
                         r = asprintf(&p, "vsock:%u", sa->vm.svm_cid);
                 if (r < 0)
                         return -ENOMEM;
@@ -747,21 +790,6 @@ int socknameinfo_pretty(union sockaddr_union *sa, socklen_t salen, char **_ret) 
         return 0;
 }
 
-int socket_address_unlink(SocketAddress *a) {
-        assert(a);
-
-        if (socket_address_family(a) != AF_UNIX)
-                return 0;
-
-        if (a->sockaddr.un.sun_path[0] == 0)
-                return 0;
-
-        if (unlink(a->sockaddr.un.sun_path) < 0)
-                return -errno;
-
-        return 1;
-}
-
 static const char* const netlink_family_table[] = {
         [NETLINK_ROUTE] = "route",
         [NETLINK_FIREWALL] = "firewall",
@@ -834,10 +862,11 @@ int fd_inc_sndbuf(int fd, size_t n) {
 
         /* If we have the privileges we will ignore the kernel limit. */
 
-        value = (int) n;
-        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &value, sizeof(value)) < 0)
-                if (setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &value, sizeof(value)) < 0)
-                        return -errno;
+        if (setsockopt_int(fd, SOL_SOCKET, SO_SNDBUF, n) < 0) {
+                r = setsockopt_int(fd, SOL_SOCKET, SO_SNDBUFFORCE, n);
+                if (r < 0)
+                        return r;
+        }
 
         return 1;
 }
@@ -852,10 +881,12 @@ int fd_inc_rcvbuf(int fd, size_t n) {
 
         /* If we have the privileges we will ignore the kernel limit. */
 
-        value = (int) n;
-        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &value, sizeof(value)) < 0)
-                if (setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &value, sizeof(value)) < 0)
-                        return -errno;
+        if (setsockopt_int(fd, SOL_SOCKET, SO_RCVBUF, n) < 0) {
+                r = setsockopt_int(fd, SOL_SOCKET, SO_RCVBUFFORCE, n);
+                if (r < 0)
+                        return r;
+        }
+
         return 1;
 }
 
@@ -1245,4 +1276,72 @@ int socket_ioctl_fd(void) {
                 return -errno;
 
         return fd;
+}
+
+int sockaddr_un_unlink(const struct sockaddr_un *sa) {
+        const char *p, * nul;
+
+        assert(sa);
+
+        if (sa->sun_family != AF_UNIX)
+                return -EPROTOTYPE;
+
+        if (sa->sun_path[0] == 0) /* Nothing to do for abstract sockets */
+                return 0;
+
+        /* The path in .sun_path is not necessarily NUL terminated. Let's fix that. */
+        nul = memchr(sa->sun_path, 0, sizeof(sa->sun_path));
+        if (nul)
+                p = sa->sun_path;
+        else
+                p = memdupa_suffix0(sa->sun_path, sizeof(sa->sun_path));
+
+        if (unlink(p) < 0)
+                return -errno;
+
+        return 1;
+}
+
+int sockaddr_un_set_path(struct sockaddr_un *ret, const char *path) {
+        size_t l;
+
+        assert(ret);
+        assert(path);
+
+        /* Initialize ret->sun_path from the specified argument. This will interpret paths starting with '@' as
+         * abstract namespace sockets, and those starting with '/' as regular filesystem sockets. It won't accept
+         * anything else (i.e. no relative paths), to avoid ambiguities. Note that this function cannot be used to
+         * reference paths in the abstract namespace that include NUL bytes in the name. */
+
+        l = strlen(path);
+        if (l == 0)
+                return -EINVAL;
+        if (!IN_SET(path[0], '/', '@'))
+                return -EINVAL;
+        if (path[1] == 0)
+                return -EINVAL;
+
+        /* Don't allow paths larger than the space in sockaddr_un. Note that we are a tiny bit more restrictive than
+         * the kernel is: we insist on NUL termination (both for abstract namespace and regular file system socket
+         * addresses!), which the kernel doesn't. We do this to reduce chance of incompatibility with other apps that
+         * do not expect non-NUL terminated file system path*/
+        if (l+1 > sizeof(ret->sun_path))
+                return -EINVAL;
+
+        *ret = (struct sockaddr_un) {
+                .sun_family = AF_UNIX,
+        };
+
+        if (path[0] == '@') {
+                /* Abstract namespace socket */
+                memcpy(ret->sun_path + 1, path + 1, l); /* copy *with* trailing NUL byte */
+                return (int) (offsetof(struct sockaddr_un, sun_path) + l); /* 🔥 *don't* 🔥 include trailing NUL in size */
+
+        } else {
+                assert(path[0] == '/');
+
+                /* File system socket */
+                memcpy(ret->sun_path, path, l + 1); /* copy *with* trailing NUL byte */
+                return (int) (offsetof(struct sockaddr_un, sun_path) + l + 1); /* include trailing NUL in size */
+        }
 }

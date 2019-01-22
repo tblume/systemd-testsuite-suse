@@ -4,7 +4,6 @@
 #include <linux/if.h>
 
 #include "alloc-util.h"
-#include "dhcp-lease-internal.h"
 #include "hostname-util.h"
 #include "parse-util.h"
 #include "netdev/vrf.h"
@@ -15,9 +14,7 @@
 #include "string-util.h"
 #include "sysctl-util.h"
 
-static int dhcp4_route_handler(sd_netlink *rtnl, sd_netlink_message *m,
-                               void *userdata) {
-        _cleanup_(link_unrefp) Link *link = userdata;
+static int dhcp4_route_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
         int r;
 
         assert(link);
@@ -87,11 +84,14 @@ static int link_set_dhcp_routes(Link *link) {
                 log_link_debug_errno(link, n, "DHCP error: could not get routes: %m");
 
         for (i = 0; i < n; i++) {
-                if (static_routes[i]->option == SD_DHCP_OPTION_CLASSLESS_STATIC_ROUTE)
+                switch (sd_dhcp_route_get_option(static_routes[i])) {
+                case SD_DHCP_OPTION_CLASSLESS_STATIC_ROUTE:
                         classless_route = true;
-
-                if (static_routes[i]->option == SD_DHCP_OPTION_STATIC_ROUTE)
+                        break;
+                case SD_DHCP_OPTION_STATIC_ROUTE:
                         static_route = true;
+                        break;
+                }
         }
 
         for (i = 0; i < n; i++) {
@@ -99,7 +99,8 @@ static int link_set_dhcp_routes(Link *link) {
 
                 /* if the DHCP server returns both a Classless Static Routes option and a Static Routes option,
                    the DHCP client MUST ignore the Static Routes option. */
-                if (classless_route && static_routes[i]->option == SD_DHCP_OPTION_STATIC_ROUTE)
+                if (classless_route &&
+                    sd_dhcp_route_get_option(static_routes[i]) != SD_DHCP_OPTION_CLASSLESS_STATIC_ROUTE)
                         continue;
 
                 r = route_new(&route);
@@ -213,8 +214,7 @@ static int dhcp_lease_lost(Link *link) {
                                         assert_se(sd_dhcp_route_get_destination(routes[i], &route->dst.in) >= 0);
                                         assert_se(sd_dhcp_route_get_destination_prefix_length(routes[i], &route->dst_prefixlen) >= 0);
 
-                                        route_remove(route, link,
-                                                     link_route_remove_handler);
+                                        route_remove(route, link, NULL);
                                 }
                         }
                 }
@@ -234,8 +234,7 @@ static int dhcp_lease_lost(Link *link) {
                                 route_gw->dst_prefixlen = 32;
                                 route_gw->scope = RT_SCOPE_LINK;
 
-                                route_remove(route_gw, link,
-                                             link_route_remove_handler);
+                                route_remove(route_gw, link, NULL);
                         }
 
                         r = route_new(&route);
@@ -243,8 +242,7 @@ static int dhcp_lease_lost(Link *link) {
                                 route->family = AF_INET;
                                 route->gw.in = gateway;
 
-                                route_remove(route, link,
-                                             link_route_remove_handler);
+                                route_remove(route, link, NULL);
                         }
                 }
 
@@ -258,7 +256,7 @@ static int dhcp_lease_lost(Link *link) {
                         address->in_addr.in = addr;
                         address->prefixlen = prefixlen;
 
-                        address_remove(address, link, link_address_remove_handler);
+                        address_remove(address, link, NULL);
                 }
         }
 
@@ -300,9 +298,7 @@ static int dhcp_lease_lost(Link *link) {
         return 0;
 }
 
-static int dhcp4_address_handler(sd_netlink *rtnl, sd_netlink_message *m,
-                                 void *userdata) {
-        _cleanup_(link_unrefp) Link *link = userdata;
+static int dhcp4_address_handler(sd_netlink *rtnl, sd_netlink_message *m, Link *link) {
         int r;
 
         assert(link);
@@ -674,10 +670,12 @@ int dhcp4_set_client_identifier(Link *link) {
 
                 if (duid->type == DUID_TYPE_LLT && duid->raw_data_len == 0)
                         r = sd_dhcp_client_set_iaid_duid_llt(link->dhcp_client,
+                                                             link->network->iaid_set,
                                                              link->network->iaid,
                                                              duid->llt_time);
                 else
                         r = sd_dhcp_client_set_iaid_duid(link->dhcp_client,
+                                                         link->network->iaid_set,
                                                          link->network->iaid,
                                                          duid->type,
                                                          duid->raw_data_len > 0 ? duid->raw_data : NULL,
@@ -692,7 +690,7 @@ int dhcp4_set_client_identifier(Link *link) {
 
                 if (duid->type == DUID_TYPE_LLT && duid->raw_data_len == 0)
                         r = sd_dhcp_client_set_duid_llt(link->dhcp_client,
-                                                             duid->llt_time);
+                                                        duid->llt_time);
                 else
                         r = sd_dhcp_client_set_duid(link->dhcp_client,
                                                     duid->type,

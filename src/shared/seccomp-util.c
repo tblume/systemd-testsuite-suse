@@ -308,6 +308,7 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "io_cancel\0"
                 "io_destroy\0"
                 "io_getevents\0"
+                "io_pgetevents\0"
                 "io_setup\0"
                 "io_submit\0"
         },
@@ -370,8 +371,6 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 .value =
                 "lookup_dcookie\0"
                 "perf_event_open\0"
-                "process_vm_readv\0"
-                "process_vm_writev\0"
                 "ptrace\0"
                 "rtas\0"
 #ifdef __NR_s390_runtime_instr
@@ -619,7 +618,9 @@ const SyscallFilterSet syscall_filter_sets[_SYSCALL_FILTER_SET_MAX] = {
                 "bpf\0"
                 "capset\0"
                 "chroot\0"
+                "fanotify_init\0"
                 "nfsservctl\0"
+                "open_by_handle_at\0"
                 "pivot_root\0"
                 "quotactl\0"
                 "setdomainname\0"
@@ -871,10 +872,10 @@ int seccomp_add_syscall_filter_item(scmp_filter_ctx *seccomp, const char *name, 
                 const SyscallFilterSet *other;
 
                 other = syscall_filter_set_find(name);
-                if (!other) {
-                        log_debug("Filter set %s is not known!", name);
-                        return -EINVAL;
-                }
+                if (!other)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Filter set %s is not known!",
+                                               name);
 
                 return seccomp_add_syscall_filter_set(seccomp, other, action, exclude, log_missing);
 
@@ -933,7 +934,7 @@ int seccomp_load_syscall_filter_set(uint32_t default_action, const SyscallFilter
         assert(set);
 
         /* The one-stop solution: allocate a seccomp object, add the specified filter to it, and apply it. Once for
-         * earch local arch. */
+         * each local arch. */
 
         SECCOMP_FOREACH_LOCAL_ARCH(arch) {
                 _cleanup_(seccomp_releasep) scmp_filter_ctx seccomp = NULL;
@@ -1480,7 +1481,7 @@ int seccomp_restrict_realtime(void) {
 static int add_seccomp_syscall_filter(scmp_filter_ctx seccomp,
                                       uint32_t arch,
                                       int nr,
-                                      unsigned int arg_cnt,
+                                      unsigned arg_cnt,
                                       const struct scmp_arg_cmp arg) {
         int r;
 

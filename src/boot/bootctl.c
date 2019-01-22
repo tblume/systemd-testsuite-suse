@@ -29,13 +29,16 @@
 #include "fileio.h"
 #include "fs-util.h"
 #include "locale-util.h"
+#include "main-func.h"
 #include "pager.h"
 #include "parse-util.h"
+#include "pretty-print.h"
 #include "rm-rf.h"
 #include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "tmpfile-util.h"
 #include "umask-util.h"
 #include "utf8.h"
 #include "util.h"
@@ -45,7 +48,9 @@
 static char *arg_path = NULL;
 static bool arg_print_path = false;
 static bool arg_touch_variables = true;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
+
+STATIC_DESTRUCTOR_REGISTER(arg_path, freep);
 
 static int acquire_esp(
                 bool unprivileged_mode,
@@ -158,9 +163,9 @@ static int enumerate_binaries(const char *esp_path, const char *path, const char
                 if (r < 0)
                         return r;
                 if (r > 0)
-                        printf("         File: %s/%s/%s (%s%s%s)\n", special_glyph(TREE_RIGHT), path, de->d_name, ansi_highlight(), v, ansi_normal());
+                        printf("         File: %s/%s/%s (%s%s%s)\n", special_glyph(SPECIAL_GLYPH_TREE_RIGHT), path, de->d_name, ansi_highlight(), v, ansi_normal());
                 else
-                        printf("         File: %s/%s/%s\n", special_glyph(TREE_RIGHT), path, de->d_name);
+                        printf("         File: %s/%s/%s\n", special_glyph(SPECIAL_GLYPH_TREE_RIGHT), path, de->d_name);
                 c++;
         }
 
@@ -220,7 +225,7 @@ static int print_efi_option(uint16_t id, bool in_order) {
         printf("           ID: 0x%04X\n", id);
         printf("       Status: %sactive%s\n", active ? "" : "in", in_order ? ", boot-order" : "");
         printf("    Partition: /dev/disk/by-partuuid/%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n", SD_ID128_FORMAT_VAL(partition));
-        printf("         File: %s%s\n", special_glyph(TREE_RIGHT), path);
+        printf("         File: %s%s\n", special_glyph(SPECIAL_GLYPH_TREE_RIGHT), path);
         printf("\n");
 
         return 0;
@@ -242,7 +247,7 @@ static int status_variables(void) {
         if (n_order == -ENOENT)
                 n_order = 0;
         else if (n_order < 0)
-                return log_error_errno(n_order, "Failed to read EFI boot order.");
+                return log_error_errno(n_order, "Failed to read EFI boot order: %m");
 
         /* print entries in BootOrder first */
         printf("Boot Loaders Listed in EFI Variables:\n");
@@ -368,18 +373,18 @@ static int version_check(int fd_from, const char *from, int fd_to, const char *t
         r = get_file_version(fd_from, &a);
         if (r < 0)
                 return r;
-        if (r == 0) {
-                log_error("Source file \"%s\" does not carry version information!", from);
-                return -EINVAL;
-        }
+        if (r == 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Source file \"%s\" does not carry version information!",
+                                       from);
 
         r = get_file_version(fd_to, &b);
         if (r < 0)
                 return r;
-        if (r == 0 || compare_product(a, b) != 0) {
-                log_notice("Skipping \"%s\", since it's owned by another boot loader.", to);
-                return -EEXIST;
-        }
+        if (r == 0 || compare_product(a, b) != 0)
+                return log_notice_errno(SYNTHETIC_ERRNO(EEXIST),
+                                        "Skipping \"%s\", since it's owned by another boot loader.",
+                                        to);
 
         if (compare_version(a, b) < 0) {
                 log_warning("Skipping \"%s\", since a newer boot loader version exists already.", to);
@@ -818,7 +823,7 @@ static int install_loader_config(const char *esp_path) {
         if (fd < 0)
                 return log_error_errno(fd, "Failed to open \"%s\" for writing: %m", p);
 
-        f = fdopen(fd, "we");
+        f = fdopen(fd, "w");
         if (!f) {
                 safe_close(fd);
                 return log_oom();
@@ -923,7 +928,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case '?':
@@ -965,17 +970,31 @@ static int verb_status(int argc, char *argv[], void *userdata) {
         r = 0; /* If we couldn't determine the path, then don't consider that a problem from here on, just show what we
                 * can show */
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         if (is_efi_boot()) {
+                static const struct {
+                        uint64_t flag;
+                        const char *name;
+                } flags[] = {
+                        { EFI_LOADER_FEATURE_BOOT_COUNTING,           "Boot counting"                 },
+                        { EFI_LOADER_FEATURE_CONFIG_TIMEOUT,          "Menu timeout control"          },
+                        { EFI_LOADER_FEATURE_CONFIG_TIMEOUT_ONE_SHOT, "One-shot menu timeout control" },
+                        { EFI_LOADER_FEATURE_ENTRY_DEFAULT,           "Default entry control"         },
+                        { EFI_LOADER_FEATURE_ENTRY_ONESHOT,           "One-shot entry control"        },
+                };
+
                 _cleanup_free_ char *fw_type = NULL, *fw_info = NULL, *loader = NULL, *loader_path = NULL, *stub = NULL;
                 sd_id128_t loader_part_uuid = SD_ID128_NULL;
+                uint64_t loader_features = 0;
+                size_t i;
 
                 read_loader_efi_var("LoaderFirmwareType", &fw_type);
                 read_loader_efi_var("LoaderFirmwareInfo", &fw_info);
                 read_loader_efi_var("LoaderInfo", &loader);
                 read_loader_efi_var("StubInfo", &stub);
                 read_loader_efi_var("LoaderImageIdentifier", &loader_path);
+                (void) efi_loader_get_features(&loader_features);
 
                 if (loader_path)
                         efi_tilt_backslashes(loader_path);
@@ -992,6 +1011,20 @@ static int verb_status(int argc, char *argv[], void *userdata) {
 
                 printf("Current Boot Loader:\n");
                 printf("      Product: %s%s%s\n", ansi_highlight(), strna(loader), ansi_normal());
+
+                for (i = 0; i < ELEMENTSOF(flags); i++) {
+
+                        if (i == 0)
+                                printf("     Features: ");
+                        else
+                                printf("               ");
+
+                        if (FLAGS_SET(loader_features, flags[i].flag))
+                                printf("%s%s%s %s\n", ansi_highlight_green(), special_glyph(SPECIAL_GLYPH_CHECK_MARK), ansi_normal(), flags[i].name);
+                        else
+                                printf("%s%s%s %s\n", ansi_highlight_red(), special_glyph(SPECIAL_GLYPH_CROSS_MARK), ansi_normal(), flags[i].name);
+                }
+
                 if (stub)
                         printf("         Stub: %s\n", stub);
                 if (!sd_id128_is_null(loader_part_uuid))
@@ -999,7 +1032,7 @@ static int verb_status(int argc, char *argv[], void *userdata) {
                                SD_ID128_FORMAT_VAL(loader_part_uuid));
                 else
                         printf("          ESP: n/a\n");
-                printf("         File: %s%s\n", special_glyph(TREE_RIGHT), strna(loader_path));
+                printf("         File: %s%s\n", special_glyph(SPECIAL_GLYPH_TREE_RIGHT), strna(loader_path));
                 printf("\n");
         } else
                 printf("System:\n    Not booted with EFI\n\n");
@@ -1054,7 +1087,7 @@ static int verb_list(int argc, char *argv[], void *userdata) {
         else {
                 size_t n;
 
-                (void) pager_open(arg_no_pager, false);
+                (void) pager_open(arg_pager_flags);
 
                 printf("Boot Loader Entries:\n");
 
@@ -1161,10 +1194,9 @@ static int verb_set_default(int argc, char *argv[], void *userdata) {
         const char *name;
         int r;
 
-        if (!is_efi_boot()) {
-                log_error("Not booted with UEFI.");
-                return -EOPNOTSUPP;
-        }
+        if (!is_efi_boot())
+                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                       "Not booted with UEFI.");
 
         if (access("/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f", F_OK) < 0) {
                 if (errno == ENOENT) {
@@ -1175,15 +1207,15 @@ static int verb_set_default(int argc, char *argv[], void *userdata) {
                 return log_error_errno(errno, "Failed to detect whether boot loader supports '%s' operation: %m", argv[0]);
         }
 
-        if (detect_container() > 0) {
-                log_error("'%s' operation not supported in a container.", argv[0]);
-                return -EOPNOTSUPP;
-        }
+        if (detect_container() > 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                       "'%s' operation not supported in a container.",
+                                       argv[0]);
 
-        if (!arg_touch_variables) {
-                log_error("'%s' operation cannot be combined with --touch-variables=no.", argv[0]);
-                return -EINVAL;
-        }
+        if (!arg_touch_variables)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "'%s' operation cannot be combined with --touch-variables=no.",
+                                       argv[0]);
 
         name = streq(argv[0], "set-default") ? "LoaderEntryDefault" : "LoaderEntryOneShot";
 
@@ -1223,7 +1255,7 @@ static int bootctl_main(int argc, char *argv[]) {
         return dispatch_verb(argc, argv, verbs, NULL);
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
         log_parse_environment();
@@ -1235,13 +1267,9 @@ int main(int argc, char *argv[]) {
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
-        r = bootctl_main(argc, argv);
-
- finish:
-        pager_close();
-        free(arg_path);
-
-        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        return bootctl_main(argc, argv);
 }
+
+DEFINE_MAIN_FUNCTION(run);

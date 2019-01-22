@@ -554,8 +554,7 @@ int bus_message_from_malloc(
 
         m->n_iovec = 1;
         m->iovec = m->iovec_fixed;
-        m->iovec[0].iov_base = buffer;
-        m->iovec[0].iov_len = length;
+        m->iovec[0] = IOVEC_MAKE(buffer, length);
 
         r = bus_message_parse_fields(m);
         if (r < 0)
@@ -3832,11 +3831,13 @@ static int build_struct_offsets(
                                         x = size - (n_variable * sz);
 
                                 offset = m->rindex + x;
-                                if (offset < start) {
-                                        log_debug("For type %s with alignment %zu, message specifies offset %zu which is smaller than previous end %zu + alignment = %zu",
-                                                  t, align, offset, previous, start);
-                                        return -EBADMSG;
-                                }
+                                if (offset < start)
+                                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                                               "For type %s with alignment %zu, message specifies offset %zu which is smaller than previous end %zu + alignment = %zu",
+                                                               t, align,
+                                                               offset,
+                                                               previous,
+                                                               start);
                         } else
                                 /* Fixed size */
                                 offset = start + k;
@@ -4057,7 +4058,7 @@ _public_ int sd_bus_message_enter_container(sd_bus_message *m,
                 end = m->rindex + 0;
         else
                 end = m->rindex + c->item_size;
-        
+
         m->containers[m->n_containers++] = (struct bus_container) {
                  .enclosing = type,
                  .signature = TAKE_PTR(signature),
@@ -5078,6 +5079,7 @@ int bus_message_parse_fields(sd_bus_message *m) {
                                 return -EBADMSG;
 
                         if (*p == 0) {
+                                char *k;
                                 size_t l;
 
                                 /* We found the beginning of the signature
@@ -5091,9 +5093,11 @@ int bus_message_parse_fields(sd_bus_message *m) {
                                     p[1 + l - 1] != SD_BUS_TYPE_STRUCT_END)
                                         return -EBADMSG;
 
-                                if (free_and_strndup(&m->root_container.signature,
-                                                     p + 1 + 1, l - 2) < 0)
+                                k = memdup_suffix0(p + 1 + 1, l - 2);
+                                if (!k)
                                         return -ENOMEM;
+
+                                free_and_replace(m->root_container.signature, k);
                                 break;
                         }
 
@@ -5823,16 +5827,6 @@ int bus_message_remarshal(sd_bus *bus, sd_bus_message **m) {
         *m = TAKE_PTR(n);
 
         return 0;
-}
-
-int bus_message_append_sender(sd_bus_message *m, const char *sender) {
-        assert(m);
-        assert(sender);
-
-        assert_return(!m->sealed, -EPERM);
-        assert_return(!m->sender, -EPERM);
-
-        return message_append_field_string(m, BUS_MESSAGE_HEADER_SENDER, SD_BUS_TYPE_STRING, sender, &m->sender);
 }
 
 _public_ int sd_bus_message_get_priority(sd_bus_message *m, int64_t *priority) {

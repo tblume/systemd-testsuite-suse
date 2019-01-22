@@ -6,11 +6,11 @@
 #include "alloc-util.h"
 #include "escape.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "fs-util.h"
 #include "label.h"
 #include "mkdir.h"
 #include "mount-util.h"
+#include "mountpoint-util.h"
 #include "nspawn-mount.h"
 #include "parse-util.h"
 #include "path-util.h"
@@ -19,6 +19,7 @@
 #include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tmpfile-util.h"
 #include "user-util.h"
 #include "util.h"
 
@@ -556,6 +557,8 @@ int mount_all(const char *dest,
                   MOUNT_FATAL },
                 { "tmpfs",           "/run",            "tmpfs", "mode=755",  MS_NOSUID|MS_NODEV|MS_STRICTATIME,
                   MOUNT_FATAL },
+                { "mqueue",          "/dev/mqueue",     "mqueue", NULL,       0,
+                  MOUNT_FATAL },
 
 #if HAVE_SELINUX
                 { "/sys/fs/selinux", "/sys/fs/selinux", NULL,    NULL,        MS_BIND,
@@ -678,15 +681,15 @@ static int mount_bind(const char *dest, CustomMount *m) {
                 if (stat(where, &dest_st) < 0)
                         return log_error_errno(errno, "Failed to stat %s: %m", where);
 
-                if (S_ISDIR(source_st.st_mode) && !S_ISDIR(dest_st.st_mode)) {
-                        log_error("Cannot bind mount directory %s on file %s.", m->source, where);
-                        return -EINVAL;
-                }
+                if (S_ISDIR(source_st.st_mode) && !S_ISDIR(dest_st.st_mode))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Cannot bind mount directory %s on file %s.",
+                                               m->source, where);
 
-                if (!S_ISDIR(source_st.st_mode) && S_ISDIR(dest_st.st_mode)) {
-                        log_error("Cannot bind mount file %s on directory %s.", m->source, where);
-                        return -EINVAL;
-                }
+                if (!S_ISDIR(source_st.st_mode) && S_ISDIR(dest_st.st_mode))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Cannot bind mount file %s on directory %s.",
+                                               m->source, where);
 
         } else { /* Path doesn't exist yet? */
                 r = mkdir_parents_label(where, 0755);

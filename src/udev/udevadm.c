@@ -6,9 +6,10 @@
 #include <stdio.h>
 
 #include "alloc-util.h"
+#include "main-func.h"
+#include "pretty-print.h"
 #include "selinux-util.h"
 #include "string-util.h"
-#include "terminal-util.h"
 #include "udevadm.h"
 #include "udev-util.h"
 #include "verbs.h"
@@ -106,25 +107,20 @@ static int udevadm_main(int argc, char *argv[]) {
         return dispatch_verb(argc, argv, verbs, NULL);
 }
 
-int main(int argc, char *argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
         udev_parse_config();
         log_parse_environment();
         log_open();
-        mac_selinux_init();
+        log_set_max_level_realm(LOG_REALM_SYSTEMD, log_get_max_level());
 
         r = parse_argv(argc, argv);
         if (r <= 0)
-                goto finish;
+                return r;
 
-        r = udevadm_main(argc, argv);
-
-finish:
-        mac_selinux_finish();
-        log_close();
-
-        /* TODO: fix this later.
-         * Currently, verbs return positive values on failure. */
-        return r < 0 ? EXIT_FAILURE : r;
+        mac_selinux_init();
+        return udevadm_main(argc, argv);
 }
+
+DEFINE_MAIN_FUNCTION(run);

@@ -1,3 +1,7 @@
+---
+title: What settings are currently available for transient units?
+---
+
 # What settings are currently available for transient units?
 
 Our intention is to make all settings that are available as unit file settings
@@ -45,6 +49,8 @@ Most generic unit settings are available for transient units.
 ✓ StartLimitAction=ACTION
 ✓ FailureAction=
 ✓ SuccessAction=
+✓ FailureActionExitStatus=
+✓ SuccessActionExitStatus=
 ✓ AddRef=
 ✓ RebootArgument=STRING
 ✓ ConditionPathExists=
@@ -135,6 +141,8 @@ All execution-related settings are available for transient units.
 ✓ SyslogLevelPrefix=
 ✓ LogLevelMax=
 ✓ LogExtraFields=
+✓ LogRateLimitIntervalSec=
+✓ LogRateLimitBurst=
 ✓ SecureBits=
 ✓ CapabilityBoundingSet=
 ✓ AmbientCapabilities=
@@ -280,7 +288,6 @@ Most service unit settings are available for transient units.
 ✓ WatchdogSec=
 ✓ Type=
 ✓ Restart=
-✓ PermissionsStartOnly=
 ✓ RootDirectoryStartOnly=
 ✓ RemainAfterExit=
 ✓ GuessMainPID=

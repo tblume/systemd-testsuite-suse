@@ -17,6 +17,7 @@
 #include "fd-util.h"
 #include "log.h"
 #include "macro.h"
+#include "missing.h"
 #include "parse-util.h"
 #include "process-util.h"
 #include "signal-util.h"
@@ -183,6 +184,11 @@ static void test_get_process_cmdline_harder(void) {
 
         if (geteuid() != 0) {
                 log_info("Skipping %s: not root", __func__);
+                return;
+        }
+
+        if (!have_namespaces()) {
+                log_notice("Testing without namespaces, skipping %s", __func__);
                 return;
         }
 

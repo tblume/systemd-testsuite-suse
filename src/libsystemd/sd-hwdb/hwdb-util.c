@@ -16,6 +16,7 @@
 #include "strbuf.h"
 #include "string-util.h"
 #include "strv.h"
+#include "tmpfile-util.h"
 
 static const char *default_hwdb_bin_dir = "/etc/udev";
 static const char * const conf_file_dirs[] = {
@@ -366,7 +367,7 @@ static int trie_store(struct trie *trie, const char *filename, bool compat) {
         int64_t size;
         struct trie_header_f h = {
                 .signature = HWDB_SIG,
-                .tool_version = htole64(atoi(PACKAGE_VERSION)),
+                .tool_version = htole64(PROJECT_VERSION),
                 .header_size = htole64(sizeof(struct trie_header_f)),
                 .node_size = htole64(sizeof(struct trie_node_f)),
                 .child_entry_size = htole64(sizeof(struct trie_child_entry_f)),
@@ -472,7 +473,6 @@ static int import_file(struct trie *trie, const char *filename, uint16_t file_pr
                 HW_DATA,
         } state = HW_NONE;
         _cleanup_fclose_ FILE *f = NULL;
-        char line[LINE_MAX];
         _cleanup_strv_free_ char **match_list = NULL;
         uint32_t line_number = 0;
         char *match = NULL;
@@ -482,9 +482,16 @@ static int import_file(struct trie *trie, const char *filename, uint16_t file_pr
         if (!f)
                 return -errno;
 
-        while (fgets(line, sizeof(line), f)) {
+        for (;;) {
+                _cleanup_free_ char *line = NULL;
                 size_t len;
                 char *pos;
+
+                r = read_line(f, LONG_LINE_MAX, &line);
+                if (r < 0)
+                        return r;
+                if (r == 0)
+                        break;
 
                 ++line_number;
 

@@ -1,3 +1,7 @@
+---
+title: Known Environment Variables
+---
+
 # Known Environment Variables
 
 A number of systemd components take additional runtime parameters via
@@ -46,8 +50,13 @@ All tools:
   are understood, too (us, ms, s, min, h, d, w, month, y). If it is not set or set
   to 0, then the built-in default is used.
 
-* `$SYSTEMD_MEMPOOL=0` — if set the internal memory caching logic employed by
+* `$SYSTEMD_MEMPOOL=0` — if set, the internal memory caching logic employed by
   hash tables is turned off, and libc malloc() is used for all allocations.
+
+* `$SYSTEMD_EMOJI=0` — if set, tools such as "systemd-analyze security" will
+  not output graphical smiley emojis, but ASCII alternatives instead. Note that
+  this only controls use of Unicode emoji glyphs, and has no effect on other
+  Unicode glyphs.
 
 systemctl:
 
@@ -86,6 +95,18 @@ systemd-logind:
   hibernation is available even if the swap devices do not provide enough room
   for it.
 
+systemd-udevd:
+
+* `$NET_NAMING_SCHEME=` – if set, takes a network naming scheme (i.e. one of
+  "v238", "v239", "v240"…, or the special value "latest") as parameter. If
+  specified udev's net_id builtin will follow the specified naming scheme when
+  determining stable network interface names. This may be used to revert to
+  naming schemes of older udev versions, in order to provide more stable naming
+  across updates. This environment variable takes precedence over the kernel
+  command line option `net.naming-scheme=`, except if the value is prefixed
+  with `:` in which case the kernel command line option takes precedence, if it
+  is specified as well.
+
 installed systemd tests:
 
 * `$SYSTEMD_TEST_DATA` — override the location of test data. This is useful if
@@ -112,12 +133,24 @@ systemd-timedated:
   first existing unit listed in the environment variable, and
   `timedatectl set-ntp off` disables and stops all listed units.
 
+systemd-sulogin-shell:
+
+* `$SYSTEMD_SULOGIN_FORCE=1` — This skips asking for the root password if the
+  root password is not available (such as when the root account is locked).
+  See `sulogin(8)` for more details.
+
 bootctl and other tools that access the EFI System Partition (ESP):
 
 * `$SYSTEMD_RELAX_ESP_CHECKS=1` — if set, the ESP validation checks are
   relaxed. Specifically, validation checks that ensure the specified ESP path
   is a FAT file system are turned off, as are checks that the path is located
   on a GPT partition with the correct type UUID.
+
+* `$SYSTEMD_ESP_PATH=…` — override the path to the EFI System Partition. This
+  may be used to override ESP path auto detection, and redirect any accesses to
+  the ESP to the specified directory. Not that unlike with bootctl's --path=
+  switch only very superficial validation of the specified path is done when
+  this environment variable is used.
 
 systemd itself:
 
@@ -136,3 +169,11 @@ systemd itself:
 * `$SYSTEMD_ACTIVATION_SCOPE` — closely related to `$SYSTEMD_ACTIVATION_UNIT`,
   it is either set to `system` or `user` depending on whether the NSS/PAM
   module is called by systemd in `--system` or `--user` mode.
+
+systemd-remount-fs:
+
+* `$SYSTEMD_REMOUNT_ROOT_RW=1` — if set and and no entry for the root directory
+  exists in /etc/fstab (this file always takes precedence), then the root
+  directory is remounted writable. This is primarily used by
+  systemd-gpt-auto-generator to ensure the root partition is mounted writable
+  in accordance to the GPT partition flags.

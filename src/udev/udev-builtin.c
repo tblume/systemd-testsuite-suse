@@ -4,12 +4,15 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "device-private.h"
+#include "device-util.h"
 #include "string-util.h"
-#include "udev.h"
+#include "strv.h"
+#include "udev-builtin.h"
 
 static bool initialized;
 
-static const struct udev_builtin *builtins[] = {
+static const struct udev_builtin *builtins[_UDEV_BUILTIN_MAX] = {
 #if HAVE_BLKID
         [UDEV_BUILTIN_BLKID] = &udev_builtin_blkid,
 #endif
@@ -30,12 +33,12 @@ static const struct udev_builtin *builtins[] = {
 };
 
 void udev_builtin_init(void) {
-        unsigned int i;
+        unsigned i;
 
         if (initialized)
                 return;
 
-        for (i = 0; i < ELEMENTSOF(builtins); i++)
+        for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
                 if (builtins[i] && builtins[i]->init)
                         builtins[i]->init();
 
@@ -43,12 +46,12 @@ void udev_builtin_init(void) {
 }
 
 void udev_builtin_exit(void) {
-        unsigned int i;
+        unsigned i;
 
         if (!initialized)
                 return;
 
-        for (i = 0; i < ELEMENTSOF(builtins); i++)
+        for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
                 if (builtins[i] && builtins[i]->exit)
                         builtins[i]->exit();
 
@@ -56,23 +59,25 @@ void udev_builtin_exit(void) {
 }
 
 bool udev_builtin_validate(void) {
-        unsigned int i;
+        unsigned i;
 
-        for (i = 0; i < ELEMENTSOF(builtins); i++)
+        for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
                 if (builtins[i] && builtins[i]->validate && builtins[i]->validate())
                         return true;
         return false;
 }
 
 void udev_builtin_list(void) {
-        unsigned int i;
+        unsigned i;
 
-        for (i = 0; i < ELEMENTSOF(builtins); i++)
+        for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
                 if (builtins[i])
                         fprintf(stderr, "  %-14s  %s\n", builtins[i]->name, builtins[i]->help);
 }
 
 const char *udev_builtin_name(enum udev_builtin_cmd cmd) {
+        assert(cmd >= 0 && cmd < _UDEV_BUILTIN_MAX);
+
         if (!builtins[cmd])
                 return NULL;
 
@@ -80,6 +85,8 @@ const char *udev_builtin_name(enum udev_builtin_cmd cmd) {
 }
 
 bool udev_builtin_run_once(enum udev_builtin_cmd cmd) {
+        assert(cmd >= 0 && cmd < _UDEV_BUILTIN_MAX);
+
         if (!builtins[cmd])
                 return false;
 
@@ -87,22 +94,26 @@ bool udev_builtin_run_once(enum udev_builtin_cmd cmd) {
 }
 
 enum udev_builtin_cmd udev_builtin_lookup(const char *command) {
-        char name[UTIL_PATH_SIZE];
         enum udev_builtin_cmd i;
-        char *pos;
+        size_t n;
 
-        strscpy(name, sizeof(name), command);
-        pos = strchr(name, ' ');
-        if (pos)
-                pos[0] = '\0';
-        for (i = 0; i < ELEMENTSOF(builtins); i++)
-                if (builtins[i] && streq(builtins[i]->name, name))
+        assert(command);
+
+        command += strspn(command, WHITESPACE);
+        n = strcspn(command, WHITESPACE);
+        for (i = 0; i < _UDEV_BUILTIN_MAX; i++)
+                if (builtins[i] && strneq(builtins[i]->name, command, n))
                         return i;
-        return UDEV_BUILTIN_MAX;
+
+        return _UDEV_BUILTIN_INVALID;
 }
 
-int udev_builtin_run(struct udev_device *dev, enum udev_builtin_cmd cmd, const char *command, bool test) {
+int udev_builtin_run(sd_device *dev, enum udev_builtin_cmd cmd, const char *command, bool test) {
         _cleanup_strv_free_ char **argv = NULL;
+
+        assert(dev);
+        assert(cmd >= 0 && cmd < _UDEV_BUILTIN_MAX);
+        assert(command);
 
         if (!builtins[cmd])
                 return -EOPNOTSUPP;
@@ -116,10 +127,19 @@ int udev_builtin_run(struct udev_device *dev, enum udev_builtin_cmd cmd, const c
         return builtins[cmd]->cmd(dev, strv_length(argv), argv, test);
 }
 
-int udev_builtin_add_property(struct udev_device *dev, bool test, const char *key, const char *val) {
-        udev_device_add_property(dev, key, val);
+int udev_builtin_add_property(sd_device *dev, bool test, const char *key, const char *val) {
+        int r;
+
+        assert(dev);
+        assert(key);
+
+        r = device_add_property(dev, key, val);
+        if (r < 0)
+                return log_device_debug_errno(dev, r, "Failed to add property '%s%s%s'",
+                                              key, val ? "=" : "", strempty(val));
 
         if (test)
                 printf("%s=%s\n", key, val);
+
         return 0;
 }

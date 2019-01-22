@@ -31,6 +31,7 @@
 #include "bus-util.h"
 #include "catalog.h"
 #include "chattr-util.h"
+#include "def.h"
 #include "device-private.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -53,6 +54,7 @@
 #include "pager.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "pretty-print.h"
 #include "rlimit-util.h"
 #include "set.h"
 #include "sigbus.h"
@@ -60,6 +62,7 @@
 #include "strv.h"
 #include "syslog-util.h"
 #include "terminal-util.h"
+#include "tmpfile-util.h"
 #include "unit-name.h"
 #include "user-util.h"
 
@@ -83,10 +86,9 @@ static int pattern_compile(const char *pattern, unsigned flags, pcre2_code **out
 
                 r = pcre2_get_error_message(errorcode, buf, sizeof buf);
 
-                log_error("Bad pattern \"%s\": %s",
-                          pattern,
-                          r < 0 ? "unknown error" : (char*) buf);
-                return -EINVAL;
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Bad pattern \"%s\": %s", pattern,
+                                       r < 0 ? "unknown error" : (char *)buf);
         }
 
         *out = p;
@@ -103,11 +105,10 @@ enum {
 
 static OutputMode arg_output = OUTPUT_SHORT;
 static bool arg_utc = false;
-static bool arg_pager_end = false;
 static bool arg_follow = false;
 static bool arg_full = true;
 static bool arg_all = false;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static int arg_lines = ARG_LINES_DEFAULT;
 static bool arg_no_tail = false;
 static bool arg_quiet = false;
@@ -166,6 +167,7 @@ static enum {
         ACTION_SYNC,
         ACTION_ROTATE,
         ACTION_VACUUM,
+        ACTION_ROTATE_AND_VACUUM,
         ACTION_LIST_FIELDS,
         ACTION_LIST_FIELD_NAMES,
 } arg_action = ACTION_SHOW;
@@ -296,7 +298,7 @@ static int help(void) {
         _cleanup_free_ char *link = NULL;
         int r;
 
-        (void) pager_open(arg_no_pager, arg_pager_end);
+        (void) pager_open(arg_pager_flags);
 
         r = terminal_urlify_man("journalctl", "1", &link);
         if (r < 0)
@@ -330,7 +332,8 @@ static int help(void) {
                "  -o --output=STRING         Change journal output mode (short, short-precise,\n"
                "                               short-iso, short-iso-precise, short-full,\n"
                "                               short-monotonic, short-unix, verbose, export,\n"
-               "                               json, json-pretty, json-sse, cat, with-unit)\n"
+               "                               json, json-pretty, json-sse, json-seq, cat,\n"
+               "                               with-unit)\n"
                "     --output-fields=LIST    Select fields to print in verbose/export/json modes\n"
                "     --utc                   Express time in Coordinated Universal Time (UTC)\n"
                "  -x --catalog               Add message explanations where available\n"
@@ -489,11 +492,11 @@ static int parse_argv(int argc, char *argv[]) {
                         return version();
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case 'e':
-                        arg_pager_end = true;
+                        arg_pager_flags |= PAGER_JUMP_TO_END;
 
                         if (arg_lines == ARG_LINES_DEFAULT)
                                 arg_lines = 1000;
@@ -516,7 +519,7 @@ static int parse_argv(int argc, char *argv[]) {
                                 return -EINVAL;
                         }
 
-                        if (IN_SET(arg_output, OUTPUT_EXPORT, OUTPUT_JSON, OUTPUT_JSON_PRETTY, OUTPUT_JSON_SSE, OUTPUT_CAT))
+                        if (IN_SET(arg_output, OUTPUT_EXPORT, OUTPUT_JSON, OUTPUT_JSON_PRETTY, OUTPUT_JSON_SSE, OUTPUT_JSON_SEQ, OUTPUT_CAT))
                                 arg_quiet = true;
 
                         break;
@@ -685,7 +688,7 @@ static int parse_argv(int argc, char *argv[]) {
                                 return r;
                         }
 
-                        arg_action = ACTION_VACUUM;
+                        arg_action = arg_action == ACTION_ROTATE ? ACTION_ROTATE_AND_VACUUM : ACTION_VACUUM;
                         break;
 
                 case ARG_VACUUM_FILES:
@@ -695,7 +698,7 @@ static int parse_argv(int argc, char *argv[]) {
                                 return r;
                         }
 
-                        arg_action = ACTION_VACUUM;
+                        arg_action = arg_action == ACTION_ROTATE ? ACTION_ROTATE_AND_VACUUM : ACTION_VACUUM;
                         break;
 
                 case ARG_VACUUM_TIME:
@@ -705,7 +708,7 @@ static int parse_argv(int argc, char *argv[]) {
                                 return r;
                         }
 
-                        arg_action = ACTION_VACUUM;
+                        arg_action = arg_action == ACTION_ROTATE ? ACTION_ROTATE_AND_VACUUM : ACTION_VACUUM;
                         break;
 
 #if HAVE_GCRYPT
@@ -894,7 +897,7 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_ROTATE:
-                        arg_action = ACTION_ROTATE;
+                        arg_action = arg_action == ACTION_VACUUM ? ACTION_ROTATE_AND_VACUUM : ACTION_ROTATE;
                         break;
 
                 case ARG_SYNC:
@@ -1067,10 +1070,10 @@ static int add_matches(sd_journal *j, char **args) {
                                 r = add_matches_for_device(j, p);
                                 if (r < 0)
                                         return r;
-                        } else {
-                                log_error("File is neither a device node, nor regular file, nor executable: %s", *i);
-                                return -EINVAL;
-                        }
+                        } else
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "File is neither a device node, nor regular file, nor executable: %s",
+                                                       *i);
 
                         have_term = true;
                 } else {
@@ -1082,10 +1085,9 @@ static int add_matches(sd_journal *j, char **args) {
                         return log_error_errno(r, "Failed to add match '%s': %m", *i);
         }
 
-        if (!strv_isempty(args) && !have_term) {
-                log_error("\"+\" can only be used between terms");
-                return -EINVAL;
-        }
+        if (!strv_isempty(args) && !have_term)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "\"+\" can only be used between terms");
 
         return 0;
 }
@@ -1176,10 +1178,9 @@ static int discover_next_boot(sd_journal *j,
                 r = sd_journal_previous(j);
         if (r < 0)
                 return r;
-        else if (r == 0) {
-                log_debug("Whoopsie! We found a boot ID but can't read its last entry.");
-                return -ENODATA; /* This shouldn't happen. We just came from this very boot ID. */
-        }
+        else if (r == 0)
+                return log_debug_errno(SYNTHETIC_ERRNO(ENODATA),
+                                       "Whoopsie! We found a boot ID but can't read its last entry."); /* This shouldn't happen. We just came from this very boot ID. */
 
         r = sd_journal_get_realtime_usec(j, &next_boot->last);
         if (r < 0)
@@ -1323,7 +1324,7 @@ static int list_boots(sd_journal *j) {
         if (count == 0)
                 return count;
 
-        (void) pager_open(arg_no_pager, arg_pager_end);
+        (void) pager_open(arg_pager_flags);
 
         /* numbers are one less, but we need an extra char for the sign */
         w = DECIMAL_STR_WIDTH(count - 1) + 1;
@@ -1830,8 +1831,8 @@ finish:
 
         return r;
 #else
-        log_error("Forward-secure sealing not available.");
-        return -EOPNOTSUPP;
+        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                               "Forward-secure sealing not available.");
 #endif
 }
 
@@ -1968,7 +1969,7 @@ static int send_signal_and_wait(int sig, const char *watch_path) {
                 /* See if a sync happened by now. */
                 r = read_timestamp_file(watch_path, &tstamp);
                 if (r < 0 && r != -ENOENT)
-                        return log_error_errno(errno, "Failed to read %s: %m", watch_path);
+                        return log_error_errno(r, "Failed to read %s: %m", watch_path);
                 if (r >= 0 && tstamp >= start)
                         return 0;
 
@@ -2035,18 +2036,58 @@ static int sync_journal(void) {
         return send_signal_and_wait(SIGRTMIN+1, "/run/systemd/journal/synced");
 }
 
-int main(int argc, char *argv[]) {
+static int wait_for_change(sd_journal *j, int poll_fd) {
+        struct pollfd pollfds[] = {
+                { .fd = poll_fd, .events = POLLIN },
+                { .fd = STDOUT_FILENO },
+        };
+
+        struct timespec ts;
+        usec_t timeout;
         int r;
+
+        assert(j);
+        assert(poll_fd >= 0);
+
+        /* Much like sd_journal_wait() but also keeps an eye on STDOUT, and exits as soon as we see a POLLHUP on that,
+         * i.e. when it is closed. */
+
+        r = sd_journal_get_timeout(j, &timeout);
+        if (r < 0)
+                return log_error_errno(r, "Failed to determine journal waiting time: %m");
+
+        if (ppoll(pollfds, ELEMENTSOF(pollfds),
+                  timeout == USEC_INFINITY ? NULL : timespec_store(&ts, timeout), NULL) < 0) {
+                if (errno == EINTR)
+                        return 0;
+
+                return log_error_errno(errno, "Couldn't wait for journal event: %m");
+        }
+
+        if (pollfds[1].revents & (POLLHUP|POLLERR)) /* STDOUT has been closed? */
+                return log_debug_errno(SYNTHETIC_ERRNO(ECANCELED),
+                                       "Standard output has been closed.");
+
+        r = sd_journal_process(j);
+        if (r < 0)
+                return log_error_errno(r, "Failed to process journal events: %m");
+
+        return 0;
+}
+
+int main(int argc, char *argv[]) {
+        bool previous_boot_id_valid = false, first_line = true, ellipsized = false, need_seek = false;
         _cleanup_(sd_journal_closep) sd_journal *j = NULL;
-        bool need_seek = false;
         sd_id128_t previous_boot_id;
-        bool previous_boot_id_valid = false, first_line = true;
-        int n_shown = 0;
-        bool ellipsized = false;
+        int n_shown = 0, r, poll_fd = -1;
 
         setlocale(LC_ALL, "");
         log_parse_environment();
         log_open();
+
+        /* Increase max number of open files if we can, we might needs this when browsing journal files, which might be
+         * split up into many files. */
+        (void) rlimit_nofile_bump(HIGH_RLIMIT_NOFILE);
 
         r = parse_argv(argc, argv);
         if (r <= 0)
@@ -2054,11 +2095,6 @@ int main(int argc, char *argv[]) {
 
         signal(SIGWINCH, columns_lines_cache_reset);
         sigbus_install();
-
-        /* Increase max number of open files to 16K if we can, we
-         * might needs this when browsing journal files, which might
-         * be split up into many files. */
-        setrlimit_closest(RLIMIT_NOFILE, &RLIMIT_MAKE_CONST(16384));
 
         switch (arg_action) {
 
@@ -2075,7 +2111,7 @@ int main(int argc, char *argv[]) {
         case ACTION_UPDATE_CATALOG: {
                 _cleanup_free_ char *database;
 
-                database = path_join(arg_root, CATALOG_DATABASE, NULL);
+                database = path_join(arg_root, CATALOG_DATABASE);
                 if (!database) {
                         r = log_oom();
                         goto finish;
@@ -2088,7 +2124,7 @@ int main(int argc, char *argv[]) {
                 } else {
                         bool oneline = arg_action == ACTION_LIST_CATALOG;
 
-                        (void) pager_open(arg_no_pager, arg_pager_end);
+                        (void) pager_open(arg_pager_flags);
 
                         if (optind < argc)
                                 r = catalog_list_items(stdout, database, oneline, argv + optind);
@@ -2119,6 +2155,7 @@ int main(int argc, char *argv[]) {
         case ACTION_DISK_USAGE:
         case ACTION_LIST_BOOTS:
         case ACTION_VACUUM:
+        case ACTION_ROTATE_AND_VACUUM:
         case ACTION_LIST_FIELDS:
         case ACTION_LIST_FIELD_NAMES:
                 /* These ones require access to the journal files, continue below. */
@@ -2235,6 +2272,14 @@ int main(int argc, char *argv[]) {
         case ACTION_LIST_BOOTS:
                 r = list_boots(j);
                 goto finish;
+
+        case ACTION_ROTATE_AND_VACUUM:
+
+                r = rotate();
+                if (r < 0)
+                        goto finish;
+
+                _fallthrough_;
 
         case ACTION_VACUUM: {
                 Directory *d;
@@ -2362,15 +2407,15 @@ int main(int argc, char *argv[]) {
 
         /* Opening the fd now means the first sd_journal_wait() will actually wait */
         if (arg_follow) {
-                r = sd_journal_get_fd(j);
-                if (r == -EMFILE) {
-                        log_warning("Insufficent watch descriptors available. Reverting to -n.");
+                poll_fd = sd_journal_get_fd(j);
+                if (poll_fd == -EMFILE) {
+                        log_warning_errno(poll_fd, "Insufficent watch descriptors available. Reverting to -n.");
                         arg_follow = false;
-                } else if (r == -EMEDIUMTYPE) {
-                        log_error_errno(r, "The --follow switch is not supported in conjunction with reading from STDIN.");
+                } else if (poll_fd == -EMEDIUMTYPE) {
+                        log_error_errno(poll_fd, "The --follow switch is not supported in conjunction with reading from STDIN.");
                         goto finish;
-                } else if (r < 0) {
-                        log_error_errno(r, "Failed to get journal fd: %m");
+                } else if (poll_fd < 0) {
+                        log_error_errno(poll_fd, "Failed to get journal fd: %m");
                         goto finish;
                 }
         }
@@ -2447,7 +2492,7 @@ int main(int argc, char *argv[]) {
                 need_seek = true;
 
         if (!arg_follow)
-                (void) pager_open(arg_no_pager, arg_pager_end);
+                (void) pager_open(arg_pager_flags);
 
         if (!arg_quiet && (arg_lines != 0 || arg_follow)) {
                 usec_t start, end;
@@ -2592,7 +2637,7 @@ int main(int argc, char *argv[]) {
                         need_seek = true;
                         if (r == -EADDRNOTAVAIL)
                                 break;
-                        else if (r < 0 || ferror(stdout))
+                        else if (r < 0)
                                 goto finish;
 
                         n_shown++;
@@ -2630,11 +2675,10 @@ int main(int argc, char *argv[]) {
                 }
 
                 fflush(stdout);
-                r = sd_journal_wait(j, (uint64_t) -1);
-                if (r < 0) {
-                        log_error_errno(r, "Couldn't wait for journal event: %m");
+
+                r = wait_for_change(j, poll_fd);
+                if (r < 0)
                         goto finish;
-                }
 
                 first_line = false;
         }

@@ -6,13 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "path-util.h"
-#include "string-util.h"
-#include "udev.h"
+#include "log.h"
+#include "udev-builtin.h"
 #include "udevadm.h"
+#include "udevadm-util.h"
 
 static const char *arg_command = NULL;
-static char arg_syspath[UTIL_PATH_SIZE] = {};
+static const char *arg_syspath = NULL;
 
 static int help(void) {
         printf("%s test-builtin [OPTIONS] COMMAND DEVPATH\n\n"
@@ -34,7 +34,6 @@ static int parse_argv(int argc, char *argv[]) {
                 {}
         };
 
-        const char *s;
         int c;
 
         while ((c = getopt_long(argc, argv, "Vh", options, NULL)) >= 0)
@@ -50,28 +49,20 @@ static int parse_argv(int argc, char *argv[]) {
                 }
 
         arg_command = argv[optind++];
-        if (!arg_command) {
-                log_error("Command missing.");
-                return -EINVAL;
-        }
+        if (!arg_command)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Command missing.");
 
-        s = argv[optind++];
-        if (!s) {
-                log_error("syspath missing.");
-                return -EINVAL;
-        }
-
-        /* add /sys if needed */
-        if (!path_startswith(s, "/sys"))
-                strscpyl(arg_syspath, sizeof(arg_syspath), "/sys", s, NULL);
-        else
-                strscpy(arg_syspath, sizeof(arg_syspath), s);
+        arg_syspath = argv[optind++];
+        if (!arg_syspath)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "syspath missing.");
 
         return 1;
 }
 
 int builtin_main(int argc, char *argv[], void *userdata) {
-        _cleanup_(udev_device_unrefp) struct udev_device *dev = NULL;
+        _cleanup_(sd_device_unrefp) sd_device *dev = NULL;
         enum udev_builtin_cmd cmd;
         int r;
 
@@ -84,21 +75,21 @@ int builtin_main(int argc, char *argv[], void *userdata) {
         udev_builtin_init();
 
         cmd = udev_builtin_lookup(arg_command);
-        if (cmd >= UDEV_BUILTIN_MAX) {
+        if (cmd < 0) {
                 log_error("Unknown command '%s'", arg_command);
                 r = -EINVAL;
                 goto finish;
         }
 
-        dev = udev_device_new_from_syspath(NULL, arg_syspath);
-        if (!dev) {
-                r = log_error_errno(errno, "Failed to open device '%s'", arg_syspath);
+        r = find_device(arg_syspath, "/sys", &dev);
+        if (r < 0) {
+                log_error_errno(r, "Failed to open device '%s': %m", arg_syspath);
                 goto finish;
         }
 
         r = udev_builtin_run(dev, cmd, arg_command, true);
         if (r < 0)
-                log_debug("error executing '%s', exit code %i", arg_command, r);
+                log_debug_errno(r, "Builtin command '%s' fails: %m", arg_command);
 
 finish:
         udev_builtin_exit();

@@ -19,12 +19,16 @@ systemd_udevd_sources = files('udevd.c')
 
 libudev_core_sources = '''
         udev.h
-        udev-event.c
-        udev-watch.c
-        udev-node.c
-        udev-rules.c
         udev-ctrl.c
+        udev-ctrl.h
+        udev-event.c
+        udev-node.c
+        udev-node.h
+        udev-rules.c
+        udev-watch.c
+        udev-watch.h
         udev-builtin.c
+        udev-builtin.h
         udev-builtin-btrfs.c
         udev-builtin-hwdb.c
         udev-builtin-input_id.c
@@ -50,7 +54,7 @@ endif
 if conf.get('HAVE_ACL') == 1
         libudev_core_sources += ['udev-builtin-uaccess.c',
                                  logind_acl_c,
-                                 sd_login_c]
+                                 sd_login_sources]
 endif
 
 ############################################################
@@ -124,6 +128,7 @@ install_libudev_static = static_library(
         shared_sources,
         libsystemd_sources,
         libudev_sources,
+        disable_mempool_c,
         include_directories : includes,
         build_by_default : static_libudev != 'false',
         install : static_libudev != 'false',
@@ -135,7 +140,7 @@ install_libudev_static = static_library(
 
 libudev = shared_library(
         'udev',
-        'udev.h', # pick a header file at random to work around old meson bug
+        disable_mempool_c,
         version : libudev_version,
         include_directories : includes,
         link_args : ['-shared',
@@ -182,12 +187,11 @@ endforeach
 install_data('udev.conf',
              install_dir : join_paths(sysconfdir, 'udev'))
 
-udev_pc = configure_file(
+configure_file(
         input : 'udev.pc.in',
         output : 'udev.pc',
-        configuration : substs)
-install_data(udev_pc,
-             install_dir : pkgconfigdatadir)
+        configuration : substs,
+        install_dir : pkgconfigdatadir == 'no' ? '' : pkgconfigdatadir)
 
 meson.add_install_script('sh', '-c',
                          mkdir_p.format(join_paths(sysconfdir, 'udev/rules.d')))

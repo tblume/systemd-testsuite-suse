@@ -63,6 +63,16 @@ tests += [
           libmount,
           libblkid]],
 
+        [['src/test/test-emergency-action.c'],
+         [libcore,
+          libshared],
+         []],
+
+        [['src/test/test-chown-rec.c'],
+         [libcore,
+          libshared],
+         []],
+
         [['src/test/test-job-type.c'],
          [libcore,
           libshared],
@@ -74,6 +84,17 @@ tests += [
           libblkid]],
 
         [['src/test/test-ns.c'],
+         [libcore,
+          libshared],
+         [threads,
+          librt,
+          libseccomp,
+          libselinux,
+          libmount,
+          libblkid],
+         '', 'manual'],
+
+        [['src/test/test-nscd-flush.c'],
          [libcore,
           libshared],
          [threads,
@@ -138,7 +159,15 @@ tests += [
           libmount,
           libblkid]],
 
+        [['src/test/test-serialize.c'],
+         [],
+         []],
+
         [['src/test/test-utf8.c'],
+         [],
+         []],
+
+        [['src/test/test-dev-setup.c'],
          [],
          []],
 
@@ -156,6 +185,10 @@ tests += [
          []],
 
         [['src/test/test-copy.c'],
+         [],
+         []],
+
+        [['src/test/test-static-destruct.c'],
          [],
          []],
 
@@ -196,6 +229,10 @@ tests += [
          []],
 
         [['src/test/test-mount-util.c'],
+         [],
+         []],
+
+        [['src/test/test-mountpoint-util.c'],
          [],
          []],
 
@@ -288,6 +325,10 @@ tests += [
          []],
 
         [['src/test/test-path-lookup.c'],
+         [],
+         []],
+
+        [['src/test/test-pretty-print.c'],
          [],
          []],
 
@@ -398,6 +439,10 @@ tests += [
         [['src/test/test-set.c'],
          [],
          []],
+
+        [['src/test/test-set-disable-mempool.c'],
+         [],
+         [threads]],
 
         [['src/test/test-bitmap.c'],
          [],
@@ -616,6 +661,11 @@ tests += [
          [],
          []],
 
+        [['src/test/test-ip-protocol-list.c',
+          shared_generated_gperf_headers],
+         [],
+         []],
+
         [['src/test/test-journal-importer.c'],
          [],
          []],
@@ -635,18 +685,6 @@ tests += [
           libkmod,
           libacl],
          '', 'manual', '-DLOG_REALM=LOG_REALM_UDEV'],
-
-        [['src/test/test-udev-build-argv.c'],
-         [libudev_core,
-          libudev_static,
-          libsystemd_network,
-          libshared],
-         [threads,
-          librt,
-          libblkid,
-          libkmod,
-          libacl],
-         '', '', '-DLOG_REALM=LOG_REALM_UDEV'],
 
         [['src/test/test-id128.c'],
          [],
@@ -900,9 +938,26 @@ tests += [
         [['src/libsystemd/sd-device/test-sd-device.c'],
          [],
          []],
+
+        [['src/libsystemd/sd-device/test-sd-device-thread.c'],
+         [libbasic,
+          libshared_static,
+          libsystemd],
+         [threads]],
+
+        [['src/libsystemd/sd-device/test-udev-device-thread.c'],
+         [libbasic,
+          libshared_static,
+          libudev],
+         [threads]],
+
+        [['src/libsystemd/sd-device/test-sd-device-monitor.c'],
+         [],
+         []],
+
 ]
 
-if cxx.found()
+if cxx_cmd != ''
         tests += [
                 [['src/libsystemd/sd-bus/test-bus-vtable-cc.cc'],
                  [],

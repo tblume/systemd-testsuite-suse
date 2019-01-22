@@ -1,6 +1,9 @@
 # -*- mode: meson -*-
 # SPDX-License-Identifier: LGPL-2.1+
 
+option('version-tag', type : 'string',
+       description : 'override the git version string')
+
 option('split-usr', type : 'combo', choices : ['auto', 'true', 'false'],
        description : '''/bin, /sbin aren't symlinks into /usr''')
 option('split-bin', type : 'combo', choices : ['auto', 'true', 'false'],
@@ -45,10 +48,14 @@ option('debug-shell', type : 'string', value : '/bin/sh',
        description : 'path to debug shell binary')
 option('debug-tty', type : 'string', value : '/dev/tty9',
        description : 'specify the tty device for debug shell')
-option('debug-extra', type : 'array', choices : ['hashmap', 'mmap-cache'], value : [],
+option('debug-extra', type : 'array', choices : ['hashmap', 'mmap-cache', 'siphash', 'udev'], value : [],
        description : 'enable extra debugging')
 option('memory-accounting-default', type : 'boolean',
        description : 'enable MemoryAccounting= by default')
+option('bump-proc-sys-fs-file-max', type : 'boolean',
+       description : 'bump /proc/sys/fs/file-max to ULONG_MAX')
+option('bump-proc-sys-fs-nr-open', type : 'boolean',
+       description : 'bump /proc/sys/fs/nr_open to INT_MAX')
 option('valgrind', type : 'boolean', value : false,
        description : 'do extra operations to avoid valgrind warnings')
 option('log-trace', type : 'boolean', value : false,
@@ -152,6 +159,9 @@ option('compat-gateway-hostname', type : 'boolean', value : 'false',
 option('default-hierarchy', type : 'combo',
        choices : ['legacy', 'hybrid', 'unified'], value : 'hybrid',
        description : 'default cgroup hierarchy')
+option('default-net-naming-scheme', type : 'combo',
+       choices : ['latest', 'v238', 'v239', 'v240'],
+       description : 'default net.naming-scheme= value')
 option('time-epoch', type : 'integer', value : '-1',
        description : 'time epoch for time clients')
 option('system-uid-max', type : 'integer', value : '-1',
@@ -188,6 +198,8 @@ option('default-kill-user-processes', type : 'boolean',
        description : 'the default value for KillUserProcesses= setting')
 option('gshadow', type : 'boolean',
        description : 'support for shadow group')
+option('default-locale', type : 'string', value : '',
+       description : 'default locale used when /etc/locale.conf does not exist')
 
 option('default-dnssec', type : 'combo',
        description : 'default DNSSEC mode',

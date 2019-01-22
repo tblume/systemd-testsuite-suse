@@ -1,7 +1,4 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-/***
-  Copyright © 2013 Marc-Antoine Perennou
-***/
 
 #include <errno.h>
 #include <fcntl.h>
@@ -37,7 +34,6 @@
 #include "escape.h"
 #include "exit-status.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "format-util.h"
 #include "fs-util.h"
 #include "glob-util.h"
@@ -51,11 +47,14 @@
 #include "log.h"
 #include "logs-show.h"
 #include "macro.h"
+#include "main-func.h"
 #include "mkdir.h"
 #include "pager.h"
 #include "parse-util.h"
 #include "path-lookup.h"
 #include "path-util.h"
+#include "pretty-print.h"
+#include "proc-cmdline.h"
 #include "process-util.h"
 #include "reboot-util.h"
 #include "rlimit-util.h"
@@ -70,6 +69,7 @@
 #include "string-table.h"
 #include "strv.h"
 #include "terminal-util.h"
+#include "tmpfile-util.h"
 #include "unit-def.h"
 #include "unit-name.h"
 #include "user-util.h"
@@ -113,7 +113,7 @@ static UnitFileScope arg_scope = UNIT_FILE_SYSTEM;
 static bool arg_wait = false;
 static bool arg_no_block = false;
 static bool arg_no_legend = false;
-static bool arg_no_pager = false;
+static PagerFlags arg_pager_flags = 0;
 static bool arg_no_wtmp = false;
 static bool arg_no_sync = false;
 static bool arg_no_wall = false;
@@ -391,6 +391,7 @@ static int output_units_list(const UnitInfo *unit_infos, unsigned c) {
         const UnitInfo *u;
         unsigned n_shown = 0;
         int job_count = 0;
+        bool full = arg_full || FLAGS_SET(arg_pager_flags, PAGER_DISABLE);
 
         max_id_len = STRLEN("UNIT");
         load_len = STRLEN("LOAD");
@@ -476,7 +477,7 @@ static int output_units_list(const UnitInfo *unit_infos, unsigned c) {
 
                         printf("%-*.*s%s\n",
                                desc_len,
-                               !arg_full && arg_no_pager ? (int) desc_len : -1,
+                               full ? -1 : (int) desc_len,
                                "DESCRIPTION",
                                ansi_normal());
                 }
@@ -522,7 +523,7 @@ static int output_units_list(const UnitInfo *unit_infos, unsigned c) {
                 }
 
                 if (circle_len > 0)
-                        printf("%s%s%s ", on_circle, circle ? special_glyph(BLACK_CIRCLE) : " ", off_circle);
+                        printf("%s%s%s ", on_circle, circle ? special_glyph(SPECIAL_GLYPH_BLACK_CIRCLE) : " ", off_circle);
 
                 printf("%s%s%-*s%s %s%-*s%s %s%-*s %-*s%s %-*s",
                        on_underline,
@@ -534,7 +535,7 @@ static int output_units_list(const UnitInfo *unit_infos, unsigned c) {
 
                 printf("%-*.*s%s\n",
                        desc_len,
-                       !arg_full && arg_no_pager ? (int) desc_len : -1,
+                       full ? -1 : (int) desc_len,
                        u->description,
                        off_underline);
         }
@@ -749,7 +750,7 @@ static int list_units(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         r = get_unit_list_recursive(bus, strv_skip(argv, 1), &unit_infos, &replies, &machines);
         if (r < 0)
@@ -961,7 +962,7 @@ static int list_sockets(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         n = get_unit_list_recursive(bus, strv_skip(argv, 1), &unit_infos, &replies, &machines);
         if (n < 0)
@@ -1266,7 +1267,7 @@ static int list_timers(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         n = get_unit_list_recursive(bus, strv_skip(argv, 1), &unit_infos, &replies, &machines);
         if (n < 0)
@@ -1551,7 +1552,7 @@ static int list_unit_files(int argc, char *argv[], void *userdata) {
                         return bus_log_parse_error(r);
         }
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         typesafe_qsort(units, c, compare_unit_file_list);
         output_unit_file_list(units, c);
@@ -1563,7 +1564,7 @@ static int list_unit_files(int argc, char *argv[], void *userdata) {
         return 0;
 }
 
-static int list_dependencies_print(const char *name, int level, unsigned int branches, bool last) {
+static int list_dependencies_print(const char *name, int level, unsigned branches, bool last) {
         _cleanup_free_ char *n = NULL;
         size_t max_len = MAX(columns(),20u);
         size_t len = 0;
@@ -1577,7 +1578,7 @@ static int list_dependencies_print(const char *name, int level, unsigned int bra
                                 printf("%s...\n",max_len % 2 ? "" : " ");
                                 return 0;
                         }
-                        printf("%s", special_glyph(branches & (1 << i) ? TREE_VERTICAL : TREE_SPACE));
+                        printf("%s", special_glyph(branches & (1 << i) ? SPECIAL_GLYPH_TREE_VERTICAL : SPECIAL_GLYPH_TREE_SPACE));
                 }
                 len += 2;
 
@@ -1586,7 +1587,7 @@ static int list_dependencies_print(const char *name, int level, unsigned int bra
                         return 0;
                 }
 
-                printf("%s", special_glyph(last ? TREE_RIGHT : TREE_BRANCH));
+                printf("%s", special_glyph(last ? SPECIAL_GLYPH_TREE_RIGHT : SPECIAL_GLYPH_TREE_BRANCH));
         }
 
         if (arg_full) {
@@ -1689,7 +1690,7 @@ static int list_dependencies_one(
                 const char *name,
                 int level,
                 char ***units,
-                unsigned int branches) {
+                unsigned branches) {
 
         _cleanup_strv_free_ char **deps = NULL;
         char **c;
@@ -1745,7 +1746,7 @@ static int list_dependencies_one(
                                 break;
                         }
 
-                        printf("%s%s%s ", on, special_glyph(BLACK_CIRCLE), ansi_normal());
+                        printf("%s%s%s ", on, special_glyph(SPECIAL_GLYPH_BLACK_CIRCLE), ansi_normal());
                 }
 
                 r = list_dependencies_print(*c, level, branches, c[1] == NULL);
@@ -1785,7 +1786,7 @@ static int list_dependencies(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         puts(u);
 
@@ -1991,7 +1992,7 @@ static void output_machines_list(struct machine_info *machine_infos, unsigned n)
                         on_failed = off_failed = "";
 
                 if (circle_len > 0)
-                        printf("%s%s%s ", on_state, circle ? special_glyph(BLACK_CIRCLE) : " ", off_state);
+                        printf("%s%s%s ", on_state, circle ? special_glyph(SPECIAL_GLYPH_BLACK_CIRCLE) : " ", off_state);
 
                 if (m->is_host)
                         printf("%-*s (host) %s%-*s%s %s%*" PRIu32 "%s %*" PRIu32 "\n",
@@ -2025,7 +2026,7 @@ static int list_machines(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         typesafe_qsort(machine_infos, r, compare_machine_info);
         output_machines_list(machine_infos, r);
@@ -2197,7 +2198,7 @@ static void output_jobs_list(sd_bus *bus, const struct job_info* jobs, unsigned 
                 return;
         }
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         id_len = STRLEN("JOB");
         unit_len = STRLEN("UNIT");
@@ -2312,7 +2313,7 @@ static int list_jobs(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return bus_log_parse_error(r);
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         output_jobs_list(bus, jobs, c, skipped);
         return 0;
@@ -2411,7 +2412,7 @@ static void warn_unit_file_changed(const char *name) {
                     arg_scope == UNIT_FILE_SYSTEM ? "" : " --user");
 }
 
-static int unit_file_find_path(LookupPaths *lp, const char *unit_name, char **unit_path) {
+static int unit_file_find_path(LookupPaths *lp, const char *unit_name, char **ret_unit_path) {
         char **p;
 
         assert(lp);
@@ -2421,7 +2422,7 @@ static int unit_file_find_path(LookupPaths *lp, const char *unit_name, char **un
                 _cleanup_free_ char *path = NULL, *lpath = NULL;
                 int r;
 
-                path = path_join(NULL, *p, unit_name);
+                path = path_join(*p, unit_name);
                 if (!path)
                         return log_oom();
 
@@ -2433,11 +2434,14 @@ static int unit_file_find_path(LookupPaths *lp, const char *unit_name, char **un
                 if (r < 0)
                         return log_error_errno(r, "Failed to access path \"%s\": %m", path);
 
-                if (unit_path)
-                        *unit_path = TAKE_PTR(lpath);
+                if (ret_unit_path)
+                        *ret_unit_path = TAKE_PTR(lpath);
 
                 return 1;
         }
+
+        if (ret_unit_path)
+                *ret_unit_path = NULL;
 
         return 0;
 }
@@ -2445,30 +2449,43 @@ static int unit_file_find_path(LookupPaths *lp, const char *unit_name, char **un
 static int unit_find_template_path(
                 const char *unit_name,
                 LookupPaths *lp,
-                char **fragment_path,
-                char **template) {
+                char **ret_fragment_path,
+                char **ret_template) {
 
-        _cleanup_free_ char *_template = NULL;
+        _cleanup_free_ char *t = NULL, *f = NULL;
         int r;
 
         /* Returns 1 if a fragment was found, 0 if not found, negative on error. */
 
-        r = unit_file_find_path(lp, unit_name, fragment_path);
-        if (r != 0)
-                return r; /* error or found a real unit */
+        r = unit_file_find_path(lp, unit_name, &f);
+        if (r < 0)
+                return r;
+        if (r > 0) {
+                if (ret_fragment_path)
+                        *ret_fragment_path = TAKE_PTR(f);
+                if (ret_template)
+                        *ret_template = NULL;
+                return r; /* found a real unit */
+        }
 
-        r = unit_name_template(unit_name, &_template);
-        if (r == -EINVAL)
+        r = unit_name_template(unit_name, &t);
+        if (r == -EINVAL) {
+                if (ret_fragment_path)
+                        *ret_fragment_path = NULL;
+                if (ret_template)
+                        *ret_template = NULL;
+
                 return 0; /* not a template, does not exist */
+        }
         if (r < 0)
                 return log_error_errno(r, "Failed to determine template name: %m");
 
-        r = unit_file_find_path(lp, _template, fragment_path);
+        r = unit_file_find_path(lp, t, ret_fragment_path);
         if (r < 0)
                 return r;
 
-        if (template)
-                *template = TAKE_PTR(_template);
+        if (ret_template)
+                *ret_template = r > 0 ? TAKE_PTR(t) : NULL;
 
         return r;
 }
@@ -2477,32 +2494,58 @@ static int unit_find_paths(
                 sd_bus *bus,
                 const char *unit_name,
                 LookupPaths *lp,
-                char **fragment_path,
-                char ***dropin_paths) {
+                bool force_client_side,
+                char **ret_fragment_path,
+                char ***ret_dropin_paths) {
 
-        _cleanup_free_ char *path = NULL;
         _cleanup_strv_free_ char **dropins = NULL;
+        _cleanup_free_ char *path = NULL;
         int r;
 
         /**
-         * Finds where the unit is defined on disk. Returns 0 if the unit
-         * is not found. Returns 1 if it is found, and sets
-         * - the path to the unit in *path, if it exists on disk,
-         * - and a strv of existing drop-ins in *dropins,
-         *   if the arg is not NULL and any dropins were found.
+         * Finds where the unit is defined on disk. Returns 0 if the unit is not found. Returns 1 if it is found, and
+         * sets:
+         * - the path to the unit in *ret_frament_path, if it exists on disk,
+         * - and a strv of existing drop-ins in *ret_dropin_paths, if the arg is not NULL and any dropins were found.
+         *
+         * Returns -ERFKILL if the unit is masked, and -EKEYREJECTED if the unit file could not be loaded for some
+         * reason (the latter only applies if we are going through the service manager)
          */
 
         assert(unit_name);
-        assert(fragment_path);
+        assert(ret_fragment_path);
         assert(lp);
 
-        if (!install_client_side() && !unit_name_is_valid(unit_name, UNIT_NAME_TEMPLATE)) {
+        /* Go via the bus to acquire the path, unless we are explicitly told not to, or when the unit name is a template */
+        if (!force_client_side &&
+            !install_client_side() &&
+            !unit_name_is_valid(unit_name, UNIT_NAME_TEMPLATE)) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-                _cleanup_free_ char *unit = NULL;
+                _cleanup_free_ char *load_state = NULL, *unit = NULL;
 
                 unit = unit_dbus_path_from_name(unit_name);
                 if (!unit)
                         return log_oom();
+
+                r = sd_bus_get_property_string(
+                                bus,
+                                "org.freedesktop.systemd1",
+                                unit,
+                                "org.freedesktop.systemd1.Unit",
+                                "LoadState",
+                                &error,
+                                &load_state);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to get LoadState: %s", bus_error_message(&error, r));
+
+                if (streq(load_state, "masked"))
+                        return -ERFKILL;
+                if (streq(load_state, "not-found")) {
+                        r = 0;
+                        goto not_found;
+                }
+                if (!streq(load_state, "loaded"))
+                        return -EKEYREJECTED;
 
                 r = sd_bus_get_property_string(
                                 bus,
@@ -2515,7 +2558,7 @@ static int unit_find_paths(
                 if (r < 0)
                         return log_error_errno(r, "Failed to get FragmentPath: %s", bus_error_message(&error, r));
 
-                if (dropin_paths) {
+                if (ret_dropin_paths) {
                         r = sd_bus_get_property_strv(
                                         bus,
                                         "org.freedesktop.systemd1",
@@ -2538,7 +2581,6 @@ static int unit_find_paths(
                 r = unit_find_template_path(unit_name, lp, &path, &template);
                 if (r < 0)
                         return r;
-
                 if (r > 0) {
                         if (null_or_empty_path(path))
                                 /* The template is masked. Let's cut the process short. */
@@ -2562,25 +2604,29 @@ static int unit_find_paths(
                 if (r < 0)
                         return log_error_errno(r, "Failed to add unit name: %m");
 
-                if (dropin_paths) {
-                        r = unit_file_find_dropin_conf_paths(arg_root, lp->search_path,
-                                                             NULL, names, &dropins);
+                if (ret_dropin_paths) {
+                        r = unit_file_find_dropin_conf_paths(arg_root, lp->search_path, NULL, names, &dropins);
                         if (r < 0)
                                 return r;
                 }
         }
 
-        r = 0;
+                r = 0;
 
         if (!isempty(path)) {
-                *fragment_path = TAKE_PTR(path);
+                *ret_fragment_path = TAKE_PTR(path);
                 r = 1;
+        } else
+                *ret_fragment_path = NULL;
+
+        if (ret_dropin_paths) {
+                if (!strv_isempty(dropins)) {
+                        *ret_dropin_paths = TAKE_PTR(dropins);
+                        r = 1;
+                } else
+                        *ret_dropin_paths = NULL;
         }
 
-        if (dropin_paths && !strv_isempty(dropins)) {
-                *dropin_paths = TAKE_PTR(dropins);
-                r = 1;
-        }
  not_found:
         if (r == 0 && !arg_force)
                 log_error("No files found for %s.", unit_name);
@@ -2753,63 +2799,87 @@ static void wait_context_free(WaitContext *c) {
 }
 
 static int on_properties_changed(sd_bus_message *m, void *userdata, sd_bus_error *error) {
+        const char *path, *interface, *active_state = NULL, *job_path = NULL;
         WaitContext *c = userdata;
-        const char *path;
+        bool is_failed;
         int r;
+
+        /* Called whenever we get a PropertiesChanged signal. Checks if ActiveState changed to inactive/failed.
+         *
+         * Signal parameters: (s interface, a{sv} changed_properties, as invalidated_properties) */
 
         path = sd_bus_message_get_path(m);
         if (!set_contains(c->unit_paths, path))
                 return 0;
 
-        /* Check if ActiveState changed to inactive/failed */
-        /* (s interface, a{sv} changed_properties, as invalidated_properties) */
-        r = sd_bus_message_skip(m, "s");
+        r = sd_bus_message_read(m, "s", &interface);
         if (r < 0)
                 return bus_log_parse_error(r);
+
+        if (!streq(interface, "org.freedesktop.systemd1.Unit")) /* ActiveState is on the Unit interface */
+                return 0;
 
         r = sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "{sv}");
         if (r < 0)
                 return bus_log_parse_error(r);
 
-        while ((r = sd_bus_message_enter_container(m, SD_BUS_TYPE_DICT_ENTRY, "sv")) > 0) {
+        for (;;) {
                 const char *s;
 
-                r = sd_bus_message_read(m, "s", &s);
+                r = sd_bus_message_enter_container(m, SD_BUS_TYPE_DICT_ENTRY, "sv");
+                if (r < 0)
+                        return bus_log_parse_error(r);
+                if (r == 0) /* end of array */
+                        break;
+
+                r = sd_bus_message_read(m, "s", &s); /* Property name */
                 if (r < 0)
                         return bus_log_parse_error(r);
 
                 if (streq(s, "ActiveState")) {
-                        bool is_failed;
-
-                        r = sd_bus_message_enter_container(m, SD_BUS_TYPE_VARIANT, "s");
+                        r = sd_bus_message_read(m, "v", "s", &active_state);
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
-                        r = sd_bus_message_read(m, "s", &s);
+                        if (job_path) /* Found everything we need */
+                                break;
+
+                } else if (streq(s, "Job")) {
+                        uint32_t job_id;
+
+                        r = sd_bus_message_read(m, "v", "(uo)", &job_id, &job_path);
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
-                        is_failed = streq(s, "failed");
-                        if (streq(s, "inactive") || is_failed) {
-                                log_debug("%s became %s, dropping from --wait tracking", path, s);
-                                free(set_remove(c->unit_paths, path));
-                                c->any_failed = c->any_failed || is_failed;
-                        } else
-                                log_debug("ActiveState on %s changed to %s", path, s);
+                        /* There's still a job pending for this unit, let's ignore this for now, and return right-away. */
+                        if (job_id != 0)
+                                return 0;
 
-                        break; /* no need to dissect the rest of the message */
+                        if (active_state) /* Found everything we need */
+                                break;
+
                 } else {
-                        /* other property */
-                        r = sd_bus_message_skip(m, "v");
+                        r = sd_bus_message_skip(m, "v"); /* Other property */
                         if (r < 0)
                                 return bus_log_parse_error(r);
                 }
+
                 r = sd_bus_message_exit_container(m);
                 if (r < 0)
                         return bus_log_parse_error(r);
         }
-        if (r < 0)
-                return bus_log_parse_error(r);
+
+        /* If this didn't contain the ActiveState property we can't do anything */
+        if (!active_state)
+                return 0;
+
+        is_failed = streq(active_state, "failed");
+        if (streq(active_state, "inactive") || is_failed) {
+                log_debug("%s became %s, dropping from --wait tracking", path, active_state);
+                free(set_remove(c->unit_paths, path));
+                c->any_failed = c->any_failed || is_failed;
+        } else
+                log_debug("ActiveState on %s changed to %s", path, active_state);
 
         if (set_isempty(c->unit_paths))
                 sd_event_exit(c->event, EXIT_SUCCESS);
@@ -3018,12 +3088,13 @@ static enum action verb_to_action(const char *verb) {
 
 static int start_unit(int argc, char *argv[], void *userdata) {
         _cleanup_(bus_wait_for_jobs_freep) BusWaitForJobs *w = NULL;
-        const char *method, *mode, *one_name, *suffix = NULL;
-        _cleanup_strv_free_ char **names = NULL;
-        sd_bus *bus;
         _cleanup_(wait_context_free) WaitContext wait_context = {};
+        const char *method, *mode, *one_name, *suffix = NULL;
+        _cleanup_free_ char **stopped_units = NULL; /* Do not use _cleanup_strv_free_ */
+        _cleanup_strv_free_ char **names = NULL;
+        int r, ret = EXIT_SUCCESS;
+        sd_bus *bus;
         char **name;
-        int r = 0;
 
         if (arg_wait && !STR_IN_SET(argv[0], "start", "restart")) {
                 log_error("--wait may only be used with the 'start' or 'restart' commands.");
@@ -3070,9 +3141,11 @@ static int start_unit(int argc, char *argv[], void *userdata) {
                 one_name = action_table[arg_action].target;
         }
 
-        if (one_name)
-                names = strv_new(one_name, NULL);
-        else {
+        if (one_name) {
+                names = strv_new(one_name);
+                if (!names)
+                        return log_oom();
+        } else {
                 r = expand_names(bus, strv_skip(argv, 1), suffix, &names);
                 if (r < 0)
                         return log_error_errno(r, "Failed to expand names: %m");
@@ -3110,16 +3183,21 @@ static int start_unit(int argc, char *argv[], void *userdata) {
 
         STRV_FOREACH(name, names) {
                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-                int q;
 
-                q = start_unit_one(bus, method, *name, mode, &error, w, arg_wait ? &wait_context : NULL);
-                if (r >= 0 && q < 0)
-                        r = translate_bus_error_to_exit_status(q, &error);
+                r = start_unit_one(bus, method, *name, mode, &error, w, arg_wait ? &wait_context : NULL);
+                if (ret == EXIT_SUCCESS && r < 0)
+                        ret = translate_bus_error_to_exit_status(r, &error);
+
+                if (r >= 0 && streq(method, "StopUnit")) {
+                        r = strv_push(&stopped_units, *name);
+                        if (r < 0)
+                                return log_oom();
+                }
         }
 
         if (!arg_no_block) {
-                int q, arg_count = 0;
                 const char* extra_args[4] = {};
+                int arg_count = 0;
 
                 if (arg_scope != UNIT_FILE_SYSTEM)
                         extra_args[arg_count++] = "--user";
@@ -3133,27 +3211,26 @@ static int start_unit(int argc, char *argv[], void *userdata) {
                         extra_args[arg_count++] = arg_host;
                 }
 
-                q = bus_wait_for_jobs(w, arg_quiet, extra_args);
-                if (q < 0)
-                        return q;
+                r = bus_wait_for_jobs(w, arg_quiet, extra_args);
+                if (r < 0)
+                        return r;
 
                 /* When stopping units, warn if they can still be triggered by
                  * another active unit (socket, path, timer) */
-                if (!arg_quiet && streq(method, "StopUnit"))
-                        STRV_FOREACH(name, names)
+                if (!arg_quiet)
+                        STRV_FOREACH(name, stopped_units)
                                 (void) check_triggering_units(bus, *name);
         }
 
-        if (r >= 0 && arg_wait && !set_isempty(wait_context.unit_paths)) {
-                int q;
-                q = sd_event_loop(wait_context.event);
-                if (q < 0)
-                        return log_error_errno(q, "Failed to run event loop: %m");
+        if (ret == EXIT_SUCCESS && arg_wait && !set_isempty(wait_context.unit_paths)) {
+                r = sd_event_loop(wait_context.event);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to run event loop: %m");
                 if (wait_context.any_failed)
-                        r = EXIT_FAILURE;
+                        ret = EXIT_FAILURE;
         }
 
-        return r;
+        return ret;
 }
 
 #if ENABLE_LOGIND
@@ -3467,9 +3544,9 @@ static int load_kexec_kernel(void) {
                 return -EINVAL;
         }
 
-        kernel = path_join(NULL, where, e->kernel);
+        kernel = path_join(where, e->kernel);
         if (!strv_isempty(e->initrd))
-                initrd = path_join(NULL, where, *e->initrd);
+                initrd = path_join(where, *e->initrd);
         options = strv_join(e->options, " ");
         if (!options)
                 return log_oom();
@@ -3483,7 +3560,7 @@ static int load_kexec_kernel(void) {
         if (arg_dry_run)
                 return 0;
 
-        r = safe_fork("(kexec)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+        r = safe_fork("(kexec)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG, &pid);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -3636,11 +3713,10 @@ static int start_special(int argc, char *argv[], void *userdata) {
 static int start_system_special(int argc, char *argv[], void *userdata) {
         /* Like start_special above, but raises an error when running in user mode */
 
-        if (arg_scope != UNIT_FILE_SYSTEM) {
-                log_error("Bad action for %s mode.",
-                          arg_scope == UNIT_FILE_GLOBAL ? "--global" : "--user");
-                return -EINVAL;
-        }
+        if (arg_scope != UNIT_FILE_SYSTEM)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Bad action for %s mode.",
+                                       arg_scope == UNIT_FILE_GLOBAL ? "--global" : "--user");
 
         return start_special(argc, argv, userdata);
 }
@@ -3981,7 +4057,7 @@ static void print_status_info(
         } else
                 active_on = active_off = "";
 
-        printf("%s%s%s %s", active_on, special_glyph(BLACK_CIRCLE), active_off, strna(i->id));
+        printf("%s%s%s %s", active_on, special_glyph(SPECIAL_GLYPH_BLACK_CIRCLE), active_off, strna(i->id));
 
         if (i->description && !streq_ptr(i->id, i->description))
                 printf(" - %s", i->description);
@@ -4044,7 +4120,7 @@ static void print_status_info(
 
                                 printf("%s\n"
                                        "           %s", dir,
-                                       special_glyph(TREE_RIGHT));
+                                       special_glyph(SPECIAL_GLYPH_TREE_RIGHT));
                         }
 
                         last = ! (*(dropin + 1) && startswith(*(dropin + 1), dir));
@@ -4123,7 +4199,7 @@ static void print_status_info(
                 LIST_FOREACH(conditions, c, i->conditions)
                         if (c->tristate < 0)
                                 printf("           %s %s=%s%s%s was not met\n",
-                                       --n ? special_glyph(TREE_BRANCH) : special_glyph(TREE_RIGHT),
+                                       --n ? special_glyph(SPECIAL_GLYPH_TREE_BRANCH) : special_glyph(SPECIAL_GLYPH_TREE_RIGHT),
                                        c->name,
                                        c->trigger ? "|" : "",
                                        c->negate ? "!" : "",
@@ -5150,7 +5226,7 @@ static int show_all(
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         c = (unsigned) r;
 
@@ -5208,7 +5284,7 @@ static int show_system_status(sd_bus *bus) {
                 off = ansi_normal();
         }
 
-        printf("%s%s%s %s\n", on, special_glyph(BLACK_CIRCLE), off, arg_host ? arg_host : hn);
+        printf("%s%s%s %s\n", on, special_glyph(SPECIAL_GLYPH_BLACK_CIRCLE), off, arg_host ? arg_host : hn);
 
         printf("    State: %s%s%s\n",
                on, strna(mi.state), off);
@@ -5248,27 +5324,19 @@ static int show(int argc, char *argv[], void *userdata) {
         assert(argv);
 
         show_mode = systemctl_show_mode_from_string(argv[0]);
-        if (show_mode < 0) {
-                log_error("Invalid argument.");
-                return -EINVAL;
-        }
+        if (show_mode < 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Invalid argument.");
 
-        if (show_mode == SYSTEMCTL_SHOW_HELP && argc <= 1) {
-                log_error("This command expects one or more unit names. Did you mean --help?");
-                return -EINVAL;
-        }
+        if (show_mode == SYSTEMCTL_SHOW_HELP && argc <= 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "This command expects one or more unit names. Did you mean --help?");
 
         r = acquire_bus(BUS_MANAGER, &bus);
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_no_pager, false);
-
-        if (show_mode == SYSTEMCTL_SHOW_STATUS)
-                /* Increase max number of open files to 16K if we can, we
-                 * might needs this when browsing journal files, which might
-                 * be split up into many files. */
-                setrlimit_closest(RLIMIT_NOFILE, &RLIMIT_MAKE_CONST(16384));
+        (void) pager_open(arg_pager_flags);
 
         /* If no argument is specified inspect the manager itself */
         if (show_mode == SYSTEMCTL_SHOW_PROPERTIES && argc <= 1)
@@ -5373,15 +5441,22 @@ static int cat(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return log_error_errno(r, "Failed to expand names: %m");
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         STRV_FOREACH(name, names) {
                 _cleanup_free_ char *fragment_path = NULL;
                 _cleanup_strv_free_ char **dropin_paths = NULL;
 
-                r = unit_find_paths(bus, *name, &lp, &fragment_path, &dropin_paths);
+                r = unit_find_paths(bus, *name, &lp, false, &fragment_path, &dropin_paths);
                 if (r == -ERFKILL) {
-                        printf("%s# unit %s is masked%s\n",
+                        printf("%s# Unit %s is masked%s.\n",
+                               ansi_highlight_magenta(),
+                               *name,
+                               ansi_normal());
+                        continue;
+                }
+                if (r == -EKEYREJECTED) {
+                        printf("%s# Unit %s could not be loaded.%s\n",
                                ansi_highlight_magenta(),
                                *name,
                                ansi_normal());
@@ -5389,7 +5464,7 @@ static int cat(int argc, char *argv[], void *userdata) {
                 }
                 if (r < 0)
                         return r;
-                else if (r == 0)
+                if (r == 0)
                         return -ENOENT;
 
                 if (first)
@@ -5626,10 +5701,9 @@ static int print_variable(const char *s) {
         _cleanup_free_ char *esc = NULL;
 
         sep = strchr(s, '=');
-        if (!sep) {
-                log_error("Invalid environment block");
-                return -EUCLEAN;
-        }
+        if (!sep)
+                return log_error_errno(SYNTHETIC_ERRNO(EUCLEAN),
+                                       "Invalid environment block");
 
         esc = shell_maybe_quote(sep + 1, ESCAPE_POSIX);
         if (!esc)
@@ -5650,7 +5724,7 @@ static int show_environment(int argc, char *argv[], void *userdata) {
         if (r < 0)
                 return r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         r = sd_bus_get_property(
                         bus,
@@ -5705,9 +5779,7 @@ static int switch_root(int argc, char *argv[], void *userdata) {
         if (argc >= 3)
                 init = argv[2];
         else {
-                r = parse_env_file(NULL, "/proc/cmdline", WHITESPACE,
-                                   "init", &cmdline_init,
-                                   NULL);
+                r = proc_cmdline_get_key("init", 0, &cmdline_init);
                 if (r < 0)
                         log_debug_errno(r, "Failed to parse /proc/cmdline: %m");
 
@@ -5961,7 +6033,7 @@ static int enable_sysv_units(const char *verb, char **args) {
                 if (!arg_quiet)
                         log_info("Executing: %s", l);
 
-                j = safe_fork("(sysv-install)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG, &pid);
+                j = safe_fork("(sysv-install)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG, &pid);
                 if (j < 0)
                         return j;
                 if (j == 0) {
@@ -6046,15 +6118,15 @@ static int normalize_filenames(char **names) {
                 if (!path_is_absolute(*u)) {
                         char* normalized_path;
 
-                        if (!isempty(arg_root)) {
-                                log_error("Non-absolute paths are not allowed when --root is used: %s", *u);
-                                return -EINVAL;
-                        }
+                        if (!isempty(arg_root))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Non-absolute paths are not allowed when --root is used: %s",
+                                                       *u);
 
-                        if (!strchr(*u,'/')) {
-                                log_error("Link argument does contain at least one directory separator: %s", *u);
-                                return -EINVAL;
-                        }
+                        if (!strchr(*u,'/'))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Link argument does contain at least one directory separator: %s",
+                                                       *u);
 
                         r = path_make_absolute_cwd(*u, &normalized_path);
                         if (r < 0)
@@ -6305,18 +6377,20 @@ static int enable_unit(int argc, char *argv[], void *userdata) {
         }
 
         if (carries_install_info == 0 && !ignore_carries_install_info)
-                log_warning("The unit files have no installation config (WantedBy, RequiredBy, Also, Alias\n"
-                            "settings in the [Install] section, and DefaultInstance for template units).\n"
-                            "This means they are not meant to be enabled using systemctl.\n"
-                            "Possible reasons for having this kind of units are:\n"
-                            "1) A unit may be statically enabled by being symlinked from another unit's\n"
-                            "   .wants/ or .requires/ directory.\n"
-                            "2) A unit's purpose may be to act as a helper for some other unit which has\n"
-                            "   a requirement dependency on it.\n"
-                            "3) A unit may be started when needed via activation (socket, path, timer,\n"
-                            "   D-Bus, udev, scripted systemctl call, ...).\n"
-                            "4) In case of template units, the unit is meant to be enabled with some\n"
-                            "   instance name specified.");
+                log_notice("The unit files have no installation config (WantedBy=, RequiredBy=, Also=,\n"
+                           "Alias= settings in the [Install] section, and DefaultInstance= for template\n"
+                           "units). This means they are not meant to be enabled using systemctl.\n"
+                           " \n" /* trick: the space is needed so that the line does not get stripped from output */
+                           "Possible reasons for having this kind of units are:\n"
+                           "%1$s A unit may be statically enabled by being symlinked from another unit's\n"
+                           "  .wants/ or .requires/ directory.\n"
+                           "%1$s A unit's purpose may be to act as a helper for some other unit which has\n"
+                           "  a requirement dependency on it.\n"
+                           "%1$s A unit may be started when needed via activation (socket, path, timer,\n"
+                           "  D-Bus, udev, scripted systemctl call, ...).\n"
+                           "%1$s In case of template units, the unit is meant to be enabled with some\n"
+                           "  instance name specified.",
+                           special_glyph(SPECIAL_GLYPH_BULLET));
 
         if (arg_now && STR_IN_SET(argv[0], "enable", "disable", "mask")) {
                 sd_bus *bus;
@@ -6769,10 +6843,10 @@ static int get_file_to_edit(
         }
 
         if (arg_runtime) {
-                if (access(path, F_OK) >= 0) {
-                        log_error("Refusing to create \"%s\" because it would be overridden by \"%s\" anyway.", run, path);
-                        return -EEXIST;
-                }
+                if (access(path, F_OK) >= 0)
+                        return log_error_errno(SYNTHETIC_ERRNO(EEXIST),
+                                               "Refusing to create \"%s\" because it would be overridden by \"%s\" anyway.",
+                                               run, path);
 
                 *ret_path = TAKE_PTR(run);
         } else
@@ -6788,7 +6862,8 @@ static int unit_file_create_new(
                 char **ret_new_path,
                 char **ret_tmp_path) {
 
-        char *tmp_new_path, *tmp_tmp_path, *ending;
+        _cleanup_free_ char *new_path = NULL, *tmp_path = NULL;
+        const char *ending;
         int r;
 
         assert(unit_name);
@@ -6796,18 +6871,16 @@ static int unit_file_create_new(
         assert(ret_tmp_path);
 
         ending = strjoina(unit_name, suffix);
-        r = get_file_to_edit(paths, ending, &tmp_new_path);
+        r = get_file_to_edit(paths, ending, &new_path);
         if (r < 0)
                 return r;
 
-        r = create_edit_temp_file(tmp_new_path, tmp_new_path, &tmp_tmp_path);
-        if (r < 0) {
-                free(tmp_new_path);
+        r = create_edit_temp_file(new_path, new_path, &tmp_path);
+        if (r < 0)
                 return r;
-        }
 
-        *ret_new_path = tmp_new_path;
-        *ret_tmp_path = tmp_tmp_path;
+        *ret_new_path = TAKE_PTR(new_path);
+        *ret_tmp_path = TAKE_PTR(tmp_path);
 
         return 0;
 }
@@ -6819,7 +6892,7 @@ static int unit_file_create_copy(
                 char **ret_new_path,
                 char **ret_tmp_path) {
 
-        char *tmp_new_path, *tmp_tmp_path;
+        _cleanup_free_ char *new_path = NULL, *tmp_path = NULL;
         int r;
 
         assert(fragment_path);
@@ -6827,33 +6900,26 @@ static int unit_file_create_copy(
         assert(ret_new_path);
         assert(ret_tmp_path);
 
-        r = get_file_to_edit(paths, unit_name, &tmp_new_path);
+        r = get_file_to_edit(paths, unit_name, &new_path);
         if (r < 0)
                 return r;
 
-        if (!path_equal(fragment_path, tmp_new_path) && access(tmp_new_path, F_OK) == 0) {
+        if (!path_equal(fragment_path, new_path) && access(new_path, F_OK) >= 0) {
                 char response;
 
-                r = ask_char(&response, "yn", "\"%s\" already exists. Overwrite with \"%s\"? [(y)es, (n)o] ", tmp_new_path, fragment_path);
-                if (r < 0) {
-                        free(tmp_new_path);
+                r = ask_char(&response, "yn", "\"%s\" already exists. Overwrite with \"%s\"? [(y)es, (n)o] ", new_path, fragment_path);
+                if (r < 0)
                         return r;
-                }
-                if (response != 'y') {
-                        log_warning("%s ignored", unit_name);
-                        free(tmp_new_path);
-                        return -EKEYREJECTED;
-                }
+                if (response != 'y')
+                        return log_warning_errno(SYNTHETIC_ERRNO(EKEYREJECTED), "%s skipped.", unit_name);
         }
 
-        r = create_edit_temp_file(tmp_new_path, fragment_path, &tmp_tmp_path);
-        if (r < 0) {
-                free(tmp_new_path);
+        r = create_edit_temp_file(new_path, fragment_path, &tmp_path);
+        if (r < 0)
                 return r;
-        }
 
-        *ret_new_path = tmp_new_path;
-        *ret_tmp_path = tmp_tmp_path;
+        *ret_new_path = TAKE_PTR(new_path);
+        *ret_tmp_path = TAKE_PTR(tmp_path);
 
         return 0;
 }
@@ -6863,7 +6929,7 @@ static int run_editor(char **paths) {
 
         assert(paths);
 
-        r = safe_fork("(editor)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_LOG|FORK_WAIT, NULL);
+        r = safe_fork("(editor)", FORK_RESET_SIGNALS|FORK_DEATHSIG|FORK_RLIMIT_NOFILE_SAFE|FORK_LOG|FORK_WAIT, NULL);
         if (r < 0)
                 return r;
         if (r == 0) {
@@ -6892,6 +6958,7 @@ static int run_editor(char **paths) {
                         n_editor_args = strv_length(editor_args);
                         argc += n_editor_args - 1;
                 }
+
                 args = newa(const char*, argc + 1);
 
                 if (n_editor_args > 0) {
@@ -6900,10 +6967,8 @@ static int run_editor(char **paths) {
                                 args[i] = editor_args[i];
                 }
 
-                STRV_FOREACH_PAIR(original_path, tmp_path, paths) {
-                        args[i] = *tmp_path;
-                        i++;
-                }
+                STRV_FOREACH_PAIR(original_path, tmp_path, paths)
+                        args[i++] = *tmp_path;
                 args[i] = NULL;
 
                 if (n_editor_args > 0)
@@ -6945,7 +7010,15 @@ static int find_paths_to_edit(sd_bus *bus, char **names, char ***paths) {
                 _cleanup_free_ char *path = NULL, *new_path = NULL, *tmp_path = NULL, *tmp_name = NULL;
                 const char *unit_name;
 
-                r = unit_find_paths(bus, *name, &lp, &path, NULL);
+                r = unit_find_paths(bus, *name, &lp, false, &path, NULL);
+                if (r == -EKEYREJECTED) {
+                        /* If loading of the unit failed server side complete, then the server won't tell us the unit
+                         * file path. In that case, find the file client side. */
+                        log_debug_errno(r, "Unit '%s' was not loaded correctly, retrying client-side.", *name);
+                        r = unit_find_paths(bus, *name, &lp, true, &path, NULL);
+                }
+                if (r == -ERFKILL)
+                        return log_error_errno(r, "Unit '%s' masked, cannot edit.", *name);
                 if (r < 0)
                         return r;
 
@@ -6953,10 +7026,10 @@ static int find_paths_to_edit(sd_bus *bus, char **names, char ***paths) {
                         assert(!path);
 
                         if (!arg_force) {
-                                log_error("Run 'systemctl edit%s --force %s' to create a new unit.",
-                                          arg_scope == UNIT_FILE_GLOBAL ? " --global" :
-                                          arg_scope == UNIT_FILE_USER ? " --user" : "",
-                                          *name);
+                                log_info("Run 'systemctl edit%s --force --full %s' to create a new unit.",
+                                         arg_scope == UNIT_FILE_GLOBAL ? " --global" :
+                                         arg_scope == UNIT_FILE_USER ? " --user" : "",
+                                         *name);
                                 return -ENOENT;
                         }
 
@@ -6996,6 +7069,7 @@ static int find_paths_to_edit(sd_bus *bus, char **names, char ***paths) {
                 r = strv_push_pair(paths, new_path, tmp_path);
                 if (r < 0)
                         return log_oom();
+
                 new_path = tmp_path = NULL;
         }
 
@@ -7036,7 +7110,6 @@ static int edit(int argc, char *argv[], void *userdata) {
                 r = unit_is_masked(bus, &lp, *tmp);
                 if (r < 0)
                         return r;
-
                 if (r > 0) {
                         log_error("Cannot edit %s: unit is masked.", *tmp);
                         return -EINVAL;
@@ -7101,7 +7174,7 @@ static int systemctl_help(void) {
         _cleanup_free_ char *link = NULL;
         int r;
 
-        (void) pager_open(arg_no_pager, false);
+        (void) pager_open(arg_pager_flags);
 
         r = terminal_urlify_man("systemctl", "1", &link);
         if (r < 0)
@@ -7508,7 +7581,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
         /* we default to allowing interactive authorization only in systemctl (not in the legacy commands) */
         arg_ask_password = true;
 
-        while ((c = getopt_long(argc, argv, "ht:p:alqfs:H:M:n:o:ir", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "ht:p:alqfs:H:M:n:o:ir.::", options, NULL)) >= 0)
 
                 switch (c) {
 
@@ -7519,10 +7592,9 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         return version();
 
                 case 't': {
-                        if (isempty(optarg)) {
-                                log_error("--type= requires arguments.");
-                                return -EINVAL;
-                        }
+                        if (isempty(optarg))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "--type= requires arguments.");
 
                         for (p = optarg;;) {
                                 _cleanup_free_ char *type = NULL;
@@ -7557,8 +7629,8 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                                 }
 
                                 log_error("Unknown unit type or load state '%s'.", type);
-                                log_info("Use -t help to see a list of allowed values.");
-                                return -EINVAL;
+                                return log_info_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                      "Use -t help to see a list of allowed values.");
                         }
 
                         break;
@@ -7662,7 +7734,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_NO_PAGER:
-                        arg_no_pager = true;
+                        arg_pager_flags |= PAGER_DISABLE;
                         break;
 
                 case ARG_NO_WALL:
@@ -7712,10 +7784,10 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         }
 
                         arg_signal = signal_from_string(optarg);
-                        if (arg_signal < 0) {
-                                log_error("Failed to parse signal string %s.", optarg);
-                                return -EINVAL;
-                        }
+                        if (arg_signal < 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to parse signal string %s.",
+                                                       optarg);
                         break;
 
                 case ARG_NO_ASK_PASSWORD:
@@ -7737,10 +7809,10 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         break;
 
                 case 'n':
-                        if (safe_atou(optarg, &arg_lines) < 0) {
-                                log_error("Failed to parse lines '%s'", optarg);
-                                return -EINVAL;
-                        }
+                        if (safe_atou(optarg, &arg_lines) < 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to parse lines '%s'",
+                                                       optarg);
                         break;
 
                 case 'o':
@@ -7750,10 +7822,10 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         }
 
                         arg_output = output_mode_from_string(optarg);
-                        if (arg_output < 0) {
-                                log_error("Unknown output '%s'.", optarg);
-                                return -EINVAL;
-                        }
+                        if (arg_output < 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Unknown output '%s'.",
+                                                       optarg);
                         break;
 
                 case 'i':
@@ -7769,10 +7841,9 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         break;
 
                 case ARG_STATE: {
-                        if (isempty(optarg)) {
-                                log_error("--state= requires arguments.");
-                                return -EINVAL;
-                        }
+                        if (isempty(optarg))
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "--state= requires arguments.");
 
                         for (p = optarg;;) {
                                 _cleanup_free_ char *s = NULL;
@@ -7797,10 +7868,9 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                 }
 
                 case 'r':
-                        if (geteuid() != 0) {
-                                log_error("--recursive requires root privileges.");
-                                return -EPERM;
-                        }
+                        if (geteuid() != 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EPERM),
+                                                       "--recursive requires root privileges.");
 
                         arg_recursive = true;
                         break;
@@ -7812,10 +7882,9 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         }
 
                         arg_preset_mode = unit_file_preset_mode_from_string(optarg);
-                        if (arg_preset_mode < 0) {
-                                log_error("Failed to parse preset mode: %s.", optarg);
-                                return -EINVAL;
-                        }
+                        if (arg_preset_mode < 0)
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                       "Failed to parse preset mode: %s.", optarg);
 
                         break;
 
@@ -7828,6 +7897,14 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                                 return log_oom();
                         break;
 
+                case '.':
+                        /* Output an error mimicking getopt, and print a hint afterwards */
+                        log_error("%s: invalid option -- '.'", program_invocation_name);
+                        log_notice("Hint: to specify units starting with a dash, use \"--\":\n"
+                                   "      %s [OPTIONS...] {COMMAND} -- -.%s ...",
+                                   program_invocation_name, optarg ?: "mount");
+                        _fallthrough_;
+
                 case '?':
                         return -EINVAL;
 
@@ -7835,20 +7912,13 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (arg_transport != BUS_TRANSPORT_LOCAL && arg_scope != UNIT_FILE_SYSTEM) {
-                log_error("Cannot access user instance remotely.");
-                return -EINVAL;
-        }
+        if (arg_transport != BUS_TRANSPORT_LOCAL && arg_scope != UNIT_FILE_SYSTEM)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Cannot access user instance remotely.");
 
-        if (arg_wait && arg_no_block) {
-                log_error("--wait may not be combined with --no-block.");
-                return -EINVAL;
-        }
-
-        if (arg_runtime && STRPTR_IN_SET(argv[optind], "disable", "unmask", "preset", "preset-all")) {
-                log_error("--runtime cannot be used with %s", argv[optind]);
-                return -EINVAL;
-        }
+        if (arg_wait && arg_no_block)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "--wait may not be combined with --no-block.");
 
         return 1;
 }
@@ -7938,10 +8008,9 @@ static int halt_parse_argv(int argc, char *argv[]) {
                 r = update_reboot_parameter_and_warn(argc == optind + 1 ? argv[optind] : NULL);
                 if (r < 0)
                         return r;
-        } else if (optind < argc) {
-                log_error("Too many arguments.");
-                return -EINVAL;
-        }
+        } else if (optind < argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Too many arguments.");
 
         return 1;
 }
@@ -8155,29 +8224,26 @@ static int telinit_parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (optind >= argc) {
-                log_error("%s: required argument missing.", program_invocation_short_name);
-                return -EINVAL;
-        }
+        if (optind >= argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "%s: required argument missing.",
+                                       program_invocation_short_name);
 
-        if (optind + 1 < argc) {
-                log_error("Too many arguments.");
-                return -EINVAL;
-        }
+        if (optind + 1 < argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Too many arguments.");
 
-        if (strlen(argv[optind]) != 1) {
-                log_error("Expected single character argument.");
-                return -EINVAL;
-        }
+        if (strlen(argv[optind]) != 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Expected single character argument.");
 
         for (i = 0; i < ELEMENTSOF(table); i++)
                 if (table[i].from == argv[optind][0])
                         break;
 
-        if (i >= ELEMENTSOF(table)) {
-                log_error("Unknown command '%s'.", argv[optind]);
-                return -EINVAL;
-        }
+        if (i >= ELEMENTSOF(table))
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Unknown command '%s'.", argv[optind]);
 
         arg_action = table[i].to;
 
@@ -8214,10 +8280,9 @@ static int runlevel_parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        if (optind < argc) {
-                log_error("Too many arguments.");
-                return -EINVAL;
-        }
+        if (optind < argc)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Too many arguments.");
 
         return 1;
 }
@@ -8269,10 +8334,11 @@ static int parse_argv(int argc, char *argv[]) {
                                 /* Hmm, so some other init system is running, we need to forward this request to
                                  * it. For now we simply guess that it is Upstart. */
 
+                                (void) rlimit_nofile_safe();
                                 execv(TELINIT, argv);
 
-                                log_error("Couldn't find an alternative telinit implementation to spawn.");
-                                return -EIO;
+                                return log_error_errno(SYNTHETIC_ERRNO(EIO),
+                                                       "Couldn't find an alternative telinit implementation to spawn.");
                         }
 
                 } else if (strstr(program_invocation_short_name, "runlevel")) {
@@ -8443,13 +8509,13 @@ static int start_with_fallback(void) {
         if (talk_initctl() > 0)
                 return 0;
 
-        log_error("Failed to talk to init daemon.");
-        return -EIO;
+        return log_error_errno(SYNTHETIC_ERRNO(EIO),
+                               "Failed to talk to init daemon.");
 }
 
 static int halt_now(enum action a) {
         /* The kernel will automatically flush ATA disks and suchlike on reboot(), but the file systems need to be
-         * synce'd explicitly in advance. */
+         * synced explicitly in advance. */
         if (!arg_no_sync && !arg_dry_run)
                 (void) sync();
 
@@ -8653,7 +8719,7 @@ static int logind_cancel_shutdown(void) {
 #endif
 }
 
-int main(int argc, char*argv[]) {
+static int run(int argc, char *argv[]) {
         int r;
 
         argv_cmdline = argv[0];
@@ -8661,6 +8727,10 @@ int main(int argc, char*argv[]) {
         setlocale(LC_ALL, "");
         log_parse_environment();
         log_open();
+
+        /* The journal merging logic potentially needs a lot of fds. */
+        (void) rlimit_nofile_bump(HIGH_RLIMIT_NOFILE);
+
         sigbus_install();
 
         /* Explicitly not on_tty() to avoid setting cached value.
@@ -8673,7 +8743,6 @@ int main(int argc, char*argv[]) {
                 goto finish;
 
         if (arg_action != ACTION_SYSTEMCTL && running_in_chroot() > 0) {
-
                 if (!arg_quiet)
                         log_info("Running in chroot, ignoring request.");
                 r = 0;
@@ -8739,10 +8808,6 @@ int main(int argc, char*argv[]) {
 finish:
         release_busses();
 
-        pager_close();
-        ask_password_agent_close();
-        polkit_agent_close();
-
         strv_free(arg_types);
         strv_free(arg_states);
         strv_free(arg_properties);
@@ -8751,6 +8816,8 @@ finish:
         free(arg_root);
         free(arg_esp_path);
 
-        /* Note that we return r here, not EXIT_SUCCESS, so that we can implement the LSB-like return codes */
-        return r < 0 ? EXIT_FAILURE : r;
+        /* Note that we return r here, not 0, so that we can implement the LSB-like return codes */
+        return r;
 }
+
+DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE(run);

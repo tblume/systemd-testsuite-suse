@@ -194,7 +194,6 @@ static sd_bus* bus_free(sd_bus *b) {
         free(b->auth_buffer);
         free(b->address);
         free(b->machine);
-        free(b->cgroup_root);
         free(b->description);
         free(b->patch_sender);
 
@@ -232,18 +231,22 @@ _public_ int sd_bus_new(sd_bus **ret) {
 
         assert_return(ret, -EINVAL);
 
-        b = new0(sd_bus, 1);
+        b = new(sd_bus, 1);
         if (!b)
                 return -ENOMEM;
 
-        b->n_ref = REFCNT_INIT;
-        b->input_fd = b->output_fd = -1;
-        b->inotify_fd = -1;
-        b->message_version = 1;
-        b->creds_mask |= SD_BUS_CREDS_WELL_KNOWN_NAMES|SD_BUS_CREDS_UNIQUE_NAME;
-        b->accept_fd = true;
-        b->original_pid = getpid_cached();
-        b->n_groups = (size_t) -1;
+        *b = (sd_bus) {
+                .n_ref = REFCNT_INIT,
+                .input_fd = -1,
+                .output_fd = -1,
+                .inotify_fd = -1,
+                .message_version = 1,
+                .creds_mask = SD_BUS_CREDS_WELL_KNOWN_NAMES|SD_BUS_CREDS_UNIQUE_NAME,
+                .accept_fd = true,
+                .original_pid = getpid_cached(),
+                .n_groups = (size_t) -1,
+                .close_on_exit = true,
+        };
 
         assert_se(pthread_mutex_init(&b->memfd_cache_mutex, NULL) == 0);
 
@@ -730,20 +733,28 @@ static int parse_unix_address(sd_bus *b, const char **p, char **guid) {
 
         if (path) {
                 l = strlen(path);
-                if (l > sizeof(b->sockaddr.un.sun_path))
+                if (l >= sizeof(b->sockaddr.un.sun_path)) /* We insist on NUL termination */
                         return -E2BIG;
 
-                b->sockaddr.un.sun_family = AF_UNIX;
-                strncpy(b->sockaddr.un.sun_path, path, sizeof(b->sockaddr.un.sun_path));
-                b->sockaddr_size = offsetof(struct sockaddr_un, sun_path) + l;
-        } else if (abstract) {
+                b->sockaddr.un = (struct sockaddr_un) {
+                        .sun_family = AF_UNIX,
+                };
+
+                memcpy(b->sockaddr.un.sun_path, path, l);
+                b->sockaddr_size = offsetof(struct sockaddr_un, sun_path) + l + 1;
+
+        } else {
+                assert(abstract);
+
                 l = strlen(abstract);
-                if (l > sizeof(b->sockaddr.un.sun_path) - 1)
+                if (l >= sizeof(b->sockaddr.un.sun_path) - 1) /* We insist on NUL termination */
                         return -E2BIG;
 
-                b->sockaddr.un.sun_family = AF_UNIX;
-                b->sockaddr.un.sun_path[0] = 0;
-                strncpy(b->sockaddr.un.sun_path+1, abstract, sizeof(b->sockaddr.un.sun_path)-1);
+                b->sockaddr.un = (struct sockaddr_un) {
+                        .sun_family = AF_UNIX,
+                };
+
+                memcpy(b->sockaddr.un.sun_path+1, abstract, l);
                 b->sockaddr_size = offsetof(struct sockaddr_un, sun_path) + 1 + l;
         }
 
@@ -964,9 +975,11 @@ static int parse_container_unix_address(sd_bus *b, const char **p, char **guid) 
         } else
                 b->nspid = 0;
 
-        b->sockaddr.un.sun_family = AF_UNIX;
-        /* Note that we use the old /var/run prefix here, to increase compatibility with really old containers */
-        strncpy(b->sockaddr.un.sun_path, "/var/run/dbus/system_bus_socket", sizeof(b->sockaddr.un.sun_path));
+        b->sockaddr.un = (struct sockaddr_un) {
+                .sun_family = AF_UNIX,
+                /* Note that we use the old /var/run prefix here, to increase compatibility with really old containers */
+                .sun_path = "/var/run/dbus/system_bus_socket",
+        };
         b->sockaddr_size = SOCKADDR_UN_LEN(b->sockaddr.un);
         b->is_local = false;
 
@@ -1409,11 +1422,9 @@ int bus_set_address_system_remote(sd_bus *b, const char *host) {
                 if (!in_charset(p, "0123456789") || *p == '\0') {
                         if (!machine_name_is_valid(p) || got_forward_slash)
                                 return -EINVAL;
-                        else {
-                                m = p;
-                                p = NULL;
-                                goto interpret_port_as_machine_old_syntax;
-                        }
+
+                        m = TAKE_PTR(p);
+                        goto interpret_port_as_machine_old_syntax;
                 }
         }
 
@@ -3401,8 +3412,10 @@ static int quit_callback(sd_event_source *event, void *userdata) {
 
         assert(event);
 
-        sd_bus_flush(bus);
-        sd_bus_close(bus);
+        if (bus->close_on_exit) {
+                sd_bus_flush(bus);
+                sd_bus_close(bus);
+        }
 
         return 1;
 }
@@ -3915,24 +3928,6 @@ _public_ int sd_bus_get_description(sd_bus *bus, const char **description) {
         return 0;
 }
 
-int bus_get_root_path(sd_bus *bus) {
-        int r;
-
-        if (bus->cgroup_root)
-                return 0;
-
-        r = cg_get_root_path(&bus->cgroup_root);
-        if (r == -ENOENT) {
-                bus->cgroup_root = strdup("/");
-                if (!bus->cgroup_root)
-                        return -ENOMEM;
-
-                r = 0;
-        }
-
-        return r;
-}
-
 _public_ int sd_bus_get_scope(sd_bus *bus, const char **scope) {
         assert_return(bus, -EINVAL);
         assert_return(bus = bus_resolve(bus), -ENOPKG);
@@ -4126,4 +4121,19 @@ _public_ int sd_bus_get_method_call_timeout(sd_bus *bus, uint64_t *ret) {
 
         *ret = bus->method_call_timeout = BUS_DEFAULT_TIMEOUT;
         return 0;
+}
+
+_public_ int sd_bus_set_close_on_exit(sd_bus *bus, int b) {
+        assert_return(bus, -EINVAL);
+        assert_return(bus = bus_resolve(bus), -ENOPKG);
+
+        bus->close_on_exit = b;
+        return 0;
+}
+
+_public_ int sd_bus_get_close_on_exit(sd_bus *bus) {
+        assert_return(bus, -EINVAL);
+        assert_return(bus = bus_resolve(bus), -ENOPKG);
+
+        return bus->close_on_exit;
 }

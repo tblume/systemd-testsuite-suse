@@ -140,13 +140,11 @@ static int socket_from_display(const char *display, char **path) {
 }
 
 static int get_seat_from_display(const char *display, const char **seat, uint32_t *vtnr) {
-        union sockaddr_union sa = {
-                .un.sun_family = AF_UNIX,
-        };
+        union sockaddr_union sa = {};
         _cleanup_free_ char *p = NULL, *tty = NULL;
         _cleanup_close_ int fd = -1;
         struct ucred ucred;
-        int v, r;
+        int v, r, salen;
 
         assert(display);
         assert(vtnr);
@@ -160,13 +158,15 @@ static int get_seat_from_display(const char *display, const char **seat, uint32_
         r = socket_from_display(display, &p);
         if (r < 0)
                 return r;
-        strncpy(sa.un.sun_path, p, sizeof(sa.un.sun_path)-1);
+        salen = sockaddr_un_set_path(&sa.un, p);
+        if (salen < 0)
+                return salen;
 
         fd = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
         if (fd < 0)
                 return -errno;
 
-        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0)
+        if (connect(fd, &sa.sa, salen) < 0)
                 return -errno;
 
         r = getpeercred(fd, &ucred);
@@ -188,6 +188,28 @@ static int get_seat_from_display(const char *display, const char **seat, uint32_
         *vtnr = (uint32_t) v;
 
         return 0;
+}
+
+static int export_legacy_dbus_address(
+                pam_handle_t *handle,
+                uid_t uid,
+                const char *runtime) {
+
+        _cleanup_free_ char *s = NULL;
+        int r = PAM_BUF_ERR;
+
+        if (asprintf(&s, DEFAULT_USER_BUS_ADDRESS_FMT, runtime) < 0)
+                goto error;
+
+        r = pam_misc_setenv(handle, "DBUS_SESSION_BUS_ADDRESS", s, 0);
+        if (r != PAM_SUCCESS)
+                goto error;
+
+        return PAM_SUCCESS;
+
+error:
+        pam_syslog(handle, LOG_ERR, "Failed to set bus variable.");
+        return r;
 }
 
 static int append_session_memory_max(pam_handle_t *handle, sd_bus_message *m, const char *limit) {
@@ -308,6 +330,36 @@ static int update_environment(pam_handle_t *handle, const char *key, const char 
         return r;
 }
 
+static bool validate_runtime_directory(pam_handle_t *handle, const char *path, uid_t uid) {
+        struct stat st;
+
+        assert(path);
+
+        /* Just some extra paranoia: let's not set $XDG_RUNTIME_DIR if the directory we'd set it to isn't actually set
+         * up properly for us. */
+
+        if (lstat(path, &st) < 0) {
+                pam_syslog(handle, LOG_ERR, "Failed to stat() runtime directory '%s': %s", path, strerror(errno));
+                goto fail;
+        }
+
+        if (!S_ISDIR(st.st_mode)) {
+                pam_syslog(handle, LOG_ERR, "Runtime directory '%s' is not actually a directory.", path);
+                goto fail;
+        }
+
+        if (st.st_uid != uid) {
+                pam_syslog(handle, LOG_ERR, "Runtime directory '%s' is not owned by UID " UID_FMT ", as it should.", path, uid);
+                goto fail;
+        }
+
+        return true;
+
+fail:
+        pam_syslog(handle, LOG_WARNING, "Not setting $XDG_RUNTIME_DIR, as the directory is not in order.");
+        return false;
+}
+
 _public_ PAM_EXTERN int pam_sm_open_session(
                 pam_handle_t *handle,
                 int flags,
@@ -367,11 +419,17 @@ _public_ PAM_EXTERN int pam_sm_open_session(
                 if (asprintf(&rt, "/run/user/"UID_FMT, pw->pw_uid) < 0)
                         return PAM_BUF_ERR;
 
-                r = pam_misc_setenv(handle, "XDG_RUNTIME_DIR", rt, 0);
-                if (r != PAM_SUCCESS) {
-                        pam_syslog(handle, LOG_ERR, "Failed to set runtime dir.");
-                        return r;
+                if (validate_runtime_directory(handle, rt, pw->pw_uid)) {
+                        r = pam_misc_setenv(handle, "XDG_RUNTIME_DIR", rt, 0);
+                        if (r != PAM_SUCCESS) {
+                                pam_syslog(handle, LOG_ERR, "Failed to set runtime dir.");
+                                return r;
+                        }
                 }
+
+                r = export_legacy_dbus_address(handle, pw->pw_uid, rt);
+                if (r != PAM_SUCCESS)
+                        return r;
 
                 return PAM_SUCCESS;
         }
@@ -434,7 +492,8 @@ _public_ PAM_EXTERN int pam_sm_open_session(
         }
 
         if (seat && !streq(seat, "seat0") && vtnr != 0) {
-                pam_syslog(handle, LOG_DEBUG, "Ignoring vtnr %"PRIu32" for %s which is not seat0", vtnr, seat);
+                if (debug)
+                        pam_syslog(handle, LOG_DEBUG, "Ignoring vtnr %"PRIu32" for %s which is not seat0", vtnr, seat);
                 vtnr = 0;
         }
 
@@ -535,7 +594,8 @@ _public_ PAM_EXTERN int pam_sm_open_session(
         r = sd_bus_call(bus, m, 0, &error, &reply);
         if (r < 0) {
                 if (sd_bus_error_has_name(&error, BUS_ERROR_SESSION_BUSY)) {
-                        pam_syslog(handle, LOG_DEBUG, "Cannot create session: %s", bus_error_message(&error, r));
+                        if (debug)
+                                pam_syslog(handle, LOG_DEBUG, "Cannot create session: %s", bus_error_message(&error, r));
                         return PAM_SUCCESS;
                 } else {
                         pam_syslog(handle, LOG_ERR, "Failed to create session: %s", bus_error_message(&error, r));
@@ -574,7 +634,13 @@ _public_ PAM_EXTERN int pam_sm_open_session(
                  * in privileged apps clobbering the runtime directory
                  * unnecessarily. */
 
-                r = update_environment(handle, "XDG_RUNTIME_DIR", runtime_path);
+                if (validate_runtime_directory(handle, runtime_path, pw->pw_uid)) {
+                        r = update_environment(handle, "XDG_RUNTIME_DIR", runtime_path);
+                        if (r != PAM_SUCCESS)
+                                return r;
+                }
+
+                r = export_legacy_dbus_address(handle, pw->pw_uid, runtime_path);
                 if (r != PAM_SUCCESS)
                         return r;
         }

@@ -293,11 +293,11 @@ static void test_ra(void) {
         sd_event *e;
         sd_radv *ra;
         usec_t time_now = now(clock_boottime_or_monotonic());
-        unsigned int i;
+        unsigned i;
 
         printf("* %s\n", __FUNCTION__);
 
-        assert_se(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, test_fd) >= 0);
+        assert_se(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, test_fd) >= 0);
 
         assert_se(sd_event_new(&e) >= 0);
 

@@ -28,7 +28,7 @@
 #include "escape.h"
 #include "fd-util.h"
 #include "missing.h"
-#include "mount-util.h"
+#include "mountpoint-util.h"
 #include "nsflags.h"
 #include "parse-util.h"
 #include "proc-cmdline.h"
@@ -897,7 +897,7 @@ static int bus_print_property(const char *name, const char *expected_value, sd_b
                                 return r;
 
                         if (all || n > 0) {
-                                unsigned int i;
+                                unsigned i;
 
                                 if (!value)
                                         printf("%s=", name);
@@ -919,7 +919,7 @@ static int bus_print_property(const char *name, const char *expected_value, sd_b
                                 return r;
 
                         if (all || n > 0) {
-                                unsigned int i;
+                                unsigned i;
 
                                 if (!value)
                                         printf("%s=", name);
@@ -1237,44 +1237,6 @@ int bus_message_map_all_properties(
         return sd_bus_message_exit_container(m);
 }
 
-int bus_message_map_properties_changed(
-                sd_bus_message *m,
-                const struct bus_properties_map *map,
-                unsigned flags,
-                sd_bus_error *error,
-                void *userdata) {
-
-        const char *member;
-        int r, invalidated, i;
-
-        assert(m);
-        assert(map);
-
-        r = bus_message_map_all_properties(m, map, flags, error, userdata);
-        if (r < 0)
-                return r;
-
-        r = sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "s");
-        if (r < 0)
-                return r;
-
-        invalidated = 0;
-        while ((r = sd_bus_message_read_basic(m, SD_BUS_TYPE_STRING, &member)) > 0)
-                for (i = 0; map[i].member; i++)
-                        if (streq(map[i].member, member)) {
-                                ++invalidated;
-                                break;
-                        }
-        if (r < 0)
-                return r;
-
-        r = sd_bus_message_exit_container(m);
-        if (r < 0)
-                return r;
-
-        return invalidated;
-}
-
 int bus_map_all_properties(
                 sd_bus *bus,
                 const char *destination,
@@ -1382,12 +1344,10 @@ int bus_connect_transport_systemd(BusTransport transport, const char *host, bool
                 if (user)
                         r = bus_connect_user_systemd(bus);
                 else {
-                        if (sd_booted() <= 0) {
+                        if (sd_booted() <= 0)
                                 /* Print a friendly message when the local system is actually not running systemd as PID 1. */
-                                log_error("System has not been booted with systemd as init system (PID 1). Can't operate.");
-
-                                return -EHOSTDOWN;
-                        }
+                                return log_error_errno(SYNTHETIC_ERRNO(EHOSTDOWN),
+                                                       "System has not been booted with systemd as init system (PID 1). Can't operate.");
                         r = bus_connect_system_systemd(bus);
                 }
                 break;

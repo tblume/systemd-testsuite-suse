@@ -6,6 +6,7 @@ COMMAND="$1"
 KERNEL_VERSION="$2"
 BOOT_DIR_ABS="$3"
 KERNEL_IMAGE="$4"
+INITRD_FILE="$5"
 
 if ! [[ $KERNEL_INSTALL_MACHINE_ID ]]; then
     exit 0
@@ -19,10 +20,11 @@ MACHINE_ID=$KERNEL_INSTALL_MACHINE_ID
 
 BOOT_DIR="/$MACHINE_ID/$KERNEL_VERSION"
 BOOT_ROOT=${BOOT_DIR_ABS%$BOOT_DIR}
-LOADER_ENTRY="$BOOT_ROOT/loader/entries/$MACHINE_ID-$KERNEL_VERSION.conf"
 
 if [[ $COMMAND == remove ]]; then
-    exec rm -f "$LOADER_ENTRY"
+    rm -f "$BOOT_ROOT/loader/entries/$MACHINE_ID-$KERNEL_VERSION.conf"
+    rm -f "$BOOT_ROOT/loader/entries/$MACHINE_ID-$KERNEL_VERSION+"*".conf"
+    exit 0
 fi
 
 if ! [[ $COMMAND == add ]]; then
@@ -63,12 +65,32 @@ if ! [[ ${BOOT_OPTIONS[*]} ]]; then
     exit 1
 fi
 
+if [[ -f /etc/kernel/tries ]]; then
+    read -r TRIES </etc/kernel/tries
+    if ! [[ "$TRIES" =~ ^[0-9]+$ ]] ; then
+        echo "/etc/kernel/tries does not contain an integer." >&2
+        exit 1
+    fi
+    LOADER_ENTRY="$BOOT_ROOT/loader/entries/$MACHINE_ID-$KERNEL_VERSION+$TRIES.conf"
+else
+    LOADER_ENTRY="$BOOT_ROOT/loader/entries/$MACHINE_ID-$KERNEL_VERSION.conf"
+fi
+
 cp "$KERNEL_IMAGE" "$BOOT_DIR_ABS/linux" &&
    chown root:root "$BOOT_DIR_ABS/linux" &&
    chmod 0644 "$BOOT_DIR_ABS/linux" || {
     echo "Could not copy '$KERNEL_IMAGE to '$BOOT_DIR_ABS/linux'." >&2
     exit 1
 }
+
+if [[ -f "${INITRD_FILE}" ]]; then
+    cp "${INITRD_FILE}" "$BOOT_DIR_ABS/initrd" &&
+        chown root:root "$BOOT_DIR_ABS/initrd" &&
+        chmod 0644 "$BOOT_DIR_ABS/initrd" || {
+         echo "Could not copy '$INITRD_FILE' to '$BOOT_DIR_ABS/initrd'." >&2
+         exit 1
+    }
+fi
 
 mkdir -p "${LOADER_ENTRY%/*}" || {
     echo "Could not create loader entry directory '${LOADER_ENTRY%/*}'." >&2

@@ -16,7 +16,7 @@ typedef struct Manager Manager;
 #include "cgroup-util.h"
 #include "fdset.h"
 #include "list.h"
-#include "missing.h"
+#include "missing_resource.h"
 #include "namespace.h"
 #include "nsflags.h"
 
@@ -225,6 +225,9 @@ struct ExecContext {
         struct iovec* log_extra_fields;
         size_t n_log_extra_fields;
 
+        usec_t log_rate_limit_interval_usec;
+        unsigned log_rate_limit_burst;
+
         bool cpu_sched_reset_on_fork;
         bool non_blocking;
         bool private_tmp;
@@ -286,15 +289,15 @@ typedef enum ExecFlags {
         EXEC_APPLY_SANDBOXING  = 1 << 0,
         EXEC_APPLY_CHROOT      = 1 << 1,
         EXEC_APPLY_TTY_STDIN   = 1 << 2,
-        EXEC_NEW_KEYRING       = 1 << 3,
-        EXEC_PASS_LOG_UNIT     = 1 << 4, /* Whether to pass the unit name to the service's journal stream connection */
-        EXEC_CHOWN_DIRECTORIES = 1 << 5, /* chown() the runtime/state/cache/log directories to the user we run as, under all conditions */
-        EXEC_NSS_BYPASS_BUS    = 1 << 6, /* Set the SYSTEMD_NSS_BYPASS_BUS environment variable, to disable nss-systemd for dbus */
-        EXEC_CGROUP_DELEGATE   = 1 << 7,
+        EXEC_PASS_LOG_UNIT     = 1 << 3, /* Whether to pass the unit name to the service's journal stream connection */
+        EXEC_CHOWN_DIRECTORIES = 1 << 4, /* chown() the runtime/state/cache/log directories to the user we run as, under all conditions */
+        EXEC_NSS_BYPASS_BUS    = 1 << 5, /* Set the SYSTEMD_NSS_BYPASS_BUS environment variable, to disable nss-systemd for dbus */
+        EXEC_CGROUP_DELEGATE   = 1 << 6,
+        EXEC_IS_CONTROL        = 1 << 7,
+        EXEC_CONTROL_CGROUP    = 1 << 8, /* Place the process not in the indicated cgroup but in a subcgroup '/.control', but only EXEC_CGROUP_DELEGATE and EXEC_IS_CONTROL is set, too */
 
         /* The following are not used by execute.c, but by consumers internally */
-        EXEC_PASS_FDS          = 1 << 8,
-        EXEC_IS_CONTROL        = 1 << 9,
+        EXEC_PASS_FDS          = 1 << 9,
         EXEC_SETENV_RESULT     = 1 << 10,
         EXEC_SET_WATCHDOG      = 1 << 11,
 } ExecFlags;
@@ -349,8 +352,8 @@ void exec_command_reset_status_array(ExecCommand *c, size_t n);
 void exec_command_reset_status_list_array(ExecCommand **c, size_t n);
 void exec_command_dump_list(ExecCommand *c, FILE *f, const char *prefix);
 void exec_command_append_list(ExecCommand **l, ExecCommand *e);
-int exec_command_set(ExecCommand *c, const char *path, ...);
-int exec_command_append(ExecCommand *c, const char *path, ...);
+int exec_command_set(ExecCommand *c, const char *path, ...) _sentinel_;
+int exec_command_append(ExecCommand *c, const char *path, ...) _sentinel_;
 
 void exec_context_init(ExecContext *c);
 void exec_context_done(ExecContext *c);
@@ -379,6 +382,8 @@ int exec_runtime_serialize(const Manager *m, FILE *f, FDSet *fds);
 int exec_runtime_deserialize_compat(Unit *u, const char *key, const char *value, FDSet *fds);
 void exec_runtime_deserialize_one(Manager *m, const char *value, FDSet *fds);
 void exec_runtime_vacuum(Manager *m);
+
+void exec_params_clear(ExecParameters *p);
 
 const char* exec_output_to_string(ExecOutput i) _const_;
 ExecOutput exec_output_from_string(const char *s) _pure_;

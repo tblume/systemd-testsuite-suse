@@ -13,6 +13,8 @@
 #include "io-util.h"
 #include "journal-util.h"
 #include "journald-context.h"
+#include "parse-util.h"
+#include "path-util.h"
 #include "process-util.h"
 #include "string-util.h"
 #include "syslog-util.h"
@@ -102,6 +104,8 @@ static int client_context_new(Server *s, pid_t pid, ClientContext **ret) {
         c->timestamp = USEC_INFINITY;
         c->extra_fields_mtime = NSEC_INFINITY;
         c->log_level_max = -1;
+        c->log_rate_limit_interval = s->rate_limit_interval;
+        c->log_rate_limit_burst = s->rate_limit_burst;
 
         r = hashmap_put(s->client_contexts, PID_TO_PTR(pid), c);
         if (r < 0) {
@@ -113,7 +117,8 @@ static int client_context_new(Server *s, pid_t pid, ClientContext **ret) {
         return 0;
 }
 
-static void client_context_reset(ClientContext *c) {
+static void client_context_reset(Server *s, ClientContext *c) {
+        assert(s);
         assert(c);
 
         c->timestamp = USEC_INFINITY;
@@ -148,6 +153,9 @@ static void client_context_reset(ClientContext *c) {
         c->extra_fields_mtime = NSEC_INFINITY;
 
         c->log_level_max = -1;
+
+        c->log_rate_limit_interval = s->rate_limit_interval;
+        c->log_rate_limit_burst = s->rate_limit_burst;
 }
 
 static ClientContext* client_context_free(Server *s, ClientContext *c) {
@@ -161,7 +169,7 @@ static ClientContext* client_context_free(Server *s, ClientContext *c) {
         if (c->in_lru)
                 assert_se(prioq_remove(s->client_contexts_lru, c, &c->lru_index) >= 0);
 
-        client_context_reset(c);
+        client_context_reset(s, c);
 
         return mfree(c);
 }
@@ -238,16 +246,17 @@ static int client_context_read_label(
 }
 
 static int client_context_read_cgroup(Server *s, ClientContext *c, const char *unit_id) {
-        char *t = NULL;
+        _cleanup_free_ char *t = NULL;
         int r;
 
         assert(c);
 
         /* Try to acquire the current cgroup path */
         r = cg_pid_get_path_shifted(c->pid, s->cgroup_root, &t);
-        if (r < 0) {
-
-                /* If that didn't work, we use the unit ID passed in as fallback, if we have nothing cached yet */
+        if (r < 0 || empty_or_root(t)) {
+                /* We use the unit ID passed in as fallback if we have nothing cached yet and cg_pid_get_path_shifted()
+                 * failed or process is running in a root cgroup. Zombie processes are automatically migrated to root cgroup
+                 * on cgroup v1 and we want to be able to map log messages from them too. */
                 if (unit_id && !c->unit) {
                         c->unit = strdup(unit_id);
                         if (c->unit)
@@ -258,10 +267,8 @@ static int client_context_read_cgroup(Server *s, ClientContext *c, const char *u
         }
 
         /* Let's shortcut this if the cgroup path didn't change */
-        if (streq_ptr(c->cgroup, t)) {
-                free(t);
+        if (streq_ptr(c->cgroup, t))
                 return 0;
-        }
 
         free_and_replace(c->cgroup, t);
 
@@ -424,6 +431,42 @@ static int client_context_read_extra_fields(
         return 0;
 }
 
+static int client_context_read_log_rate_limit_interval(ClientContext *c) {
+        _cleanup_free_ char *value = NULL;
+        const char *p;
+        int r;
+
+        assert(c);
+
+        if (!c->unit)
+                return 0;
+
+        p = strjoina("/run/systemd/units/log-rate-limit-interval:", c->unit);
+        r = readlink_malloc(p, &value);
+        if (r < 0)
+                return r;
+
+        return safe_atou64(value, &c->log_rate_limit_interval);
+}
+
+static int client_context_read_log_rate_limit_burst(ClientContext *c) {
+        _cleanup_free_ char *value = NULL;
+        const char *p;
+        int r;
+
+        assert(c);
+
+        if (!c->unit)
+                return 0;
+
+        p = strjoina("/run/systemd/units/log-rate-limit-burst:", c->unit);
+        r = readlink_malloc(p, &value);
+        if (r < 0)
+                return r;
+
+        return safe_atou(value, &c->log_rate_limit_burst);
+}
+
 static void client_context_really_refresh(
                 Server *s,
                 ClientContext *c,
@@ -450,6 +493,8 @@ static void client_context_really_refresh(
         (void) client_context_read_invocation_id(s, c);
         (void) client_context_read_log_level_max(s, c);
         (void) client_context_read_extra_fields(s, c);
+        (void) client_context_read_log_rate_limit_interval(c);
+        (void) client_context_read_log_rate_limit_burst(c);
 
         c->timestamp = timestamp;
 
@@ -480,7 +525,7 @@ void client_context_maybe_refresh(
         /* If the data isn't pinned and if the cashed data is older than the upper limit, we flush it out
          * entirely. This follows the logic that as long as an entry is pinned the PID reuse is unlikely. */
         if (c->n_ref == 0 && c->timestamp + MAX_USEC < timestamp) {
-                client_context_reset(c);
+                client_context_reset(s, c);
                 goto refresh;
         }
 

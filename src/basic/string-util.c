@@ -398,12 +398,7 @@ int ascii_strcasecmp_nn(const char *a, size_t n, const char *b, size_t m) {
         if (r != 0)
                 return r;
 
-        if (n < m)
-                return -1;
-        else if (n > m)
-                return 1;
-        else
-                return 0;
+        return CMP(n, m);
 }
 
 bool chars_intersect(const char *a, const char *b) {
@@ -747,7 +742,7 @@ char *strreplace(const char *text, const char *old_string, const char *new_strin
         return ret;
 }
 
-static void advance_offsets(ssize_t diff, size_t offsets[2], size_t shift[2], size_t size) {
+static void advance_offsets(ssize_t diff, size_t offsets[static 2], size_t shift[static 2], size_t size) {
         if (!offsets)
                 return;
 
@@ -1064,8 +1059,11 @@ typedef void *(*memset_t)(void *,int,size_t);
 
 static volatile memset_t memset_func = memset;
 
-void explicit_bzero(void *p, size_t l) {
-        memset_func(p, '\0', l);
+void* explicit_bzero_safe(void *p, size_t l) {
+        if (l > 0)
+                memset_func(p, '\0', l);
+
+        return p;
 }
 #endif
 
@@ -1075,7 +1073,7 @@ char* string_erase(char *x) {
 
         /* A delicious drop of snake-oil! To be called on memory where
          * we stored passphrases or so, after we used them. */
-        explicit_bzero(x, strlen(x));
+        explicit_bzero_safe(x, strlen(x));
         return x;
 }
 
