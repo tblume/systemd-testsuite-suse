@@ -5,20 +5,35 @@ set -e
 TEST_DESCRIPTION="https://github.com/systemd/systemd/issues/2730"
 TEST_NO_NSPAWN=1
 
+export TEST_BASE_DIR=/var/opt/systemd-tests/test
 . $TEST_BASE_DIR/test-functions
-SKIP_INITRD=yes
-QEMU_TIMEOUT=180
 FSTYPE=btrfs
 
+test_run() {
+    ret=1
+    systemctl daemon-reload
+    systemctl start testsuite.service || return 1
+    systemctl status --full testsuite.service
+    if [ -z "$TEST_NO_NSPAWN" ]; then
+        if run_nspawn; then
+            check_result_nspawn || return 1
+        else
+            dwarn "can't run systemd-nspawn, skipping"
+        fi
+    fi
+    test -s /failed && ret=$(($ret+1))
+    [[ -e /testok ]] && ret=0
+    return $ret
+}
+
 test_setup() {
-    create_empty_image
     mkdir -p $TESTDIR/root
-    mount ${LOOPDEV}p1 $TESTDIR/root
+    initdir=$TESTDIR/root
+    STRIP_BINARIES=no
 
     # Create what will eventually be our root filesystem onto an overlay
     (
         LOG_LEVEL=5
-        eval $(udevadm info --export --query=env --name=${LOOPDEV}p2)
 
         setup_basic_environment
 
@@ -29,7 +44,8 @@ Description=Testsuite service
 After=multi-user.target
 
 [Service]
-ExecStart=/bin/sh -x -c 'mount -o remount,rw /dev/sda1 && echo OK > /testok; systemctl poweroff'
+ExecStart=/bin/sh -x -c 'mount -o remount,rw /dev/vda2 && echo -e "\ntestresult:\nOK" > /testok > /testok'
+ExecStartPost=/bin/sh -x -c 'echo -e "\nfailed:" > /failed; systemctl --state=failed --no-pager >> /failed'
 Type=oneshot
 EOF
 
@@ -39,7 +55,7 @@ EOF
 Before=local-fs.target
 
 [Mount]
-What=/dev/sda1
+What=/dev/vda2
 Where=/
 Type=btrfs
 Options=errors=remount-ro,noatime
@@ -66,6 +82,9 @@ EOF
         setup_testsuite
     ) || return 1
 
+    # copy the units used by this test
+    cp $initdir/etc/systemd/system/testsuite.service /etc/systemd/system/testsuite.service
+
     ln -s /etc/systemd/system/-.mount $initdir/etc/systemd/system/root.mount
     mkdir -p $initdir/etc/systemd/system/local-fs.target.wants
     ln -s /etc/systemd/system/-.mount $initdir/etc/systemd/system/local-fs.target.wants/-.mount
@@ -76,9 +95,16 @@ EOF
     ln -s /dev/null $initdir/etc/systemd/system/systemd-networkd.service
     ln -s /dev/null $initdir/etc/systemd/system/systemd-networkd.socket
     ln -s /dev/null $initdir/etc/systemd/system/systemd-resolved.service
+}
 
-    ddebug "umount $TESTDIR/root"
-    umount $TESTDIR/root
+test_cleanup() {
+    for service in testsuite.service; do
+         rm /etc/systemd/system/$service
+    done
+    [[ -e /testok ]] && rm /testok
+    [[ -e /failed ]] && rm /failed
+    return 0
+
 }
 
 do_test "$@"
