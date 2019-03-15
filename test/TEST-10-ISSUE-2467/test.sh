@@ -5,21 +5,37 @@ set -e
 TEST_DESCRIPTION="https://github.com/systemd/systemd/issues/2467"
 TEST_NO_NSPAWN=1
 
+export TEST_BASE_DIR=/var/opt/systemd-tests/test
 . $TEST_BASE_DIR/test-functions
 SKIP_INITRD=yes
 
+test_run() {
+    ret=1
+    systemctl daemon-reload
+    systemctl start testsuite.service || return 1
+    systemctl status --full testsuite.service
+    if [ -z "$TEST_NO_NSPAWN" ]; then
+        if run_nspawn; then
+            check_result_nspawn || return 1
+        else
+            dwarn "can't run systemd-nspawn, skipping"
+        fi
+    fi
+    test -s /failed && ret=$(($ret+1))
+    [[ -e /testok ]] && ret=0
+    return $ret
+}
+
 test_setup() {
-    create_empty_image
     mkdir -p $TESTDIR/root
-    mount ${LOOPDEV}p1 $TESTDIR/root
+    initdir=$TESTDIR/root
+    STRIP_BINARIES=no
 
     # Create what will eventually be our root filesystem onto an overlay
     (
         LOG_LEVEL=5
-        eval $(udevadm info --export --query=env --name=${LOOPDEV}p2)
 
         setup_basic_environment
-        dracut_install nc true rm
 
         # setup the testsuite service
         cat >$initdir/etc/systemd/system/testsuite.service <<'EOF'
@@ -29,7 +45,8 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -e -x -c 'rm -f /tmp/nonexistent; systemctl start test.socket; echo a | nc -U /run/test.ctl; >/testok'
+ExecStart=/bin/sh -e -x -c 'rm -f /tmp/nonexistent; systemctl start test.socket; echo a | nc -U /run/test.ctl'
+ExecStartPost=/bin/sh -x -c 'echo -e "\nfailed:" > /failed; systemctl status test.socket >> /failed; echo -e "\ntestresult:\nOK" > /testok'
 TimeoutStartSec=10s
 EOF
 
@@ -56,6 +73,27 @@ EOF
     ln -s /dev/null $initdir/etc/systemd/system/systemd-networkd.service
     ln -s /dev/null $initdir/etc/systemd/system/systemd-networkd.socket
     ln -s /dev/null $initdir/etc/systemd/system/systemd-resolved.service
+
+    # copy the units used by this test
+    for unit in test.service test.socket testsuite.service test.socket; do
+        cp $initdir/etc/systemd/system/$unit /etc/systemd/system/
+    done
+
+}
+
+test_cleanup() {
+    for unit in test.service test.socket testsuite.service; do
+         rm /etc/systemd/system/$unit
+    done
+    [[ -e /testok ]] && rm /testok
+    [[ -e /failed ]] && rm /failed
+    return 0
+
+}
+
+do_test "$@"
+
+
 
     ddebug "umount $TESTDIR/root"
     umount $TESTDIR/root
