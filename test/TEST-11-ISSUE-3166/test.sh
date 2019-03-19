@@ -3,18 +3,36 @@ set -e
 TEST_DESCRIPTION="https://github.com/systemd/systemd/issues/3166"
 TEST_NO_NSPAWN=1
 
+export TEST_BASE_DIR=/var/opt/systemd-tests/test
 . $TEST_BASE_DIR/test-functions
 
+test_run() {
+    ret=1
+    systemctl daemon-reload
+    systemctl start testsuite.service || return 1
+    systemctl status --full testsuite.service
+    if [ -z "$TEST_NO_NSPAWN" ]; then
+        if run_nspawn; then
+            check_result_nspawn || return 1
+        else
+            dwarn "can't run systemd-nspawn, skipping"
+        fi
+    fi
+    test -s /failed && ret=$(($ret+1))
+    [[ -e /testok ]] && ret=0
+    return $ret
+}
+
 test_setup() {
-    create_empty_image_rootdir
+    mkdir -p $TESTDIR/root
+    initdir=$TESTDIR/root
+    STRIP_BINARIES=no
 
     # Create what will eventually be our root filesystem onto an overlay
     (
         LOG_LEVEL=5
-        eval $(udevadm info --export --query=env --name=${LOOPDEV}p2)
 
-        setup_basic_environment
-        dracut_install false touch
+	setup_basic_environment
 
         # mask some services that we do not want to run in these tests
         ln -fs /dev/null $initdir/etc/systemd/system/systemd-hwdb-update.service
@@ -25,12 +43,13 @@ test_setup() {
         ln -fs /dev/null $initdir/etc/systemd/system/systemd-machined.service
 
         # setup the testsuite service
-        cat >$initdir/etc/systemd/system/testsuite.service <<EOF
+	cat >$initdir/etc/systemd/system/testsuite.service <<EOF
 [Unit]
 Description=Testsuite service
 
 [Service]
-ExecStart=/test-fail-on-restart.sh
+ExecStart=$initdir/test-fail-on-restart.sh
+ExecStartPost=/bin/sh -x -c 'systemctl status fail-on-restart.service > /failed; echo OK > /testok'
 Type=oneshot
 EOF
 
@@ -63,6 +82,22 @@ EOF
         chmod 0755 $initdir/test-fail-on-restart.sh
         setup_testsuite
     )
+
+
+    # copy the units used by this test
+    for service in testsuite.service fail-on-restart.service; do
+        cp $initdir/etc/systemd/system/$service /etc/systemd/system/
+    done
+}
+
+test_cleanup() {
+    for service in testsuite.service fail-on-restart.service; do
+         rm /etc/systemd/system/$service
+    done
+    [[ -e /testok ]] && rm /testok
+    [[ -e /failed ]] && rm /failed
+    return 0
+
 }
 
 do_test "$@"
