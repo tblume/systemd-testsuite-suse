@@ -7,15 +7,31 @@ TEST_NO_NSPAWN=1
 SKIP_INITRD=yes
 . $TEST_BASE_DIR/test-functions
 
+test_run() {
+    ret=1
+    systemctl daemon-reload
+    systemctl start testsuite.service || return 1
+    systemctl status --full testsuite.service
+    if [ -z "$TEST_NO_NSPAWN" ]; then
+        if run_nspawn; then
+            check_result_nspawn || return 1
+        else
+            dwarn "can't run systemd-nspawn, skipping"
+        fi
+    fi
+    test -s /failed && ret=$(($ret+1))
+    [[ -e /testok ]] && ret=0
+    return $ret
+}
+
 test_setup() {
-    create_empty_image
     mkdir -p $TESTDIR/root
-    mount ${LOOPDEV}p1 $TESTDIR/root
+    initdir=$TESTDIR/root
+    STRIP_BINARIES=no
 
     # Create what will eventually be our root filesystem onto an overlay
     (
         LOG_LEVEL=5
-        eval $(udevadm info --export --query=env --name=${LOOPDEV}p2)
 
         setup_basic_environment
         printf "556f48e837bc4424a710fa2e2c9d3e3c\ne3d\n" >$initdir/etc/machine-id
@@ -28,7 +44,8 @@ Description=Testsuite service
 After=multi-user.target
 
 [Service]
-ExecStart=/bin/sh -e -x -c '/test-machine-id-setup.sh; systemctl --state=failed --no-legend --no-pager > /failed ; echo OK > /testok'
+ExecStart=/bin/sh -e -x -c '$initdir/test-machine-id-setup.sh'
+ExecStartPost=/bin/sh -x -c 'echo -e "\nfailed:" > /failed; systemctl --state=failed --no-pager >> /failed; echo -e "\ntestresult:\nOK" > /testok'
 Type=oneshot
 EOF
 
@@ -75,6 +92,10 @@ check "$r/etc/machine-id" "$r/run/machine-id"
 EOF
 chmod +x $initdir/test-machine-id-setup.sh
 
+        for service in testsuite.service; do
+            cp $initdir/etc/systemd/system/$service /etc/systemd/system/
+        done
+
         setup_testsuite
     ) || return 1
 
@@ -84,9 +105,15 @@ chmod +x $initdir/test-machine-id-setup.sh
     ln -s /dev/null $initdir/etc/systemd/system/systemd-networkd.service
     ln -s /dev/null $initdir/etc/systemd/system/systemd-networkd.socket
     ln -s /dev/null $initdir/etc/systemd/system/systemd-resolved.service
+}
 
-    ddebug "umount $TESTDIR/root"
-    umount $TESTDIR/root
+test_cleanup() {
+    for service in testsuite.service; do
+         rm /etc/systemd/system/$service
+    done
+    [[ -e /testok ]] && rm /testok
+    [[ -e /failed ]] && rm /failed
+    return 0
 }
 
 do_test "$@"
