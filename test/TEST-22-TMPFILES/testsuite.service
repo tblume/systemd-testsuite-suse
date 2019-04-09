@@ -5,6 +5,7 @@ After=multi-user.target
 [Service]
 WorkingDirectory=/testsuite
 ExecStart=/testsuite/run-tmpfiles-tests.sh
+ExecStartPost=/bin/sh -x -c 'echo -e "\nfailed:" > /failed; systemctl --state=failed --no-pager >> /failed; echo -e "\ntestresult:\nOK" > /testok'
 Type=oneshot
 StandardOutput=tty
 StandardError=tty
