@@ -5,6 +5,7 @@ After=systemd-tmpfiles-setup.service
 [Service]
 WorkingDirectory=/testsuite
 ExecStart=/testsuite/run-tmpfiles-tests.sh
+ExecStartPost=/bin/sh -x -c 'systemctl --state=failed --no-pager > /failed; echo OK > /testok'
 Type=oneshot
-StandardOutput=tty
-StandardError=tty
+StandardOutput=kmsg
+StandardError=kmsg
