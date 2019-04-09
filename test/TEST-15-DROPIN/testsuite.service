@@ -4,4 +4,5 @@ After=multi-user.target
 
 [Service]
 ExecStart=/test-dropin.sh
+ExecStartPost=/bin/sh -x -c 'echo -e "\nfailed:" > /failed; systemctl --state=failed --no-pager >> /failed; echo -e "\ntestresult:\nOK" > /testok'
 Type=oneshot
