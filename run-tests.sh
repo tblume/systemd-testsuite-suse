@@ -21,7 +21,7 @@ function testsuiteprepare {
     echo -e "\nChecking required packages\n"
 
     case "$VERSION" in
-        234|237|239)
+        234|237|243)
             ARCH=$(uname -m)
             progs="lz4 busybox dhcp-client python3 plymouth yast2-firstboot binutils netcat-openbsd cryptsetup less"
             [[ $VERSION == 237 ]] && progs+=" ninja quota ppp"
