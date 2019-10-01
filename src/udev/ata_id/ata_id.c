@@ -26,8 +26,8 @@
 #include "fd-util.h"
 #include "libudev-util.h"
 #include "log.h"
+#include "memory-util.h"
 #include "udev-util.h"
-#include "util.h"
 
 #define COMMAND_TIMEOUT_MSEC (30 * 1000)
 
@@ -381,7 +381,7 @@ static int disk_identify(int fd,
         }
 
 out:
-        if (out_is_packet_device != NULL)
+        if (out_is_packet_device)
                 *out_is_packet_device = is_packet_device;
         return ret;
 }
@@ -432,7 +432,7 @@ int main(int argc, char *argv[]) {
         }
 
         node = argv[optind];
-        if (node == NULL) {
+        if (!node) {
                 log_error("no node specified");
                 return 1;
         }

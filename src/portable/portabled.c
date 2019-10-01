@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #include "sd-bus.h"
 #include "sd-daemon.h"
 
@@ -53,7 +56,7 @@ static Manager* manager_unref(Manager *m) {
 
         bus_verify_polkit_async_registry_free(m->polkit_registry);
 
-        sd_bus_unref(m->bus);
+        sd_bus_flush_close_unref(m->bus);
         sd_event_unref(m->event);
 
         return mfree(m);
@@ -131,10 +134,8 @@ static int run(int argc, char *argv[]) {
 
         umask(0022);
 
-        if (argc != 1) {
-                log_error("This program takes no arguments.");
-                return -EINVAL;
-        }
+        if (argc != 1)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "This program takes no arguments.");
 
         assert_se(sigprocmask_many(SIG_BLOCK, NULL, SIGCHLD, SIGTERM, SIGINT, -1) >= 0);
 

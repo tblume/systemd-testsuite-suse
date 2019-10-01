@@ -330,14 +330,13 @@ static int scope_start(Unit *u) {
                 return r;
 
         (void) unit_realize_cgroup(u);
-        (void) unit_reset_cpu_accounting(u);
-        (void) unit_reset_ip_accounting(u);
+        (void) unit_reset_accounting(u);
 
-        unit_export_state_files(UNIT(s));
+        unit_export_state_files(u);
 
-        r = unit_attach_pids_to_cgroup(u, UNIT(s)->pids, NULL);
+        r = unit_attach_pids_to_cgroup(u, u->pids, NULL);
         if (r < 0) {
-                log_unit_warning_errno(UNIT(s), r, "Failed to add PIDs to scope's control group: %m");
+                log_unit_warning_errno(u, r, "Failed to add PIDs to scope's control group: %m");
                 scope_enter_dead(s, SCOPE_FAILURE_RESOURCES);
                 return r;
         }
@@ -347,7 +346,7 @@ static int scope_start(Unit *u) {
         scope_set_state(s, SCOPE_RUNNING);
 
         /* Start watching the PIDs currently in the scope */
-        (void) unit_enqueue_rewatch_pids(UNIT(s));
+        (void) unit_enqueue_rewatch_pids(u);
         return 1;
 }
 

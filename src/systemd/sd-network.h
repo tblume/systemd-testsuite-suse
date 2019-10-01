@@ -49,6 +49,8 @@ _SD_BEGIN_DECLARATIONS;
  *   -ENODATA: networkd is not aware of any links
  */
 int sd_network_get_operational_state(char **state);
+int sd_network_get_carrier_state(char **state);
+int sd_network_get_address_state(char **state);
 
 /* Get DNS entries for all links. These are string representations of
  * IP addresses */
@@ -89,6 +91,9 @@ int sd_network_link_get_setup_state(int ifindex, char **state);
  *   -ENODATA: networkd is not aware of the link
  */
 int sd_network_link_get_operational_state(int ifindex, char **state);
+int sd_network_link_get_required_operstate_for_online(int ifindex, char **state);
+int sd_network_link_get_carrier_state(int ifindex, char **state);
+int sd_network_link_get_address_state(int ifindex, char **state);
 
 /* Indicates whether the network is relevant to being online.
  * Possible return codes:
@@ -104,6 +109,10 @@ int sd_network_link_get_network_file(int ifindex, char **filename);
 /* Get DNS entries for a given link. These are string representations of
  * IP addresses */
 int sd_network_link_get_dns(int ifindex, char ***ret);
+
+/* Get DHCP4 address for a given link. This is string representations of
+ * IPv4 address */
+int sd_network_link_get_dhcp4_address(int ifindex, char **ret);
 
 /* Get NTP entries for a given link. These are domain names or string
  * representations of IP addresses */
@@ -126,7 +135,7 @@ int sd_network_link_get_mdns(int ifindex, char **mdns);
 
 /* Indicates whether or not DNS-over-TLS should be enabled for the
  * link.
- * Possible levels of support: strict, no, opportunistic
+ * Possible levels of support: yes, no, opportunistic
  * Possible return codes:
  *   -ENODATA: networkd is not aware of the link
  */

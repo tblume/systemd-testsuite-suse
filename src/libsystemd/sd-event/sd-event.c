@@ -15,6 +15,7 @@
 #include "hashmap.h"
 #include "list.h"
 #include "macro.h"
+#include "memory-util.h"
 #include "missing.h"
 #include "prioq.h"
 #include "process-util.h"
@@ -22,8 +23,8 @@
 #include "signal-util.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "strxcpyx.h"
 #include "time-util.h"
-#include "util.h"
 
 #define DEFAULT_ACCURACY_USEC (250 * USEC_PER_MSEC)
 
@@ -339,6 +340,12 @@ fail:
 
 DEFINE_PUBLIC_TRIVIAL_REF_UNREF_FUNC(sd_event, sd_event, event_free);
 
+_public_ sd_event_source* sd_event_source_disable_unref(sd_event_source *s) {
+        if (s)
+                (void) sd_event_source_set_enabled(s, SD_EVENT_OFF);
+        return sd_event_source_unref(s);
+}
+
 static bool event_pid_changed(sd_event *e) {
         assert(e);
 
@@ -470,6 +477,17 @@ static struct clock_data* event_get_clock_data(sd_event *e, EventSourceType t) {
         }
 }
 
+static void event_free_signal_data(sd_event *e, struct signal_data *d) {
+        assert(e);
+
+        if (!d)
+                return;
+
+        hashmap_remove(e->signal_data, &d->priority);
+        safe_close(d->fd);
+        free(d);
+}
+
 static int event_make_signal_data(
                 sd_event *e,
                 int sig,
@@ -559,11 +577,8 @@ static int event_make_signal_data(
         return 0;
 
 fail:
-        if (added) {
-                d->fd = safe_close(d->fd);
-                hashmap_remove(e->signal_data, &d->priority);
-                free(d);
-        }
+        if (added)
+                event_free_signal_data(e, d);
 
         return r;
 }
@@ -582,11 +597,8 @@ static void event_unmask_signal_data(sd_event *e, struct signal_data *d, int sig
         assert_se(sigdelset(&d->sigset, sig) >= 0);
 
         if (sigisemptyset(&d->sigset)) {
-
                 /* If all the mask is all-zero we can get rid of the structure */
-                hashmap_remove(e->signal_data, &d->priority);
-                safe_close(d->fd);
-                free(d);
+                event_free_signal_data(e, d);
                 return;
         }
 
@@ -3017,7 +3029,7 @@ static void event_close_inode_data_fds(sd_event *e) {
 
         /* Close the fds pointing to the inodes to watch now. We need to close them as they might otherwise pin
          * filesystems. But we can't close them right-away as we need them as long as the user still wants to make
-         * adjustments to the even source, such as changing the priority (which requires us to remove and readd a watch
+         * adjustments to the even source, such as changing the priority (which requires us to remove and re-add a watch
          * for the inode). Hence, let's close them when entering the first iteration after they were added, as a
          * compromise. */
 
@@ -3111,7 +3123,7 @@ _public_ int sd_event_wait(sd_event *e, uint64_t timeout) {
                 timeout = 0;
 
         m = epoll_wait(e->epoll_fd, ev_queue, ev_queue_max,
-                       timeout == (uint64_t) -1 ? -1 : (int) ((timeout + USEC_PER_MSEC - 1) / USEC_PER_MSEC));
+                       timeout == (uint64_t) -1 ? -1 : (int) DIV_ROUND_UP(timeout, USEC_PER_MSEC));
         if (m < 0) {
                 if (errno == EINTR) {
                         e->state = SD_EVENT_PENDING;
@@ -3237,15 +3249,16 @@ _public_ int sd_event_dispatch(sd_event *e) {
 }
 
 static void event_log_delays(sd_event *e) {
-        char b[ELEMENTSOF(e->delays) * DECIMAL_STR_MAX(unsigned) + 1];
-        unsigned i;
-        int o;
+        char b[ELEMENTSOF(e->delays) * DECIMAL_STR_MAX(unsigned) + 1], *p;
+        size_t l, i;
 
-        for (i = o = 0; i < ELEMENTSOF(e->delays); i++) {
-                o += snprintf(&b[o], sizeof(b) - o, "%u ", e->delays[i]);
+        p = b;
+        l = sizeof(b);
+        for (i = 0; i < ELEMENTSOF(e->delays); i++) {
+                l = strpcpyf(&p, l, "%u ", e->delays[i]);
                 e->delays[i] = 0;
         }
-        log_debug("Event loop iterations: %.*s", o, b);
+        log_debug("Event loop iterations: %s", b);
 }
 
 _public_ int sd_event_run(sd_event *e, uint64_t timeout) {

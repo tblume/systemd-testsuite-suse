@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <stdio_ext.h>
-
 #include "bus-common-errors.h"
 #include "bus-error.h"
 #include "conf-files.h"
@@ -12,11 +10,13 @@
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
+#include "install.h"
 #include "io-util.h"
 #include "locale-util.h"
 #include "loop-util.h"
 #include "machine-image.h"
 #include "mkdir.h"
+#include "nulstr-util.h"
 #include "os-util.h"
 #include "path-lookup.h"
 #include "portable.h"
@@ -24,6 +24,7 @@
 #include "set.h"
 #include "signal-util.h"
 #include "socket-util.h"
+#include "sort-util.h"
 #include "string-table.h"
 #include "strv.h"
 #include "tmpfile-util.h"
@@ -325,7 +326,7 @@ static int extract_now(
                                 return -ENOMEM;
                         fd = -1;
 
-                        m->source = strjoin(resolved, "/", de->d_name);
+                        m->source = path_join(resolved, de->d_name);
                         if (!m->source)
                                 return -ENOMEM;
 
@@ -434,7 +435,7 @@ static int portable_extract_by_path(
                         if (r < 0)
                                 return log_debug_errno(r, "Failed to receive item: %m");
 
-                        /* We can't really distuingish a zero-length datagram without any fds from EOF (both are signalled the
+                        /* We can't really distinguish a zero-length datagram without any fds from EOF (both are signalled the
                          * same way by recvmsg()). Hence, accept either as end notification. */
                         if (isempty(name) && fd < 0)
                                 break;
@@ -653,10 +654,10 @@ static int portable_changes_add_with_prefix(
                 return 0;
 
         if (prefix) {
-                path = strjoina(prefix, "/", path);
+                path = prefix_roota(prefix, path);
 
                 if (source)
-                        source = strjoina(prefix, "/", source);
+                        source = prefix_roota(prefix, source);
         }
 
         return portable_changes_add(changes, n_changes, type, path, source);
@@ -691,7 +692,7 @@ static int install_chroot_dropin(
         assert(m);
         assert(dropin_dir);
 
-        dropin = strjoin(dropin_dir, "/20-portable.conf");
+        dropin = path_join(dropin_dir, "20-portable.conf");
         if (!dropin)
                 return -ENOMEM;
 
@@ -778,13 +779,13 @@ static int install_profile_dropin(
                 return 0;
         }
 
-        dropin = strjoin(dropin_dir, "/10-profile.conf");
+        dropin = path_join(dropin_dir, "10-profile.conf");
         if (!dropin)
                 return -ENOMEM;
 
         if (flags & PORTABLE_PREFER_COPY) {
 
-                r = copy_file_atomic(from, dropin, 0644, 0, COPY_REFLINK);
+                r = copy_file_atomic(from, dropin, 0644, 0, 0, COPY_REFLINK);
                 if (r < 0)
                         return log_debug_errno(r, "Failed to copy %s %s %s: %m", from, special_glyph(SPECIAL_GLYPH_ARROW), dropin);
 
@@ -847,7 +848,7 @@ static int attach_unit_file(
         } else
                 (void) portable_changes_add(changes, n_changes, PORTABLE_MKDIR, where, NULL);
 
-        path = strjoina(where, "/", m->name);
+        path = prefix_roota(where, m->name);
         dropin_dir = strjoin(path, ".d");
         if (!dropin_dir)
                 return -ENOMEM;
@@ -1089,12 +1090,10 @@ static int test_chroot_dropin(
                 return log_debug_errno(errno, "Failed to open %s/%s: %m", where, p);
         }
 
-        f = fdopen(fd, "r");
-        if (!f)
-                return log_debug_errno(errno, "Failed to convert file handle: %m");
-        fd = -1;
-
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
+        r = fdopen_unlocked(fd, "r", &f);
+        if (r < 0)
+                return log_debug_errno(r, "Failed to convert file handle: %m");
+        TAKE_FD(fd);
 
         r = read_line(f, LONG_LINE_MAX, &line);
         if (r < 0)

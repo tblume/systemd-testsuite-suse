@@ -103,7 +103,7 @@ static int shift_acl(acl_t acl, uid_t shift, acl_t *ret) {
 
                 if (IN_SET(tag, ACL_USER, ACL_GROUP)) {
 
-                        /* We don't distuingish here between uid_t and gid_t, let's make sure the compiler checks that
+                        /* We don't distinguish here between uid_t and gid_t, let's make sure the compiler checks that
                          * this is actually OK */
                         assert_cc(sizeof(uid_t) == sizeof(gid_t));
 
@@ -402,7 +402,7 @@ read_only:
 
                 /* When we hit a ready-only subtree we simply skip it, but log about it. */
                 (void) fd_get_path(fd, &name);
-                log_debug("Skippping read-only file or directory %s.", strna(name));
+                log_debug("Skipping read-only file or directory %s.", strna(name));
                 r = changed;
         }
 

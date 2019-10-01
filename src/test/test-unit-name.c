@@ -8,6 +8,7 @@
 #include "alloc-util.h"
 #include "all-units.h"
 #include "glob-util.h"
+#include "format-util.h"
 #include "hostname-util.h"
 #include "macro.h"
 #include "manager.h"
@@ -49,6 +50,9 @@ static void test_unit_name_is_valid(void) {
         assert_se(!unit_name_is_valid("foo@.service", UNIT_NAME_INSTANCE));
         assert_se( unit_name_is_valid("foo@.service", UNIT_NAME_TEMPLATE));
         assert_se( unit_name_is_valid("foo@.service", UNIT_NAME_INSTANCE|UNIT_NAME_TEMPLATE));
+        assert_se( unit_name_is_valid(".test.service", UNIT_NAME_PLAIN));
+        assert_se( unit_name_is_valid(".test@.service", UNIT_NAME_TEMPLATE));
+        assert_se( unit_name_is_valid("_strange::::.service", UNIT_NAME_ANY));
 
         assert_se(!unit_name_is_valid(".service", UNIT_NAME_ANY));
         assert_se(!unit_name_is_valid("", UNIT_NAME_ANY));
@@ -429,29 +433,31 @@ static void test_unit_name_to_instance(void) {
         int r;
 
         r = unit_name_to_instance("foo@bar.service", &instance);
-        assert_se(r >= 0);
+        assert_se(r == UNIT_NAME_INSTANCE);
         assert_se(streq(instance, "bar"));
         free(instance);
 
         r = unit_name_to_instance("foo@.service", &instance);
-        assert_se(r >= 0);
+        assert_se(r == UNIT_NAME_TEMPLATE);
         assert_se(streq(instance, ""));
         free(instance);
 
         r = unit_name_to_instance("fo0-stUff_b@b.service", &instance);
-        assert_se(r >= 0);
+        assert_se(r == UNIT_NAME_INSTANCE);
         assert_se(streq(instance, "b"));
         free(instance);
 
         r = unit_name_to_instance("foo.service", &instance);
-        assert_se(r == 0);
+        assert_se(r == UNIT_NAME_PLAIN);
         assert_se(!instance);
 
         r = unit_name_to_instance("fooj@unk", &instance);
         assert_se(r < 0);
+        assert_se(!instance);
 
         r = unit_name_to_instance("foo@", &instance);
         assert_se(r < 0);
+        assert_se(!instance);
 }
 
 static void test_unit_name_escape(void) {
@@ -759,7 +765,7 @@ static void test_unit_name_from_dbus_path(void) {
         test_unit_name_from_dbus_path_one("/org/freedesktop/systemd1/unit/systemd_2dcoredump_2esocket", 0, "systemd-coredump.socket");
         test_unit_name_from_dbus_path_one("/org/freedesktop/systemd1/unit/systemd_2dcoredump_400_2eservice", 0, "systemd-coredump@0.service");
         test_unit_name_from_dbus_path_one("/org/freedesktop/systemd1/unit/systemd_2dfirstboot_2eservice", 0, "systemd-firstboot.service");
-        test_unit_name_from_dbus_path_one("/org/freedesktop/systemd1/unit/systemd_2dfsck_2droot_2eservice", 0, "systemd-fsck-root.service");
+        test_unit_name_from_dbus_path_one("/org/freedesktop/systemd1/unit/systemd_2dfsck_2droot_2eservice", 0, SPECIAL_FSCK_ROOT_SERVICE);
         test_unit_name_from_dbus_path_one("/org/freedesktop/systemd1/unit/systemd_2dhwdb_2dupdate_2eservice", 0, "systemd-hwdb-update.service");
         test_unit_name_from_dbus_path_one("/org/freedesktop/systemd1/unit/systemd_2dinitctl_2eservice", 0, "systemd-initctl.service");
         test_unit_name_from_dbus_path_one("/org/freedesktop/systemd1/unit/systemd_2dinitctl_2esocket", 0, "systemd-initctl.socket");

@@ -158,28 +158,29 @@ REQUIREMENTS:
         openssl >= 1.1.0 (optional, required to support DNS-over-TLS with openssl)
         elfutils >= 158 (optional)
         polkit (optional)
+        tzdata >= 2014f (optional)
         pkg-config
         gperf
         docbook-xsl (optional, required for documentation)
         xsltproc    (optional, required for documentation)
         python-lxml (optional, required to build the indices)
-        python >= 3.5, meson >= 0.46, ninja
+        python >= 3.5
+        meson >= 0.46 (>= 0.49 is required to build position-independent executables)
+        ninja
         gcc, awk, sed, grep, m4, and similar tools
 
         During runtime, you need the following additional
         dependencies:
 
         util-linux >= v2.27.1 required
-        dbus >= 1.4.0 (strictly speaking optional, but recommended)
-                NOTE: If using dbus < 1.9.18, you should override the default
-                policy directory (--with-dbuspolicydir=/etc/dbus-1/system.d).
+        dbus >= 1.11.0 (strictly speaking optional, but recommended)
         dracut (optional)
         polkit (optional)
 
         To build in directory build/:
           meson build/ && ninja -C build
 
-        Any configuration options can be specfied as -Darg=value... arguments
+        Any configuration options can be specified as -Darg=value... arguments
         to meson. After the build directory is initially configured, meson will
         refuse to run again, and options must be changed with:
           mesonconf -Darg=value...
@@ -314,8 +315,7 @@ WARNINGS:
         that valgrind generates nice output only on exit(), hence on shutdown
         we don't execve() systemd-shutdown.
 
-STABLE BRANCHES AND BACKPORTS
-
+STABLE BRANCHES AND BACKPORTS:
        Stable branches with backported patches are available in the
        systemd-stable repo at https://github.com/systemd/systemd-stable.
 

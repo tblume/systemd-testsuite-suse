@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
-#include <linux/libbpf.h>
+#include <linux/bpf_insn.h>
 
 #include "bpf-devices.h"
 #include "bpf-program.h"
@@ -201,7 +201,6 @@ int cgroup_apply_device_bpf(Unit *u, BPFProgram *prog, CGroupDevicePolicy policy
         r = cg_get_path(SYSTEMD_CGROUP_CONTROLLER, u->cgroup_path, NULL, &path);
         if (r < 0)
                 return log_error_errno(r, "Failed to determine cgroup path: %m");
-
 
         r = bpf_program_cgroup_attach(prog, BPF_CGROUP_DEVICE, path, BPF_F_ALLOW_MULTI);
         if (r < 0)

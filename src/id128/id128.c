@@ -70,7 +70,7 @@ static int help(void) {
         if (r < 0)
                 return log_oom();
 
-        printf("%s [OPTIONS...] {COMMAND} ...\n\n"
+        printf("%s [OPTIONS...] {COMMAND}\n\n"
                "Generate and print id128 strings.\n\n"
                "  -h --help               Show this help\n"
                "  -p --pretty             Generate samples of program code\n"
@@ -101,6 +101,7 @@ static int parse_argv(int argc, char *argv[]) {
         static const struct option options[] = {
                 { "help",         no_argument,       NULL, 'h'              },
                 { "version",      no_argument,       NULL, ARG_VERSION      },
+                { "pretty",       no_argument,       NULL, 'p'              },
                 { "app-specific", required_argument, NULL, 'a'              },
                 {},
         };
@@ -155,6 +156,7 @@ static int id128_main(int argc, char *argv[]) {
 static int run(int argc, char *argv[]) {
         int r;
 
+        log_show_color(true);
         log_parse_environment();
         log_open();
 

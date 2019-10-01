@@ -2,6 +2,9 @@
 
 #include <getopt.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include "sd-bus.h"
 #include "sd-event.h"
@@ -10,6 +13,7 @@
 #include "bus-error.h"
 #include "bus-unit-util.h"
 #include "bus-util.h"
+#include "bus-wait-for-jobs.h"
 #include "calendarspec.h"
 #include "env-util.h"
 #include "fd-util.h"
@@ -56,7 +60,7 @@ static enum {
 static char **arg_path_property = NULL;
 static char **arg_socket_property = NULL;
 static char **arg_timer_property = NULL;
-static bool with_timer = false;
+static bool arg_with_timer = false;
 static bool arg_quiet = false;
 static bool arg_aggressive_gc = false;
 static char *arg_working_directory = NULL;
@@ -120,6 +124,8 @@ static int help(void) {
                "     --on-unit-active=SECONDS     Run SECONDS after the last activation\n"
                "     --on-unit-inactive=SECONDS   Run SECONDS after the last deactivation\n"
                "     --on-calendar=SPEC           Realtime timer\n"
+               "     --on-timezone-change         Run when the timezone changes\n"
+               "     --on-clock-change            Run when the realtime clock jumps\n"
                "     --timer-property=NAME=VALUE  Set timer unit property\n"
                "\nSee the %s for details.\n"
                , program_invocation_short_name
@@ -166,6 +172,8 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_ON_UNIT_ACTIVE,
                 ARG_ON_UNIT_INACTIVE,
                 ARG_ON_CALENDAR,
+                ARG_ON_TIMEZONE_CHANGE,
+                ARG_ON_CLOCK_CHANGE,
                 ARG_TIMER_PROPERTY,
                 ARG_PATH_PROPERTY,
                 ARG_SOCKET_PROPERTY,
@@ -206,6 +214,8 @@ static int parse_argv(int argc, char *argv[]) {
                 { "on-unit-active",    required_argument, NULL, ARG_ON_UNIT_ACTIVE    },
                 { "on-unit-inactive",  required_argument, NULL, ARG_ON_UNIT_INACTIVE  },
                 { "on-calendar",       required_argument, NULL, ARG_ON_CALENDAR       },
+                { "on-timezone-change",no_argument,       NULL, ARG_ON_TIMEZONE_CHANGE},
+                { "on-clock-change",   no_argument,       NULL, ARG_ON_CLOCK_CHANGE   },
                 { "timer-property",    required_argument, NULL, ARG_TIMER_PROPERTY    },
                 { "path-property",     required_argument, NULL, ARG_PATH_PROPERTY     },
                 { "socket-property",   required_argument, NULL, ARG_SOCKET_PROPERTY   },
@@ -335,7 +345,7 @@ static int parse_argv(int argc, char *argv[]) {
                         if (r < 0)
                                 return r;
 
-                        with_timer = true;
+                        arg_with_timer = true;
                         break;
 
                 case ARG_ON_BOOT:
@@ -343,7 +353,7 @@ static int parse_argv(int argc, char *argv[]) {
                         if (r < 0)
                                 return r;
 
-                        with_timer = true;
+                        arg_with_timer = true;
                         break;
 
                 case ARG_ON_STARTUP:
@@ -351,7 +361,7 @@ static int parse_argv(int argc, char *argv[]) {
                         if (r < 0)
                                 return r;
 
-                        with_timer = true;
+                        arg_with_timer = true;
                         break;
 
                 case ARG_ON_UNIT_ACTIVE:
@@ -359,7 +369,7 @@ static int parse_argv(int argc, char *argv[]) {
                         if (r < 0)
                                 return r;
 
-                        with_timer = true;
+                        arg_with_timer = true;
                         break;
 
                 case ARG_ON_UNIT_INACTIVE:
@@ -367,15 +377,49 @@ static int parse_argv(int argc, char *argv[]) {
                         if (r < 0)
                                 return r;
 
-                        with_timer = true;
+                        arg_with_timer = true;
                         break;
 
-                case ARG_ON_CALENDAR:
+                case ARG_ON_CALENDAR: {
+                        _cleanup_(calendar_spec_freep) CalendarSpec *cs = NULL;
+
+                        r = calendar_spec_from_string(optarg, &cs);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse calendar event specification: %m");
+
+                        /* Let's make sure the given calendar event is not in the past */
+                        r = calendar_spec_next_usec(cs, now(CLOCK_REALTIME), NULL);
+                        if (r == -ENOENT)
+                                /* The calendar event is in the past — let's warn about this, but install it
+                                 * anyway as is. The service manager will trigger the service right away.
+                                 * Moreover, the server side might have a different clock or timezone than we
+                                 * do, hence it should decide when or whether to run something. */
+                                log_warning("Specified calendar expression is in the past, proceeding anyway.");
+                        else if (r < 0)
+                                return log_error_errno(r, "Failed to calculate next time calendar expression elapses: %m");
+
                         r = add_timer_property("OnCalendar", optarg);
                         if (r < 0)
                                 return r;
 
-                        with_timer = true;
+                        arg_with_timer = true;
+                        break;
+                }
+
+                case ARG_ON_TIMEZONE_CHANGE:
+                        r = add_timer_property("OnTimezoneChange", "yes");
+                        if (r < 0)
+                                return r;
+
+                        arg_with_timer = true;
+                        break;
+
+                case ARG_ON_CLOCK_CHANGE:
+                        r = add_timer_property("OnClockChange", "yes");
+                        if (r < 0)
+                                return r;
+
+                        arg_with_timer = true;
                         break;
 
                 case ARG_TIMER_PROPERTY:
@@ -383,7 +427,7 @@ static int parse_argv(int argc, char *argv[]) {
                         if (strv_extend(&arg_timer_property, optarg) < 0)
                                 return log_oom();
 
-                        with_timer = with_timer ||
+                        arg_with_timer = arg_with_timer ||
                                 STARTSWITH_SET(optarg,
                                                "OnActiveSec=",
                                                "OnBootSec=",
@@ -451,10 +495,10 @@ static int parse_argv(int argc, char *argv[]) {
                         assert_not_reached("Unhandled option");
                 }
 
-        with_trigger = !!arg_path_property || !!arg_socket_property || with_timer;
+        with_trigger = !!arg_path_property || !!arg_socket_property || arg_with_timer;
 
         /* currently, only single trigger (path, socket, timer) unit can be created simultaneously */
-        if ((int) !!arg_path_property + (int) !!arg_socket_property + (int) with_timer > 1)
+        if ((int) !!arg_path_property + (int) !!arg_socket_property + (int) arg_with_timer > 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Only single trigger (path, socket, timer) unit can be created.");
 
@@ -550,7 +594,7 @@ static int parse_argv(int argc, char *argv[]) {
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Path, socket or timer options are not supported in --scope mode.");
 
-        if (arg_timer_property && !with_timer)
+        if (arg_timer_property && !arg_with_timer)
                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "--timer-property= has no effect without any other timer options.");
 
@@ -904,6 +948,8 @@ typedef struct RunContext {
         uint64_t cpu_usage_nsec;
         uint64_t ip_ingress_bytes;
         uint64_t ip_egress_bytes;
+        uint64_t io_read_bytes;
+        uint64_t io_write_bytes;
         uint32_t exit_code;
         uint32_t exit_status;
 } RunContext;
@@ -949,6 +995,8 @@ static int run_context_update(RunContext *c, const char *path) {
                 { "CPUUsageNSec",                     "t", NULL, offsetof(RunContext, cpu_usage_nsec)      },
                 { "IPIngressBytes",                   "t", NULL, offsetof(RunContext, ip_ingress_bytes)    },
                 { "IPEgressBytes",                    "t", NULL, offsetof(RunContext, ip_egress_bytes)     },
+                { "IOReadBytes",                      "t", NULL, offsetof(RunContext, io_read_bytes)       },
+                { "IOWriteBytes",                     "t", NULL, offsetof(RunContext, io_write_bytes)      },
                 {}
         };
 
@@ -1137,6 +1185,8 @@ static int start_transient_service(
                         .cpu_usage_nsec = NSEC_INFINITY,
                         .ip_ingress_bytes = UINT64_MAX,
                         .ip_egress_bytes = UINT64_MAX,
+                        .io_read_bytes = UINT64_MAX,
+                        .io_write_bytes = UINT64_MAX,
                         .inactive_exit_usec = USEC_INFINITY,
                         .inactive_enter_usec = USEC_INFINITY,
                 };
@@ -1216,8 +1266,8 @@ static int start_transient_service(
                         else if (c.exit_code > 0)
                                 log_info("Main processes terminated with: code=%s/status=%s", sigchld_code_to_string(c.exit_code), signal_to_string(c.exit_status));
 
-                        if (c.inactive_enter_usec > 0 && c.inactive_enter_usec != USEC_INFINITY &&
-                            c.inactive_exit_usec > 0 && c.inactive_exit_usec != USEC_INFINITY &&
+                        if (timestamp_is_set(c.inactive_enter_usec) &&
+                            timestamp_is_set(c.inactive_exit_usec) &&
                             c.inactive_enter_usec > c.inactive_exit_usec) {
                                 char ts[FORMAT_TIMESPAN_MAX];
                                 log_info("Service runtime: %s", format_timespan(ts, sizeof(ts), c.inactive_enter_usec - c.inactive_exit_usec, USEC_PER_MSEC));
@@ -1235,6 +1285,14 @@ static int start_transient_service(
                         if (c.ip_egress_bytes != UINT64_MAX) {
                                 char bytes[FORMAT_BYTES_MAX];
                                 log_info("IP traffic sent: %s", format_bytes(bytes, sizeof(bytes), c.ip_egress_bytes));
+                        }
+                        if (c.io_read_bytes != UINT64_MAX) {
+                                char bytes[FORMAT_BYTES_MAX];
+                                log_info("IO bytes read: %s", format_bytes(bytes, sizeof(bytes), c.io_read_bytes));
+                        }
+                        if (c.io_write_bytes != UINT64_MAX) {
+                                char bytes[FORMAT_BYTES_MAX];
+                                log_info("IO bytes written: %s", format_bytes(bytes, sizeof(bytes), c.io_write_bytes));
                         }
                 }
 
@@ -1594,6 +1652,7 @@ static int run(int argc, char* argv[]) {
         _cleanup_free_ char *description = NULL;
         int r, retval = EXIT_SUCCESS;
 
+        log_show_color(true);
         log_parse_environment();
         log_open();
 
@@ -1642,7 +1701,7 @@ static int run(int argc, char* argv[]) {
                 r = start_transient_trigger(bus, ".path");
         else if (arg_socket_property)
                 r = start_transient_trigger(bus, ".socket");
-        else if (with_timer)
+        else if (arg_with_timer)
                 r = start_transient_trigger(bus, ".timer");
         else
                 r = start_transient_service(bus, &retval);

@@ -2,7 +2,6 @@
 
 #include <sys/mount.h>
 #include <sys/prctl.h>
-#include <stdio_ext.h>
 
 #if HAVE_SECCOMP
 #include <seccomp.h>
@@ -215,12 +214,57 @@ static int property_get_cpu_affinity(
                 sd_bus_error *error) {
 
         ExecContext *c = userdata;
+        _cleanup_free_ uint8_t *array = NULL;
+        size_t allocated;
 
         assert(bus);
         assert(reply);
         assert(c);
 
-        return sd_bus_message_append_array(reply, 'y', c->cpuset, CPU_ALLOC_SIZE(c->cpuset_ncpus));
+        (void) cpu_set_to_dbus(&c->cpu_set, &array, &allocated);
+        return sd_bus_message_append_array(reply, 'y', array, allocated);
+}
+
+static int property_get_numa_mask(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        ExecContext *c = userdata;
+        _cleanup_free_ uint8_t *array = NULL;
+        size_t allocated;
+
+        assert(bus);
+        assert(reply);
+        assert(c);
+
+        (void) cpu_set_to_dbus(&c->numa_policy.nodes, &array, &allocated);
+
+        return sd_bus_message_append_array(reply, 'y', array, allocated);
+}
+
+static int property_get_numa_policy(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+        ExecContext *c = userdata;
+        int32_t policy;
+
+        assert(bus);
+        assert(reply);
+        assert(c);
+
+        policy = numa_policy_get_type(&c->numa_policy);
+
+        return sd_bus_message_append_basic(reply, 'i', &policy);
 }
 
 static int property_get_timer_slack_nsec(
@@ -698,6 +742,8 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("CPUSchedulingPolicy", "i", property_get_cpu_sched_policy, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("CPUSchedulingPriority", "i", property_get_cpu_sched_priority, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("CPUAffinity", "ay", property_get_cpu_affinity, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("NUMAPolicy", "i", property_get_numa_policy, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("NUMAMask", "ay", property_get_numa_mask, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("TimerSlackNSec", "t", property_get_timer_slack_nsec, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("CPUSchedulingResetOnFork", "b", bus_property_get_bool, offsetof(ExecContext, cpu_sched_reset_on_fork), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("NonBlocking", "b", bus_property_get_bool, offsetof(ExecContext, non_blocking), SD_BUS_VTABLE_PROPERTY_CONST),
@@ -769,14 +815,18 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("LogsDirectory", "as", NULL, offsetof(ExecContext, directories[EXEC_DIRECTORY_LOGS].paths), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("ConfigurationDirectoryMode", "u", bus_property_get_mode, offsetof(ExecContext, directories[EXEC_DIRECTORY_CONFIGURATION].mode), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("ConfigurationDirectory", "as", NULL, offsetof(ExecContext, directories[EXEC_DIRECTORY_CONFIGURATION].paths), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("TimeoutCleanUSec", "t", bus_property_get_usec, offsetof(ExecContext, timeout_clean_usec), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("MemoryDenyWriteExecute", "b", bus_property_get_bool, offsetof(ExecContext, memory_deny_write_execute), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("RestrictRealtime", "b", bus_property_get_bool, offsetof(ExecContext, restrict_realtime), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("RestrictSUIDSGID", "b", bus_property_get_bool, offsetof(ExecContext, restrict_suid_sgid), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("RestrictNamespaces", "t", bus_property_get_ulong, offsetof(ExecContext, restrict_namespaces), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("BindPaths", "a(ssbt)", property_get_bind_paths, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("BindReadOnlyPaths", "a(ssbt)", property_get_bind_paths, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("TemporaryFileSystem", "a(ss)", property_get_temporary_filesystems, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("MountAPIVFS", "b", bus_property_get_bool, offsetof(ExecContext, mount_apivfs), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("KeyringMode", "s", property_get_exec_keyring_mode, offsetof(ExecContext, keyring_mode), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("ProtectHostname", "b", bus_property_get_bool, offsetof(ExecContext, protect_hostname), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("NetworkNamespacePath", "s", NULL, offsetof(ExecContext, network_namespace_path), SD_BUS_VTABLE_PROPERTY_CONST),
 
         /* Obsolete/redundant properties: */
         SD_BUS_PROPERTY("Capabilities", "s", property_get_empty_string, 0, SD_BUS_VTABLE_PROPERTY_CONST|SD_BUS_VTABLE_HIDDEN),
@@ -811,6 +861,50 @@ static int append_exec_command(sd_bus_message *reply, ExecCommand *c) {
 
         r = sd_bus_message_append(reply, "bttttuii",
                                   !!(c->flags & EXEC_COMMAND_IGNORE_FAILURE),
+                                  c->exec_status.start_timestamp.realtime,
+                                  c->exec_status.start_timestamp.monotonic,
+                                  c->exec_status.exit_timestamp.realtime,
+                                  c->exec_status.exit_timestamp.monotonic,
+                                  (uint32_t) c->exec_status.pid,
+                                  (int32_t) c->exec_status.code,
+                                  (int32_t) c->exec_status.status);
+        if (r < 0)
+                return r;
+
+        return sd_bus_message_close_container(reply);
+}
+
+static int append_exec_ex_command(sd_bus_message *reply, ExecCommand *c) {
+        _cleanup_strv_free_ char **ex_opts = NULL;
+        int r;
+
+        assert(reply);
+        assert(c);
+
+        if (!c->path)
+                return 0;
+
+        r = sd_bus_message_open_container(reply, 'r', "sasasttttuii");
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append(reply, "s", c->path);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append_strv(reply, c->argv);
+        if (r < 0)
+                return r;
+
+        r = exec_command_flags_to_strv(c->flags, &ex_opts);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append_strv(reply, ex_opts);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append(reply, "ttttuii",
                                   c->exec_status.start_timestamp.realtime,
                                   c->exec_status.start_timestamp.monotonic,
                                   c->exec_status.exit_timestamp.realtime,
@@ -878,6 +972,42 @@ int bus_property_get_exec_command_list(
         return sd_bus_message_close_container(reply);
 }
 
+int bus_property_get_exec_ex_command_list(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *ret_error) {
+
+        ExecCommand *c, *exec_command = *(ExecCommand**) userdata;
+        int r;
+
+        assert(bus);
+        assert(reply);
+
+        r = sd_bus_message_open_container(reply, 'a', "(sasasttttuii)");
+        if (r < 0)
+                return r;
+
+        LIST_FOREACH(command, c, exec_command) {
+                r = append_exec_ex_command(reply, c);
+                if (r < 0)
+                        return r;
+        }
+
+        return sd_bus_message_close_container(reply);
+}
+
+static char *exec_command_flags_to_exec_chars(ExecCommandFlags flags) {
+        return strjoin(FLAGS_SET(flags, EXEC_COMMAND_IGNORE_FAILURE)   ? "-" : "",
+                       FLAGS_SET(flags, EXEC_COMMAND_NO_ENV_EXPAND)    ? ":" : "",
+                       FLAGS_SET(flags, EXEC_COMMAND_FULLY_PRIVILEGED) ? "+" : "",
+                       FLAGS_SET(flags, EXEC_COMMAND_NO_SETUID)        ? "!" : "",
+                       FLAGS_SET(flags, EXEC_COMMAND_AMBIENT_MAGIC)    ? "!!" : "");
+}
+
 int bus_set_transient_exec_command(
                 Unit *u,
                 const char *name,
@@ -885,15 +1015,16 @@ int bus_set_transient_exec_command(
                 sd_bus_message *message,
                 UnitWriteFlags flags,
                 sd_bus_error *error) {
+        bool is_ex_prop = endswith(name, "Ex");
         unsigned n = 0;
         int r;
 
-        r = sd_bus_message_enter_container(message, 'a', "(sasb)");
+        r = sd_bus_message_enter_container(message, 'a', is_ex_prop ? "(sasas)" : "(sasb)");
         if (r < 0)
                 return r;
 
-        while ((r = sd_bus_message_enter_container(message, 'r', "sasb")) > 0) {
-                _cleanup_strv_free_ char **argv = NULL;
+        while ((r = sd_bus_message_enter_container(message, 'r', is_ex_prop ? "sasas" : "sasb")) > 0) {
+                _cleanup_strv_free_ char **argv = NULL, **ex_opts = NULL;
                 const char *path;
                 int b;
 
@@ -908,7 +1039,7 @@ int bus_set_transient_exec_command(
                 if (r < 0)
                         return r;
 
-                r = sd_bus_message_read(message, "b", &b);
+                r = is_ex_prop ? sd_bus_message_read_strv(message, &ex_opts) : sd_bus_message_read(message, "b", &b);
                 if (r < 0)
                         return r;
 
@@ -931,7 +1062,12 @@ int bus_set_transient_exec_command(
 
                         c->argv = TAKE_PTR(argv);
 
-                        c->flags = b ? EXEC_COMMAND_IGNORE_FAILURE : 0;
+                        if (is_ex_prop) {
+                                r = exec_command_flags_from_strv(ex_opts, &c->flags);
+                                if (r < 0)
+                                        return r;
+                        } else
+                                c->flags = b ? EXEC_COMMAND_IGNORE_FAILURE : 0;
 
                         path_simplify(c->path, false);
                         exec_command_append_list(exec_command, c);
@@ -955,16 +1091,14 @@ int bus_set_transient_exec_command(
                 if (n == 0)
                         *exec_command = exec_command_free_list(*exec_command);
 
-                f = open_memstream(&buf, &size);
+                f = open_memstream_unlocked(&buf, &size);
                 if (!f)
                         return -ENOMEM;
-
-                (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                 fputs("ExecStart=\n", f);
 
                 LIST_FOREACH(command, c, *exec_command) {
-                        _cleanup_free_ char *a = NULL, *t = NULL;
+                        _cleanup_free_ char *a = NULL, *t = NULL, *exec_chars = NULL;
                         const char *p;
 
                         p = unit_escape_setting(c->path, UNIT_ESCAPE_C|UNIT_ESCAPE_SPECIFIERS, &t);
@@ -975,11 +1109,11 @@ int bus_set_transient_exec_command(
                         if (!a)
                                 return -ENOMEM;
 
-                        fprintf(f, "%s=%s@%s %s\n",
-                                name,
-                                c->flags & EXEC_COMMAND_IGNORE_FAILURE ? "-" : "",
-                                p,
-                                a);
+                        exec_chars = exec_command_flags_to_exec_chars(c->flags);
+                        if (!exec_chars)
+                                return -ENOMEM;
+
+                        fprintf(f, "%s=%s@%s %s\n", name, exec_chars, p, a);
                 }
 
                 r = fflush_and_check(f);
@@ -1049,10 +1183,10 @@ int bus_exec_context_set_transient_property(
         flags |= UNIT_PRIVATE;
 
         if (streq(name, "User"))
-                return bus_set_transient_user(u, name, &c->user, message, flags, error);
+                return bus_set_transient_user_compat(u, name, &c->user, message, flags, error);
 
         if (streq(name, "Group"))
-                return bus_set_transient_user(u, name, &c->group, message, flags, error);
+                return bus_set_transient_user_compat(u, name, &c->group, message, flags, error);
 
         if (streq(name, "TTYPath"))
                 return bus_set_transient_path(u, name, &c->tty_path, message, flags, error);
@@ -1126,6 +1260,9 @@ int bus_exec_context_set_transient_property(
         if (streq(name, "RestrictRealtime"))
                 return bus_set_transient_bool(u, name, &c->restrict_realtime, message, flags, error);
 
+        if (streq(name, "RestrictSUIDSGID"))
+                return bus_set_transient_bool(u, name, &c->restrict_suid_sgid, message, flags, error);
+
         if (streq(name, "DynamicUser"))
                 return bus_set_transient_bool(u, name, &c->dynamic_user, message, flags, error);
 
@@ -1152,6 +1289,9 @@ int bus_exec_context_set_transient_property(
 
         if (streq(name, "LockPersonality"))
                 return bus_set_transient_bool(u, name, &c->lock_personality, message, flags, error);
+
+        if (streq(name, "ProtectHostname"))
+                return bus_set_transient_bool(u, name, &c->protect_hostname, message, flags, error);
 
         if (streq(name, "UtmpIdentifier"))
                 return bus_set_transient_string(u, name, &c->utmp_id, message, flags, error);
@@ -1213,6 +1353,9 @@ int bus_exec_context_set_transient_property(
         if (streq(name, "MountFlags"))
                 return bus_set_transient_mount_flags(u, name, &c->mount_flags, message, flags, error);
 
+        if (streq(name, "NetworkNamespacePath"))
+                return bus_set_transient_path(u, name, &c->network_namespace_path, message, flags, error);
+
         if (streq(name, "SupplementaryGroups")) {
                 _cleanup_strv_free_ char **l = NULL;
                 char **p;
@@ -1221,10 +1364,10 @@ int bus_exec_context_set_transient_property(
                 if (r < 0)
                         return r;
 
-                STRV_FOREACH(p, l) {
-                        if (!isempty(*p) && !valid_user_group_name_or_id(*p))
-                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid supplementary group names");
-                }
+                STRV_FOREACH(p, l)
+                        if (!isempty(*p) && !valid_user_group_name_or_id_compat(*p))
+                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS,
+                                                         "Invalid supplementary group names");
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
                         if (strv_isempty(l)) {
@@ -1383,7 +1526,7 @@ int bus_exec_context_set_transient_property(
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
                         _cleanup_free_ char *joined = NULL;
-                        bool invert = !whitelist;
+                        SeccompParseFlags invert_flag = whitelist ? 0 : SECCOMP_PARSE_INVERT;
                         char **s;
 
                         if (strv_isempty(l)) {
@@ -1402,7 +1545,12 @@ int bus_exec_context_set_transient_property(
                                 c->syscall_whitelist = whitelist;
 
                                 if (c->syscall_whitelist) {
-                                        r = seccomp_parse_syscall_filter("@default", -1, c->syscall_filter, SECCOMP_PARSE_WHITELIST | (invert ? SECCOMP_PARSE_INVERT : 0));
+                                        r = seccomp_parse_syscall_filter("@default",
+                                                                         -1,
+                                                                         c->syscall_filter,
+                                                                         SECCOMP_PARSE_WHITELIST | invert_flag,
+                                                                         u->id,
+                                                                         NULL, 0);
                                         if (r < 0)
                                                 return r;
                                 }
@@ -1416,7 +1564,12 @@ int bus_exec_context_set_transient_property(
                                 if (r < 0)
                                         return r;
 
-                                r = seccomp_parse_syscall_filter(n, e, c->syscall_filter, (invert ? SECCOMP_PARSE_INVERT : 0) | (c->syscall_whitelist ? SECCOMP_PARSE_WHITELIST : 0));
+                                r = seccomp_parse_syscall_filter(n,
+                                                                 e,
+                                                                 c->syscall_filter,
+                                                                 (c->syscall_whitelist ? SECCOMP_PARSE_WHITELIST : 0) | invert_flag,
+                                                                 u->id,
+                                                                 NULL, 0);
                                 if (r < 0)
                                         return r;
                         }
@@ -1494,7 +1647,6 @@ int bus_exec_context_set_transient_property(
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
                         _cleanup_free_ char *joined = NULL;
-                        bool invert = !whitelist;
                         char **s;
 
                         if (strv_isempty(l)) {
@@ -1520,7 +1672,7 @@ int bus_exec_context_set_transient_property(
                                 if (af < 0)
                                         return af;
 
-                                if (!invert == c->address_families_whitelist) {
+                                if (whitelist == c->address_families_whitelist) {
                                         r = set_put(c->address_families, INT_TO_PTR(af));
                                         if (r < 0)
                                                 return r;
@@ -1538,66 +1690,37 @@ int bus_exec_context_set_transient_property(
                 return 1;
         }
 #endif
-        if (streq(name, "CPUAffinity")) {
+        if (STR_IN_SET(name, "CPUAffinity", "NUMAMask")) {
                 const void *a;
-                size_t n = 0;
+                size_t n;
+                bool affinity = streq(name, "CPUAffinity");
+                _cleanup_(cpu_set_reset) CPUSet set = {};
 
                 r = sd_bus_message_read_array(message, 'y', &a, &n);
                 if (r < 0)
                         return r;
 
+                r = cpu_set_from_dbus(a, n, &set);
+                if (r < 0)
+                        return r;
+
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
                         if (n == 0) {
-                                c->cpuset = cpu_set_mfree(c->cpuset);
-                                c->cpuset_ncpus = 0;
+                                cpu_set_reset(affinity ? &c->cpu_set : &c->numa_policy.nodes);
                                 unit_write_settingf(u, flags, name, "%s=", name);
                         } else {
                                 _cleanup_free_ char *str = NULL;
-                                size_t allocated = 0, len = 0, i, ncpus;
 
-                                ncpus = CPU_SIZE_TO_NUM(n);
+                                str = cpu_set_to_string(&set);
+                                if (!str)
+                                        return -ENOMEM;
 
-                                for (i = 0; i < ncpus; i++) {
-                                        _cleanup_free_ char *p = NULL;
-                                        size_t add;
-
-                                        if (!CPU_ISSET_S(i, n, (cpu_set_t*) a))
-                                                continue;
-
-                                        r = asprintf(&p, "%zu", i);
-                                        if (r < 0)
-                                                return -ENOMEM;
-
-                                        add = strlen(p);
-
-                                        if (!GREEDY_REALLOC(str, allocated, len + add + 2))
-                                                return -ENOMEM;
-
-                                        strcpy(mempcpy(str + len, p, add), " ");
-                                        len += add + 1;
-                                }
-
-                                if (len != 0)
-                                        str[len - 1] = '\0';
-
-                                if (!c->cpuset || c->cpuset_ncpus < ncpus) {
-                                        cpu_set_t *cpuset;
-
-                                        cpuset = CPU_ALLOC(ncpus);
-                                        if (!cpuset)
-                                                return -ENOMEM;
-
-                                        CPU_ZERO_S(n, cpuset);
-                                        if (c->cpuset) {
-                                                CPU_OR_S(CPU_ALLOC_SIZE(c->cpuset_ncpus), cpuset, c->cpuset, (cpu_set_t*) a);
-                                                CPU_FREE(c->cpuset);
-                                        } else
-                                                CPU_OR_S(n, cpuset, cpuset, (cpu_set_t*) a);
-
-                                        c->cpuset = cpuset;
-                                        c->cpuset_ncpus = ncpus;
-                                } else
-                                        CPU_OR_S(n, c->cpuset, c->cpuset, (cpu_set_t*) a);
+                                /* We forego any optimizations here, and always create the structure using
+                                 * cpu_set_add_all(), because we don't want to care if the existing size we
+                                 * got over dbus is appropriate. */
+                                r = cpu_set_add_all(affinity ? &c->cpu_set : &c->numa_policy.nodes, &set);
+                                if (r < 0)
+                                        return r;
 
                                 unit_write_settingf(u, flags, name, "%s=%s", name, str);
                         }
@@ -1605,6 +1728,20 @@ int bus_exec_context_set_transient_property(
 
                 return 1;
 
+        } else if (streq(name, "NUMAPolicy")) {
+                int32_t type;
+
+                r = sd_bus_message_read(message, "i", &type);
+                if (r < 0)
+                        return r;
+
+                if (!mpol_is_valid(type))
+                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid NUMAPolicy value: %i", type);
+
+                if (!UNIT_WRITE_FLAGS_NOOP(flags))
+                        c->numa_policy.type = type;
+
+                return 1;
         } else if (streq(name, "Nice")) {
                 int32_t q;
 
@@ -1994,11 +2131,9 @@ int bus_exec_context_set_transient_property(
                 if (r < 0)
                         return r;
 
-                f = open_memstream(&joined, &size);
+                f = open_memstream_unlocked(&joined, &size);
                 if (!f)
                         return -ENOMEM;
-
-                (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
 
                 fputs("EnvironmentFile=\n", f);
 
@@ -2028,22 +2163,19 @@ int bus_exec_context_set_transient_property(
                                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Path %s is not absolute.", path);
 
                         if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
-                                _cleanup_free_ char *q = NULL;
-                                char *buf;
+                                _cleanup_free_ char *q = NULL, *buf = NULL;
 
                                 buf = strjoin(b ? "-" : "", path);
                                 if (!buf)
                                         return -ENOMEM;
 
                                 q = specifier_escape(buf);
-                                if (!q) {
-                                        free(buf);
+                                if (!q)
                                         return -ENOMEM;
-                                }
 
                                 fprintf(f, "EnvironmentFile=%s\n", q);
 
-                                r = strv_consume(&l, buf);
+                                r = strv_consume(&l, TAKE_PTR(buf));
                                 if (r < 0)
                                         return r;
                         }
@@ -2177,26 +2309,21 @@ int bus_exec_context_set_transient_property(
                 }
 
                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
-                        char ***dirs = NULL;
                         ExecDirectoryType i;
+                        ExecDirectory *d;
 
-                        for (i = 0; i < _EXEC_DIRECTORY_TYPE_MAX; i++)
-                                if (streq(name, exec_directory_type_to_string(i))) {
-                                        dirs = &c->directories[i].paths;
-                                        break;
-                                }
-
-                        assert(dirs);
+                        assert_se((i = exec_directory_type_from_string(name)) >= 0);
+                        d = c->directories + i;
 
                         if (strv_isempty(l)) {
-                                *dirs = strv_free(*dirs);
+                                d->paths = strv_free(d->paths);
                                 unit_write_settingf(u, flags, name, "%s=", name);
                         } else {
                                 _cleanup_free_ char *joined = NULL;
 
-                                r = strv_extend_strv(dirs, l, true);
+                                r = strv_extend_strv(&d->paths, l, true);
                                 if (r < 0)
-                                        return -ENOMEM;
+                                        return r;
 
                                 joined = unit_concat_strv(l, UNIT_ESCAPE_SPECIFIERS);
                                 if (!joined)

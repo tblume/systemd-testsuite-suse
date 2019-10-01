@@ -14,7 +14,6 @@
 #include "netlink-internal.h"
 #include "netlink-types.h"
 #include "netlink-util.h"
-#include "refcnt.h"
 #include "socket-util.h"
 #include "util.h"
 
@@ -393,7 +392,7 @@ int socket_read_message(sd_netlink *rtnl) {
 
                 /* check that the size matches the message type */
                 if (new_msg->nlmsg_len < NLMSG_LENGTH(type_get_size(nl_type))) {
-                        log_debug("sd-netlink: message larger than expected, dropping");
+                        log_debug("sd-netlink: message is shorter than expected, dropping");
                         continue;
                 }
 

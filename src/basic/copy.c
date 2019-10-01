@@ -24,6 +24,7 @@
 #include "macro.h"
 #include "missing.h"
 #include "mountpoint-util.h"
+#include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "time-util.h"
@@ -83,6 +84,22 @@ static int fd_is_nonblock_pipe(int fd) {
                 return -errno;
 
         return FLAGS_SET(flags, O_NONBLOCK) ? FD_IS_NONBLOCKING_PIPE : FD_IS_BLOCKING_PIPE;
+}
+
+static int sigint_pending(void) {
+        sigset_t ss;
+
+        assert_se(sigemptyset(&ss) >= 0);
+        assert_se(sigaddset(&ss, SIGINT) >= 0);
+
+        if (sigtimedwait(&ss, NULL, &(struct timespec) { 0, 0 }) < 0) {
+                if (errno == EAGAIN)
+                        return false;
+
+                return -errno;
+        }
+
+        return true;
 }
 
 int copy_bytes_full(
@@ -172,6 +189,14 @@ int copy_bytes_full(
 
                 if (max_bytes <= 0)
                         return 1; /* return > 0 if we hit the max_bytes limit */
+
+                if (FLAGS_SET(copy_flags, COPY_SIGINT)) {
+                        r = sigint_pending();
+                        if (r < 0)
+                                return r;
+                        if (r > 0)
+                                return -EINTR;
+                }
 
                 if (max_bytes != UINT64_MAX && m > max_bytes)
                         m = max_bytes;
@@ -501,7 +526,7 @@ static int fd_copy_directory(
         _cleanup_close_ int fdf = -1, fdt = -1;
         _cleanup_closedir_ DIR *d = NULL;
         struct dirent *de;
-        bool created;
+        bool exists, created;
         int r;
 
         assert(st);
@@ -522,13 +547,26 @@ static int fd_copy_directory(
                 return -errno;
         fdf = -1;
 
-        r = mkdirat(dt, to, st->st_mode & 07777);
-        if (r >= 0)
-                created = true;
-        else if (errno == EEXIST && (copy_flags & COPY_MERGE))
+        exists = false;
+        if (copy_flags & COPY_MERGE_EMPTY) {
+                r = dir_is_empty_at(dt, to);
+                if (r < 0 && r != -ENOENT)
+                        return r;
+                else if (r == 1)
+                        exists = true;
+        }
+
+        if (exists)
                 created = false;
-        else
-                return -errno;
+        else {
+                r = mkdirat(dt, to, st->st_mode & 07777);
+                if (r >= 0)
+                        created = true;
+                else if (errno == EEXIST && (copy_flags & COPY_MERGE))
+                        created = false;
+                else
+                        return -errno;
+        }
 
         fdt = openat(dt, to, O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOCTTY|O_NOFOLLOW);
         if (fdt < 0)
@@ -545,6 +583,14 @@ static int fd_copy_directory(
                 if (dot_or_dot_dot(de->d_name))
                         continue;
 
+                if (FLAGS_SET(copy_flags, COPY_SIGINT)) {
+                        r = sigint_pending();
+                        if (r < 0)
+                                return r;
+                        if (r > 0)
+                                return -EINTR;
+                }
+
                 if (fstatat(dirfd(d), de->d_name, &buf, AT_SYMLINK_NOFOLLOW) < 0) {
                         r = -errno;
                         continue;
@@ -552,7 +598,7 @@ static int fd_copy_directory(
 
                 if (progress_path) {
                         if (display_path)
-                                child_display_path = dp = strjoin(display_path, "/", de->d_name);
+                                child_display_path = dp = path_join(display_path, de->d_name);
                         else
                                 child_display_path = de->d_name;
 
@@ -604,9 +650,10 @@ static int fd_copy_directory(
                 else
                         q = -EOPNOTSUPP;
 
+                if (q == -EINTR) /* Propagate SIGINT up instantly */
+                        return q;
                 if (q == -EEXIST && (copy_flags & COPY_MERGE))
                         q = 0;
-
                 if (q < 0)
                         r = q;
         }
@@ -729,7 +776,7 @@ int copy_file_fd_full(
 
         r = copy_bytes_full(fdf, fdt, (uint64_t) -1, copy_flags, NULL, NULL, progress_bytes, userdata);
 
-        (void) copy_times(fdf, fdt);
+        (void) copy_times(fdf, fdt, copy_flags);
         (void) copy_xattr(fdf, fdt);
 
         return r;
@@ -741,6 +788,7 @@ int copy_file_full(
                 int flags,
                 mode_t mode,
                 unsigned chattr_flags,
+                unsigned chattr_mask,
                 CopyFlags copy_flags,
                 copy_progress_bytes_t progress_bytes,
                 void *userdata) {
@@ -756,8 +804,8 @@ int copy_file_full(
                         return -errno;
         }
 
-        if (chattr_flags != 0)
-                (void) chattr_fd(fdt, chattr_flags, (unsigned) -1, NULL);
+        if (chattr_mask != 0)
+                (void) chattr_fd(fdt, chattr_flags, chattr_mask & CHATTR_EARLY_FL, NULL);
 
         r = copy_file_fd_full(from, fdt, copy_flags, progress_bytes, userdata);
         if (r < 0) {
@@ -765,6 +813,9 @@ int copy_file_full(
                 (void) unlink(to);
                 return r;
         }
+
+        if (chattr_mask != 0)
+                (void) chattr_fd(fdt, chattr_flags, chattr_mask & ~CHATTR_EARLY_FL, NULL);
 
         if (close(fdt) < 0) {
                 unlink_noerrno(to);
@@ -779,6 +830,7 @@ int copy_file_atomic_full(
                 const char *to,
                 mode_t mode,
                 unsigned chattr_flags,
+                unsigned chattr_mask,
                 CopyFlags copy_flags,
                 copy_progress_bytes_t progress_bytes,
                 void *userdata) {
@@ -812,8 +864,8 @@ int copy_file_atomic_full(
                         return fdt;
         }
 
-        if (chattr_flags != 0)
-                (void) chattr_fd(fdt, chattr_flags, (unsigned) -1, NULL);
+        if (chattr_mask != 0)
+                (void) chattr_fd(fdt, chattr_flags, chattr_mask & CHATTR_EARLY_FL, NULL);
 
         r = copy_file_fd_full(from, fdt, copy_flags, progress_bytes, userdata);
         if (r < 0)
@@ -831,14 +883,16 @@ int copy_file_atomic_full(
                         return r;
         }
 
+        if (chattr_mask != 0)
+                (void) chattr_fd(fdt, chattr_flags, chattr_mask & ~CHATTR_EARLY_FL, NULL);
+
         t = mfree(t);
         return 0;
 }
 
-int copy_times(int fdf, int fdt) {
+int copy_times(int fdf, int fdt, CopyFlags flags) {
         struct timespec ut[2];
         struct stat st;
-        usec_t crtime = 0;
 
         assert(fdf >= 0);
         assert(fdt >= 0);
@@ -852,8 +906,12 @@ int copy_times(int fdf, int fdt) {
         if (futimens(fdt, ut) < 0)
                 return -errno;
 
-        if (fd_getcrtime(fdf, &crtime) >= 0)
-                (void) fd_setcrtime(fdt, crtime);
+        if (FLAGS_SET(flags, COPY_CRTIME)) {
+                usec_t crtime;
+
+                if (fd_getcrtime(fdf, &crtime) >= 0)
+                        (void) fd_setcrtime(fdt, crtime);
+        }
 
         return 0;
 }

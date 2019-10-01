@@ -42,7 +42,7 @@ static const struct range high_key_blocks[] = {
         { KEY_ALS_TOGGLE, BTN_TRIGGER_HAPPY }
 };
 
-static inline int abs_size_mm(const struct input_absinfo *absinfo) {
+static int abs_size_mm(const struct input_absinfo *absinfo) {
         /* Resolution is defined to be in units/mm for ABS_X/Y */
         return (absinfo->maximum - absinfo->minimum) / absinfo->resolution;
 }
@@ -357,7 +357,7 @@ static int builtin_input_id(sd_device *dev, int argc, char *argv[], bool test) {
         return 0;
 }
 
-const struct udev_builtin udev_builtin_input_id = {
+const UdevBuiltin udev_builtin_input_id = {
         .name = "input_id",
         .cmd = builtin_input_id,
         .help = "Input device properties",

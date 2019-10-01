@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <linux/btrfs.h>
 #include <linux/magic.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
@@ -25,6 +26,7 @@
 #include "pretty-print.h"
 #include "stat-util.h"
 #include "strv.h"
+#include "util.h"
 
 static const char *arg_target = NULL;
 static bool arg_dry_run = false;
@@ -127,7 +129,8 @@ static int maybe_resize_slave_device(const char *mountpath, dev_t main_devno) {
 
 #if HAVE_LIBCRYPTSETUP
         crypt_set_log_callback(NULL, cryptsetup_log_glue, NULL);
-        crypt_set_debug_level(1);
+        if (DEBUG_LOGGING)
+                crypt_set_debug_level(CRYPT_DEBUG_ALL);
 #endif
 
         r = get_block_device_harder(mountpath, &devno);

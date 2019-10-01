@@ -28,7 +28,7 @@ static int sd_netlink_new(sd_netlink **ret) {
                 return -ENOMEM;
 
         *rtnl = (sd_netlink) {
-                .n_ref = REFCNT_INIT,
+                .n_ref = 1,
                 .fd = -1,
                 .sockaddr.nl.nl_family = AF_NETLINK,
                 .original_pid = getpid_cached(),
@@ -182,7 +182,7 @@ static sd_netlink *netlink_free(sd_netlink *rtnl) {
         return mfree(rtnl);
 }
 
-DEFINE_ATOMIC_REF_UNREF_FUNC(sd_netlink, sd_netlink, netlink_free);
+DEFINE_TRIVIAL_REF_UNREF_FUNC(sd_netlink, sd_netlink, netlink_free);
 
 static void rtnl_seal_message(sd_netlink *rtnl, sd_netlink_message *m) {
         assert(rtnl);
@@ -865,6 +865,13 @@ int sd_netlink_add_match(
                                 return r;
 
                         r = socket_broadcast_group_ref(rtnl, RTNLGRP_IPV6_IFADDR);
+                        if (r < 0)
+                                return r;
+
+                        break;
+                case RTM_NEWNEIGH:
+                case RTM_DELNEIGH:
+                        r = socket_broadcast_group_ref(rtnl, RTNLGRP_NEIGH);
                         if (r < 0)
                                 return r;
 

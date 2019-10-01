@@ -1,14 +1,18 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <efi.h>
+#include <efigpt.h>
 #include <efilib.h>
 
 #include "console.h"
+#include "crc32.h"
 #include "disk.h"
 #include "graphics.h"
 #include "linux.h"
+#include "loader-features.h"
 #include "measure.h"
 #include "pe.h"
+#include "random-seed.h"
 #include "shim.h"
 #include "util.h"
 
@@ -65,6 +69,7 @@ typedef struct {
         BOOLEAN force_menu;
         UINTN console_mode;
         enum console_mode_change_type console_mode_change;
+        RandomSeedMode random_seed_mode;
 } Config;
 
 static VOID cursor_left(UINTN *cursor, UINTN *first) {
@@ -267,10 +272,8 @@ static BOOLEAN line_edit(
 
                 case KEYPRESS(0, 0, CHAR_LINEFEED):
                 case KEYPRESS(0, 0, CHAR_CARRIAGE_RETURN):
-                        if (StrCmp(line, line_in) != 0) {
-                                *line_out = line;
-                                line = NULL;
-                        }
+                        if (StrCmp(line, line_in) != 0)
+                                *line_out = TAKE_PTR(line);
                         enter = TRUE;
                         exit = TRUE;
                         break;
@@ -395,6 +398,21 @@ static VOID print_status(Config *config, CHAR16 *loaded_image_path) {
         Print(L"editor:                 %s\n", yes_no(config->editor));
         Print(L"auto-entries:           %s\n", yes_no(config->auto_entries));
         Print(L"auto-firmware:          %s\n", yes_no(config->auto_firmware));
+
+        switch (config->random_seed_mode) {
+        case RANDOM_SEED_OFF:
+                Print(L"random-seed-mode:       off\n");
+                break;
+        case RANDOM_SEED_WITH_SYSTEM_TOKEN:
+                Print(L"random-seed-node:       with-system-token\n");
+                break;
+        case RANDOM_SEED_ALWAYS:
+                Print(L"random-seed-node:       always\n");
+                break;
+        default:
+                ;
+        }
+
         Print(L"\n");
 
         Print(L"config entry count:     %d\n", config->entry_count);
@@ -1000,7 +1018,7 @@ skip:
                 value++;
 
         /* unquote */
-        if (value[0] == '\"' && line[linelen-1] == '\"') {
+        if (value[0] == '"' && line[linelen-1] == '"') {
                 value++;
                 line[linelen-1] = '\0';
         }
@@ -1037,7 +1055,9 @@ static VOID config_defaults_load_from_file(Config *config, CHAR8 *content) {
 
                         if (EFI_ERROR(parse_boolean(value, &on)))
                                 continue;
+
                         config->editor = on;
+                        continue;
                 }
 
                 if (strcmpa((CHAR8 *)"auto-entries", key) == 0) {
@@ -1045,7 +1065,9 @@ static VOID config_defaults_load_from_file(Config *config, CHAR8 *content) {
 
                         if (EFI_ERROR(parse_boolean(value, &on)))
                                 continue;
+
                         config->auto_entries = on;
+                        continue;
                 }
 
                 if (strcmpa((CHAR8 *)"auto-firmware", key) == 0) {
@@ -1053,7 +1075,9 @@ static VOID config_defaults_load_from_file(Config *config, CHAR8 *content) {
 
                         if (EFI_ERROR(parse_boolean(value, &on)))
                                 continue;
+
                         config->auto_firmware = on;
+                        continue;
                 }
 
                 if (strcmpa((CHAR8 *)"console-mode", key) == 0) {
@@ -1072,6 +1096,23 @@ static VOID config_defaults_load_from_file(Config *config, CHAR8 *content) {
                         }
 
                         continue;
+                }
+
+                if (strcmpa((CHAR8*) "random-seed-mode", key) == 0) {
+                        if (strcmpa((CHAR8*) "off", value) == 0)
+                                config->random_seed_mode = RANDOM_SEED_OFF;
+                        else if (strcmpa((CHAR8*) "with-system-token", value) == 0)
+                                config->random_seed_mode = RANDOM_SEED_WITH_SYSTEM_TOKEN;
+                        else if (strcmpa((CHAR8*) "always", value) == 0)
+                                config->random_seed_mode = RANDOM_SEED_ALWAYS;
+                        else {
+                                BOOLEAN on;
+
+                                if (EFI_ERROR(parse_boolean(value, &on)))
+                                        continue;
+
+                                config->random_seed_mode = on ? RANDOM_SEED_ALWAYS : RANDOM_SEED_OFF;
+                        }
                 }
         }
 }
@@ -1256,8 +1297,7 @@ static VOID config_entry_bump_counters(
         /* If the file we just renamed is the loader path, then let's update that. */
         if (StrCmp(entry->loader, old_path) == 0) {
                 FreePool(entry->loader);
-                entry->loader = new_path;
-                new_path = NULL;
+                entry->loader = TAKE_PTR(new_path);
         }
 }
 
@@ -1316,7 +1356,7 @@ static VOID config_entry_add_from_file(
                         entry->loader = stra_to_path(value);
 
                         /* do not add an entry for ourselves */
-                        if (StriCmp(entry->loader, loaded_image_path) == 0) {
+                        if (loaded_image_path && StriCmp(entry->loader, loaded_image_path) == 0) {
                                 entry->type = LOADER_UNDEFINED;
                                 break;
                         }
@@ -1358,10 +1398,8 @@ static VOID config_entry_add_from_file(
                                 s = PoolPrint(L"%s %s", entry->options, new);
                                 FreePool(entry->options);
                                 entry->options = s;
-                        } else {
-                                entry->options = new;
-                                new = NULL;
-                        }
+                        } else
+                                entry->options = TAKE_PTR(new);
 
                         continue;
                 }
@@ -1380,10 +1418,8 @@ static VOID config_entry_add_from_file(
                         s = PoolPrint(L"%s %s", initrd, entry->options);
                         FreePool(entry->options);
                         entry->options = s;
-                } else {
-                        entry->options = initrd;
-                        initrd = NULL;
-                }
+                } else
+                        entry->options = TAKE_PTR(initrd);
         }
 
         entry->device = device;
@@ -1408,6 +1444,7 @@ static VOID config_load_defaults(Config *config, EFI_FILE *root_dir) {
                 .editor = TRUE,
                 .auto_entries = TRUE,
                 .auto_firmware = TRUE,
+                .random_seed_mode = RANDOM_SEED_WITH_SYSTEM_TOKEN,
         };
 
         err = file_read(root_dir, L"\\loader\\loader.conf", 0, 0, &content, NULL);
@@ -1836,7 +1873,7 @@ static VOID config_entry_add_osx(Config *config) {
 
 static VOID config_entry_add_linux(
                 Config *config,
-                EFI_LOADED_IMAGE *loaded_image,
+                EFI_HANDLE *device,
                 EFI_FILE *root_dir) {
 
         EFI_FILE_HANDLE linux_dir;
@@ -1926,7 +1963,7 @@ static VOID config_entry_add_linux(
                         conf = PoolPrint(L"%s-%s", os_id, os_version ? : os_build);
                         path = PoolPrint(L"\\EFI\\Linux\\%s", f->FileName);
 
-                        entry = config_entry_add_loader(config, loaded_image->DeviceHandle, LOADER_LINUX, conf, 'l', os_name, path);
+                        entry = config_entry_add_loader(config, device, LOADER_LINUX, conf, 'l', os_name, path);
 
                         FreePool(content);
                         content = NULL;
@@ -1953,6 +1990,213 @@ static VOID config_entry_add_linux(
         }
 
         uefi_call_wrapper(linux_dir->Close, 1, linux_dir);
+}
+
+/* Note that this is in GUID format, i.e. the first 32bit, and the following pair of 16bit are byteswapped. */
+static const UINT8 xbootldr_guid[16] = {
+        0xff, 0xc2, 0x13, 0xbc, 0xe6, 0x59, 0x62, 0x42, 0xa3, 0x52, 0xb2, 0x75, 0xfd, 0x6f, 0x71, 0x72
+};
+
+EFI_DEVICE_PATH *path_parent(EFI_DEVICE_PATH *path, EFI_DEVICE_PATH *node) {
+        EFI_DEVICE_PATH *parent;
+        UINTN len;
+
+        len = (UINT8*) NextDevicePathNode(node) - (UINT8*) path;
+        parent = (EFI_DEVICE_PATH*) AllocatePool(len + sizeof(EFI_DEVICE_PATH));
+        CopyMem(parent, path, len);
+        CopyMem((UINT8*) parent + len, EndDevicePath, sizeof(EFI_DEVICE_PATH));
+
+        return parent;
+}
+
+static VOID config_load_xbootldr(
+                Config *config,
+                EFI_HANDLE *device) {
+
+        EFI_DEVICE_PATH *partition_path, *node, *disk_path, *copy;
+        UINT32 found_partition_number = (UINT32) -1;
+        UINT64 found_partition_start = (UINT64) -1;
+        UINT64 found_partition_size = (UINT64) -1;
+        UINT8 found_partition_signature[16] = {};
+        EFI_HANDLE new_device;
+        EFI_FILE *root_dir;
+        EFI_STATUS r;
+
+        partition_path = DevicePathFromHandle(device);
+        if (!partition_path)
+                return;
+
+        for (node = partition_path; !IsDevicePathEnd(node); node = NextDevicePathNode(node)) {
+                EFI_HANDLE disk_handle;
+                EFI_BLOCK_IO *block_io;
+                EFI_DEVICE_PATH *p;
+                UINTN nr;
+
+                /* First, Let's look for the SCSI/SATA/USB/… device path node, i.e. one above the media
+                 * devices */
+                if (DevicePathType(node) != MESSAGING_DEVICE_PATH)
+                        continue;
+
+                /* Determine the device path one level up */
+                disk_path = path_parent(partition_path, node);
+                p = disk_path;
+                r = uefi_call_wrapper(BS->LocateDevicePath, 3, &BlockIoProtocol, &p, &disk_handle);
+                if (EFI_ERROR(r))
+                        continue;
+
+                r = uefi_call_wrapper(BS->HandleProtocol, 3, disk_handle, &BlockIoProtocol, (VOID **)&block_io);
+                if (EFI_ERROR(r))
+                        continue;
+
+                /* Filter out some block devices early. (We only care about block devices that aren't
+                 * partitions themselves — we look for GPT partition tables to parse after all —, and only
+                 * those which contain a medium and have at least 2 blocks.) */
+                if (block_io->Media->LogicalPartition ||
+                    !block_io->Media->MediaPresent ||
+                    block_io->Media->LastBlock <= 1)
+                        continue;
+
+                /* Try both copies of the GPT header, in case one is corrupted */
+                for (nr = 0; nr < 2; nr++) {
+                        _cleanup_freepool_ EFI_PARTITION_ENTRY* entries = NULL;
+                        union {
+                                EFI_PARTITION_TABLE_HEADER gpt_header;
+                                uint8_t space[((sizeof(EFI_PARTITION_TABLE_HEADER) + 511) / 512) * 512];
+                        } gpt_header_buffer;
+                        const EFI_PARTITION_TABLE_HEADER *h = &gpt_header_buffer.gpt_header;
+                        UINT64 where;
+                        UINTN i, sz;
+                        UINT32 c;
+
+                        if (nr == 0)
+                                /* Read the first copy at LBA 1 */
+                                where = 1;
+                        else
+                                /* Read the second copy at the very last LBA of this block device */
+                                where = block_io->Media->LastBlock;
+
+                        /* Read the GPT header */
+                        r = uefi_call_wrapper(block_io->ReadBlocks, 5,
+                                              block_io,
+                                              block_io->Media->MediaId,
+                                              where,
+                                              sizeof(gpt_header_buffer), &gpt_header_buffer);
+                        if (EFI_ERROR(r))
+                                continue;
+
+                        /* Some superficial validation of the GPT header */
+                        c = CompareMem(&h->Header.Signature, "EFI PART", sizeof(h->Header.Signature));
+                        if (c != 0)
+                                continue;
+
+                        if (h->Header.HeaderSize < 92 ||
+                            h->Header.HeaderSize > 512)
+                                continue;
+
+                        if (h->Header.Revision != 0x00010000U)
+                                continue;
+
+                        /* Calculate CRC check */
+                        c = ~crc32_exclude_offset((UINT32) -1,
+                                                  (const UINT8*) &gpt_header_buffer,
+                                                  h->Header.HeaderSize,
+                                                  OFFSETOF(EFI_PARTITION_TABLE_HEADER, Header.CRC32),
+                                                  sizeof(h->Header.CRC32));
+                        if (c != h->Header.CRC32)
+                                continue;
+
+                        if (h->MyLBA != where)
+                                continue;
+
+                        if (h->SizeOfPartitionEntry < sizeof(EFI_PARTITION_ENTRY))
+                                continue;
+
+                        if (h->NumberOfPartitionEntries <= 0 ||
+                            h->NumberOfPartitionEntries > 1024)
+                                continue;
+
+                        if (h->SizeOfPartitionEntry > UINTN_MAX / h->NumberOfPartitionEntries) /* overflow check */
+                                continue;
+
+                        /* Now load the GPT entry table */
+                        sz = ALIGN_TO((UINTN) h->SizeOfPartitionEntry * (UINTN) h->NumberOfPartitionEntries, 512);
+                        entries = AllocatePool(sz);
+
+                        r = uefi_call_wrapper(block_io->ReadBlocks, 5,
+                                              block_io,
+                                              block_io->Media->MediaId,
+                                              h->PartitionEntryLBA,
+                                              sz, entries);
+                        if (EFI_ERROR(r))
+                                continue;
+
+                        /* Calculate CRC of entries array, too */
+                        c = ~crc32((UINT32) -1, entries, sz);
+                        if (c != h->PartitionEntryArrayCRC32)
+                                continue;
+
+                        for (i = 0; i < h->NumberOfPartitionEntries; i++) {
+                                EFI_PARTITION_ENTRY *entry;
+
+                                entry = (EFI_PARTITION_ENTRY*) ((UINT8*) entries + h->SizeOfPartitionEntry * i);
+
+                                if (CompareMem(&entry->PartitionTypeGUID, xbootldr_guid, 16) == 0) {
+                                        UINT64 end;
+
+                                        /* Let's use memcpy(), in case the structs are not aligned (they really should be though) */
+                                        CopyMem(&found_partition_start, &entry->StartingLBA, sizeof(found_partition_start));
+                                        CopyMem(&end, &entry->EndingLBA, sizeof(end));
+
+                                        if (end < found_partition_start) /* Bogus? */
+                                                continue;
+
+                                        found_partition_size = end - found_partition_start + 1;
+                                        CopyMem(found_partition_signature, &entry->UniquePartitionGUID, sizeof(found_partition_signature));
+
+                                        found_partition_number = i + 1;
+                                        goto found;
+                                }
+                        }
+
+                        break; /* This GPT was fully valid, but we didn't find what we are looking for. This
+                                * means there's no reason to check the second copy of the GPT header */
+                }
+        }
+
+        return; /* Not found */
+
+found:
+        copy = DuplicateDevicePath(partition_path);
+
+        /* Patch in the data we found */
+        for (node = copy; !IsDevicePathEnd(node); node = NextDevicePathNode(node)) {
+                HARDDRIVE_DEVICE_PATH *hd;
+
+                if (DevicePathType(node) != MEDIA_DEVICE_PATH)
+                        continue;
+
+                if (DevicePathSubType(node) != MEDIA_HARDDRIVE_DP)
+                        continue;
+
+                hd = (HARDDRIVE_DEVICE_PATH*) node;
+                hd->PartitionNumber = found_partition_number;
+                hd->PartitionStart = found_partition_start;
+                hd->PartitionSize = found_partition_size;
+                CopyMem(hd->Signature, found_partition_signature, sizeof(hd->Signature));
+                hd->MBRType = MBR_TYPE_EFI_PARTITION_TABLE_HEADER;
+                hd->SignatureType = SIGNATURE_TYPE_GUID;
+        }
+
+        r = uefi_call_wrapper(BS->LocateDevicePath, 3, &BlockIoProtocol, &copy, &new_device);
+        if (EFI_ERROR(r))
+                return;
+
+        root_dir = LibOpenRoot(new_device);
+        if (!root_dir)
+                return;
+
+        config_entry_add_linux(config, new_device, root_dir);
+        config_load_entries(config, new_device, root_dir, NULL);
 }
 
 static EFI_STATUS image_start(
@@ -2075,11 +2319,13 @@ static VOID config_write_entries_to_variable(Config *config) {
 
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
         static const UINT64 loader_features =
-                (1ULL << 0) | /* I honour the LoaderConfigTimeout variable */
-                (1ULL << 1) | /* I honour the LoaderConfigTimeoutOneShot variable */
-                (1ULL << 2) | /* I honour the LoaderEntryDefault variable */
-                (1ULL << 3) | /* I honour the LoaderEntryOneShot variable */
-                (1ULL << 4) | /* I support boot counting */
+                EFI_LOADER_FEATURE_CONFIG_TIMEOUT |
+                EFI_LOADER_FEATURE_CONFIG_TIMEOUT_ONE_SHOT |
+                EFI_LOADER_FEATURE_ENTRY_DEFAULT |
+                EFI_LOADER_FEATURE_ENTRY_ONESHOT |
+                EFI_LOADER_FEATURE_BOOT_COUNTING |
+                EFI_LOADER_FEATURE_XBOOTLDR |
+                EFI_LOADER_FEATURE_RANDOM_SEED |
                 0;
 
         _cleanup_freepool_ CHAR16 *infostr = NULL, *typestr = NULL;
@@ -2110,7 +2356,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
         err = uefi_call_wrapper(BS->OpenProtocol, 6, image, &LoadedImageProtocol, (VOID **)&loaded_image,
                                 image, NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
         if (EFI_ERROR(err)) {
-                Print(L"Error getting a LoadedImageProtocol handle: %r ", err);
+                Print(L"Error getting a LoadedImageProtocol handle: %r", err);
                 uefi_call_wrapper(BS->Stall, 1, 3 * 1000 * 1000);
                 return err;
         }
@@ -2121,7 +2367,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
 
         root_dir = LibOpenRoot(loaded_image->DeviceHandle);
         if (!root_dir) {
-                Print(L"Unable to open root directory: %r ", err);
+                Print(L"Unable to open root directory.");
                 uefi_call_wrapper(BS->Stall, 1, 3 * 1000 * 1000);
                 return EFI_LOAD_ERROR;
         }
@@ -2142,10 +2388,13 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
         config_load_defaults(&config, root_dir);
 
         /* scan /EFI/Linux/ directory */
-        config_entry_add_linux(&config, loaded_image, root_dir);
+        config_entry_add_linux(&config, loaded_image->DeviceHandle, root_dir);
 
         /* scan /loader/entries/\*.conf files */
         config_load_entries(&config, loaded_image->DeviceHandle, root_dir, loaded_image_path);
+
+        /* Similar, but on any XBOOTLDR partition */
+        config_load_xbootldr(&config, loaded_image->DeviceHandle);
 
         /* sort entries after version number */
         config_sort_entries(&config);
@@ -2163,7 +2412,10 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
                 UINT64 osind = (UINT64)*b;
 
                 if (osind & EFI_OS_INDICATIONS_BOOT_TO_FW_UI)
-                        config_entry_add_call(&config, L"auto-reboot-to-firmware-setup", L"Reboot Into Firmware Interface", reboot_into_firmware);
+                        config_entry_add_call(&config,
+                                              L"auto-reboot-to-firmware-setup",
+                                              L"Reboot Into Firmware Interface",
+                                              reboot_into_firmware);
                 FreePool(b);
         }
 
@@ -2225,8 +2477,11 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
 
                 config_entry_bump_counters(entry, root_dir);
 
-                /* export the selected boot entry to the system */
-                efivar_set(L"LoaderEntrySelected", entry->id, FALSE);
+                /* Export the selected boot entry to the system */
+                (VOID) efivar_set(L"LoaderEntrySelected", entry->id, FALSE);
+
+                /* Optionally, read a random seed off the ESP and pass it to the OS */
+                (VOID) process_random_seed(root_dir, config.random_seed_mode);
 
                 uefi_call_wrapper(BS->SetWatchdogTimer, 4, 5 * 60, 0x10000, 0, NULL);
                 err = image_start(image, &config, entry);

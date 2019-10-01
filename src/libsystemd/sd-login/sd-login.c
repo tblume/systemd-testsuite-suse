@@ -314,7 +314,7 @@ static int file_of_seat(const char *seat, char **_p) {
                 if (!filename_is_valid(seat))
                         return -EINVAL;
 
-                p = strappend("/run/systemd/seats/", seat);
+                p = path_join("/run/systemd/seats", seat);
         } else {
                 _cleanup_free_ char *buf = NULL;
 
@@ -322,9 +322,8 @@ static int file_of_seat(const char *seat, char **_p) {
                 if (r < 0)
                         return r;
 
-                p = strappend("/run/systemd/seats/", buf);
+                p = path_join("/run/systemd/seats", buf);
         }
-
         if (!p)
                 return -ENOMEM;
 
@@ -427,7 +426,7 @@ static int file_of_session(const char *session, char **_p) {
                 if (!session_id_valid(session))
                         return -EINVAL;
 
-                p = strappend("/run/systemd/sessions/", session);
+                p = path_join("/run/systemd/sessions", session);
         } else {
                 _cleanup_free_ char *buf = NULL;
 
@@ -435,7 +434,7 @@ static int file_of_session(const char *session, char **_p) {
                 if (r < 0)
                         return r;
 
-                p = strappend("/run/systemd/sessions/", buf);
+                p = path_join("/run/systemd/sessions", buf);
         }
 
         if (!p)
@@ -818,7 +817,7 @@ _public_ int sd_get_uids(uid_t **users) {
                                 uid_t *t;
 
                                 n = MAX(16, 2*r);
-                                t = realloc(l, sizeof(uid_t) * n);
+                                t = reallocarray(l, sizeof(uid_t), n);
                                 if (!t)
                                         return -ENOMEM;
 
@@ -945,11 +944,11 @@ _public_ int sd_machine_get_ifindices(const char *machine, int **ifindices) {
         return nr;
 }
 
-static inline int MONITOR_TO_FD(sd_login_monitor *m) {
+static int MONITOR_TO_FD(sd_login_monitor *m) {
         return (int) (unsigned long) m - 1;
 }
 
-static inline sd_login_monitor* FD_TO_MONITOR(int fd) {
+static sd_login_monitor* FD_TO_MONITOR(int fd) {
         return (sd_login_monitor*) (unsigned long) (fd + 1);
 }
 

@@ -89,7 +89,7 @@ int path_spec_watch(PathSpec *s, sd_event_io_handler_t handler) {
                                 break;
                         }
 
-                        r = log_warning_errno(errno, "Failed to add watch on %s: %s", s->path, errno == ENOSPC ? "too many watches" : strerror(-r));
+                        r = log_warning_errno(errno, "Failed to add watch on %s: %s", s->path, errno == ENOSPC ? "too many watches" : strerror_safe(r));
                         if (cut)
                                 *cut = tmp;
                         goto fail;
@@ -474,17 +474,15 @@ static void path_enter_running(Path *p) {
                 return;
         }
 
-        r = manager_add_job(UNIT(p)->manager, JOB_START, trigger, JOB_REPLACE, &error, NULL);
+        r = manager_add_job(UNIT(p)->manager, JOB_START, trigger, JOB_REPLACE, NULL, &error, NULL);
         if (r < 0)
                 goto fail;
 
         p->inotify_triggered = false;
 
-        r = path_watch(p);
-        if (r < 0)
-                goto fail;
-
         path_set_state(p, PATH_RUNNING);
+        path_unwatch(p);
+
         return;
 
 fail:
@@ -555,19 +553,16 @@ static void path_mkdir(Path *p) {
 
 static int path_start(Unit *u) {
         Path *p = PATH(u);
-        Unit *trigger;
         int r;
 
         assert(p);
         assert(IN_SET(p->state, PATH_DEAD, PATH_FAILED));
 
-        trigger = UNIT_TRIGGER(u);
-        if (!trigger || trigger->load_state != UNIT_LOADED) {
-                log_unit_error(u, "Refusing to start, unit to trigger not loaded.");
-                return -ENOENT;
-        }
+        r = unit_test_trigger_loaded(u);
+        if (r < 0)
+                return r;
 
-        r = unit_start_limit_test(u);
+        r = unit_test_start_limit(u);
         if (r < 0) {
                 path_enter_dead(p, PATH_FAILURE_START_LIMIT_HIT);
                 return r;

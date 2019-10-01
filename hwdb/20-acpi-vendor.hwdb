@@ -1,8 +1,8 @@
 # This file is part of systemd.
 #
 # Data imported from:
-#     http://www.uefi.org/uefi-pnp-export
-#     http://www.uefi.org/uefi-acpi-export
+#     https://uefi.org/uefi-pnp-export
+#     https://uefi.org/uefi-acpi-export
 #
 # With various additions from other sources
 
@@ -24,6 +24,9 @@ acpi:AMDI*:
 acpi:AMPC*:
  ID_VENDOR_FROM_DATABASE=Ampere Computing
 
+acpi:AMZN*:
+ ID_VENDOR_FROM_DATABASE=Amazon Corporation
+
 acpi:APMC*:
  ID_VENDOR_FROM_DATABASE=Applied Micro Circuits Corporation
 
@@ -35,6 +38,9 @@ acpi:ARMH*:
 
 acpi:ARML*:
  ID_VENDOR_FROM_DATABASE=ARM Ltd.
+
+acpi:ASEM*:
+ ID_VENDOR_FROM_DATABASE=ASEM S.p.A.
 
 acpi:ASUS*:
  ID_VENDOR_FROM_DATABASE=ASUS
@@ -93,6 +99,9 @@ acpi:FRSC*:
 acpi:FTSC*:
  ID_VENDOR_FROM_DATABASE=FocalTech Systems Co., Ltd.
 
+acpi:FUJI*:
+ ID_VENDOR_FROM_DATABASE=Fujitsu Limited
+
 acpi:GHSW*:
  ID_VENDOR_FROM_DATABASE=Green Hills Software
 
@@ -119,6 +128,9 @@ acpi:HTLM*:
 
 acpi:HWPE*:
  ID_VENDOR_FROM_DATABASE=Hewlett Packard Enterprise
+
+acpi:HXTS*:
+ ID_VENDOR_FROM_DATABASE=Guizhou Huaxintong Semiconductor Technology Co., Ltd
 
 acpi:IBMX*:
  ID_VENDOR_FROM_DATABASE=IBM
@@ -1602,6 +1614,9 @@ acpi:CRS*:
 acpi:CRV*:
  ID_VENDOR_FROM_DATABASE=Cerevo Inc.
 
+acpi:CRW*:
+ ID_VENDOR_FROM_DATABASE=Cammegh Limited
+
 acpi:CRX*:
  ID_VENDOR_FROM_DATABASE=Cyrix Corporation
 
@@ -1935,6 +1950,9 @@ acpi:DLK*:
 acpi:DLL*:
  ID_VENDOR_FROM_DATABASE=Dell Inc
 
+acpi:DLO*:
+ ID_VENDOR_FROM_DATABASE=Shenzhen Dlodlo Technologies Co., Ltd.
+
 acpi:DLT*:
  ID_VENDOR_FROM_DATABASE=Digitelec Informatique Park Cadera
 
@@ -1946,6 +1964,9 @@ acpi:DMC*:
 
 acpi:DMM*:
  ID_VENDOR_FROM_DATABASE=Dimond Multimedia Systems Inc
+
+acpi:DMN*:
+ ID_VENDOR_FROM_DATABASE=Dimension Engineering LLC
 
 acpi:DMO*:
  ID_VENDOR_FROM_DATABASE=Data Modul AG
@@ -5547,6 +5568,9 @@ acpi:QLC*:
 acpi:QQQ*:
  ID_VENDOR_FROM_DATABASE=Chuomusen Co., Ltd.
 
+acpi:QSC*:
+ ID_VENDOR_FROM_DATABASE=QSC, LLC
+
 acpi:QSI*:
  ID_VENDOR_FROM_DATABASE=Quantum Solutions, Inc.
 
@@ -7223,6 +7247,9 @@ acpi:VLC*:
 
 acpi:VLK*:
  ID_VENDOR_FROM_DATABASE=Vislink International Ltd
+
+acpi:VLM*:
+ ID_VENDOR_FROM_DATABASE=LENOVO BEIJING CO. LTD.
 
 acpi:VLT*:
  ID_VENDOR_FROM_DATABASE=VideoLan Technologies

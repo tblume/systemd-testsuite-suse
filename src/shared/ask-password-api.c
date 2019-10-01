@@ -31,6 +31,7 @@
 #include "io-util.h"
 #include "log.h"
 #include "macro.h"
+#include "memory-util.h"
 #include "missing.h"
 #include "mkdir.h"
 #include "process-util.h"
@@ -44,7 +45,6 @@
 #include "tmpfile-util.h"
 #include "umask-util.h"
 #include "utf8.h"
-#include "util.h"
 
 #define KEYRING_TIMEOUT_USEC ((5 * USEC_PER_MINUTE) / 2)
 
@@ -63,13 +63,16 @@ static int lookup_key(const char *keyname, key_serial_t *ret) {
 }
 
 static int retrieve_key(key_serial_t serial, char ***ret) {
-        _cleanup_free_ char *p = NULL;
-        long m = 100, n;
+        size_t nfinal, m = 100;
         char **l;
+        _cleanup_(erase_and_freep) char *pfinal = NULL;
 
         assert(ret);
 
         for (;;) {
+                _cleanup_(erase_and_freep) char *p = NULL;
+                long n;
+
                 p = new(char, m);
                 if (!p)
                         return -ENOMEM;
@@ -77,20 +80,20 @@ static int retrieve_key(key_serial_t serial, char ***ret) {
                 n = keyctl(KEYCTL_READ, (unsigned long) serial, (unsigned long) p, (unsigned long) m, 0);
                 if (n < 0)
                         return -errno;
-
-                if (n < m)
+                if ((size_t) n < m) {
+                        nfinal = (size_t) n;
+                        pfinal = TAKE_PTR(p);
                         break;
+                }
 
-                explicit_bzero_safe(p, n);
-                free(p);
+                if (m > LONG_MAX / 2) /* overflow check */
+                        return -ENOMEM;
                 m *= 2;
         }
 
-        l = strv_parse_nulstr(p, n);
+        l = strv_parse_nulstr(pfinal, nfinal);
         if (!l)
                 return -ENOMEM;
-
-        explicit_bzero_safe(p, n);
 
         *ret = l;
         return 0;
@@ -98,7 +101,7 @@ static int retrieve_key(key_serial_t serial, char ***ret) {
 
 static int add_to_keyring(const char *keyname, AskPasswordFlags flags, char **passwords) {
         _cleanup_strv_free_erase_ char **l = NULL;
-        _cleanup_free_ char *p = NULL;
+        _cleanup_(erase_and_freep) char *p = NULL;
         key_serial_t serial;
         size_t n;
         int r;
@@ -126,7 +129,6 @@ static int add_to_keyring(const char *keyname, AskPasswordFlags flags, char **pa
                 return r;
 
         serial = add_key("user", keyname, p, n, KEY_SPEC_USER_KEYRING);
-        explicit_bzero_safe(p, n);
         if (serial == -1)
                 return -errno;
 
@@ -176,37 +178,37 @@ static int ask_password_keyring(const char *keyname, AskPasswordFlags flags, cha
         return retrieve_key(serial, ret);
 }
 
-static void backspace_chars(int ttyfd, size_t p) {
-
+static int backspace_chars(int ttyfd, size_t p) {
         if (ttyfd < 0)
-                return;
+                return 0;
 
-        while (p > 0) {
-                p--;
+        _cleanup_free_ char *buf = malloc_multiply(3, p);
+        if (!buf)
+                return log_oom();
 
-                loop_write(ttyfd, "\b \b", 3, false);
-        }
+        for (size_t i = 0; i < p; i++)
+                memcpy(buf + 3 * i, "\b \b", 3);
+
+        return loop_write(ttyfd, buf, 3*p, false);
 }
 
-static void backspace_string(int ttyfd, const char *str) {
-        size_t m;
-
+static int backspace_string(int ttyfd, const char *str) {
         assert(str);
-
-        if (ttyfd < 0)
-                return;
 
         /* Backspaces through enough characters to entirely undo printing of the specified string. */
 
-        m = utf8_n_codepoints(str);
-        if (m == (size_t) -1)
-                m = strlen(str); /* Not a valid UTF-8 string? If so, let's backspace the number of bytes output. Most
-                                  * likely this happened because we are not in an UTF-8 locale, and in that case that
-                                  * is the correct thing to do. And even if it's not, terminals tend to stop
-                                  * backspacing at the leftmost column, hence backspacing too much should be mostly
-                                  * OK. */
+        if (ttyfd < 0)
+                return 0;
 
-        backspace_chars(ttyfd, m);
+        size_t m = utf8_n_codepoints(str);
+        if (m == (size_t) -1)
+                m = strlen(str); /* Not a valid UTF-8 string? If so, let's backspace the number of bytes
+                                  * output. Most likely this happened because we are not in an UTF-8 locale,
+                                  * and in that case that is the correct thing to do. And even if it's not,
+                                  * terminals tend to stop backspacing at the leftmost column, hence
+                                  * backspacing too much should be mostly OK. */
+
+        return backspace_chars(ttyfd, m);
 }
 
 int ask_password_tty(
@@ -306,9 +308,9 @@ int ask_password_tty(
         };
 
         for (;;) {
+                _cleanup_(erase_char) char c;
                 int sleep_for = -1, k;
                 ssize_t n;
-                char c;
 
                 if (until > 0) {
                         usec_t y;
@@ -372,7 +374,7 @@ int ask_password_tty(
                 if (c == 21) { /* C-u */
 
                         if (!(flags & ASK_PASSWORD_SILENT))
-                                backspace_string(ttyfd, passphrase);
+                                (void) backspace_string(ttyfd, passphrase);
 
                         explicit_bzero_safe(passphrase, sizeof(passphrase));
                         p = codepoint = 0;
@@ -383,15 +385,15 @@ int ask_password_tty(
                                 size_t q;
 
                                 if (!(flags & ASK_PASSWORD_SILENT))
-                                        backspace_chars(ttyfd, 1);
+                                        (void) backspace_chars(ttyfd, 1);
 
-                                /* Remove a full UTF-8 codepoint from the end. For that, figure out where the last one
-                                 * begins */
+                                /* Remove a full UTF-8 codepoint from the end. For that, figure out where the
+                                 * last one begins */
                                 q = 0;
                                 for (;;) {
                                         size_t z;
 
-                                        z = utf8_encoded_valid_unichar(passphrase + q);
+                                        z = utf8_encoded_valid_unichar(passphrase + q, (size_t) -1);
                                         if (z == 0) {
                                                 q = (size_t) -1; /* Invalid UTF8! */
                                                 break;
@@ -410,8 +412,8 @@ int ask_password_tty(
 
                                 flags |= ASK_PASSWORD_SILENT;
 
-                                /* There are two ways to enter silent mode. Either by pressing backspace as first key
-                                 * (and only as first key), or ... */
+                                /* There are two ways to enter silent mode. Either by pressing backspace as
+                                 * first key (and only as first key), or ... */
 
                                 if (ttyfd >= 0)
                                         (void) loop_write(ttyfd, "(no echo) ", 10, false);
@@ -421,7 +423,7 @@ int ask_password_tty(
 
                 } else if (c == '\t' && !(flags & ASK_PASSWORD_SILENT)) {
 
-                        backspace_string(ttyfd, passphrase);
+                        (void) backspace_string(ttyfd, passphrase);
                         flags |= ASK_PASSWORD_SILENT;
 
                         /* ... or by pressing TAB at any time. */
@@ -440,18 +442,18 @@ int ask_password_tty(
 
                         if (!(flags & ASK_PASSWORD_SILENT) && ttyfd >= 0) {
                                 /* Check if we got a complete UTF-8 character now. If so, let's output one '*'. */
-                                n = utf8_encoded_valid_unichar(passphrase + codepoint);
+                                n = utf8_encoded_valid_unichar(passphrase + codepoint, (size_t) -1);
                                 if (n >= 0) {
+                                        if (flags & ASK_PASSWORD_ECHO)
+                                                (void) loop_write(ttyfd, passphrase + codepoint, n, false);
+                                        else
+                                                (void) loop_write(ttyfd, "*", 1, false);
                                         codepoint = p;
-                                        (void) loop_write(ttyfd, (flags & ASK_PASSWORD_ECHO) ? &c : "*", 1, false);
                                 }
                         }
 
                         dirty = true;
                 }
-
-                /* Let's forget this char, just to not keep needlessly copies of key material around */
-                c = 'x';
         }
 
         x = strndup(passphrase, p);

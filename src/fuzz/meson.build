@@ -51,6 +51,10 @@ fuzzers += [
          [libshared],
          []],
 
+        [['src/fuzz/fuzz-varlink.c'],
+         [libshared],
+         []],
+
         [['src/fuzz/fuzz-unit-file.c'],
          [libcore,
           libshared],
@@ -97,6 +101,10 @@ fuzzers += [
           libshared],
          []],
 
+        [['src/fuzz/fuzz-udev-database.c'],
+         [libshared],
+         []],
+
         [['src/fuzz/fuzz-udev-rules.c'],
          [libudev_core,
           libudev_static,
@@ -108,4 +116,39 @@ fuzzers += [
         [['src/fuzz/fuzz-compress.c'],
          [libshared],
          []],
+
+        [['src/fuzz/fuzz-bus-label.c'],
+         [libshared],
+         []],
+
+        [['src/fuzz/fuzz-env-file.c'],
+         [libshared],
+         []],
+
+        [['src/fuzz/fuzz-hostname-util.c'],
+         [libshared],
+         []],
+
+        [['src/fuzz/fuzz-nspawn-settings.c'],
+         [libshared,
+          libnspawn_core],
+         [libseccomp]],
+
+        [['src/fuzz/fuzz-nspawn-oci.c'],
+         [libshared,
+          libnspawn_core],
+         [libseccomp]],
+
+        [['src/fuzz/fuzz-calendarspec.c'],
+         [libshared],
+         []],
+
+        [['src/fuzz/fuzz-time-util.c'],
+         [libshared],
+         []],
+
+        [['src/fuzz/fuzz-fido-id-desc.c',
+          'src/udev/fido_id/fido_id_desc.c'],
+         [],
+         []]
 ]

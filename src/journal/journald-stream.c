@@ -13,6 +13,7 @@
 #include "alloc-util.h"
 #include "dirent-util.h"
 #include "env-file.h"
+#include "errno-util.h"
 #include "escape.h"
 #include "fd-util.h"
 #include "fileio.h"
@@ -159,7 +160,7 @@ static int stdout_stream_save(StdoutStream *s) {
                         return log_oom();
         }
 
-        mkdir_p("/run/systemd/journal/streams", 0755);
+        (void) mkdir_p("/run/systemd/journal/streams", 0755);
 
         r = fopen_temporary(s->state_file, &f, &temp_path);
         if (r < 0)
@@ -293,7 +294,7 @@ static int stdout_stream_log(StdoutStream *s, const char *p, LineBreak line_brea
         }
 
         if (s->identifier) {
-                syslog_identifier = strappend("SYSLOG_IDENTIFIER=", s->identifier);
+                syslog_identifier = strjoin("SYSLOG_IDENTIFIER=", s->identifier);
                 if (syslog_identifier)
                         iovec[n++] = IOVEC_MAKE_STRING(syslog_identifier);
         }
@@ -310,7 +311,7 @@ static int stdout_stream_log(StdoutStream *s, const char *p, LineBreak line_brea
                 iovec[n++] = IOVEC_MAKE_STRING(c);
         }
 
-        message = strappend("MESSAGE=", p);
+        message = strjoin("MESSAGE=", p);
         if (message)
                 iovec[n++] = IOVEC_MAKE_STRING(message);
 
@@ -605,7 +606,7 @@ static int stdout_stream_new(sd_event_source *es, int listen_fd, uint32_t revent
 
         fd = accept4(s->stdout_fd, NULL, NULL, SOCK_NONBLOCK|SOCK_CLOEXEC);
         if (fd < 0) {
-                if (errno == EAGAIN)
+                if (ERRNO_IS_ACCEPT_AGAIN(errno))
                         return 0;
 
                 return log_error_errno(errno, "Failed to accept stdout connection: %m");
@@ -648,7 +649,7 @@ static int stdout_stream_load(StdoutStream *stream, const char *fname) {
         assert(fname);
 
         if (!stream->state_file) {
-                stream->state_file = strappend("/run/systemd/journal/streams/", fname);
+                stream->state_file = path_join("/run/systemd/journal/streams", fname);
                 if (!stream->state_file)
                         return log_oom();
         }

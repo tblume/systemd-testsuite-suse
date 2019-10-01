@@ -7,14 +7,17 @@
 #include "bus-util.h"
 #include "manager.h"
 #include "rm-rf.h"
+#include "strv.h"
 #include "test-helper.h"
 #include "tests.h"
+#include "service.h"
 
 int main(int argc, char *argv[]) {
         _cleanup_(rm_rf_physical_and_freep) char *runtime_dir = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error err = SD_BUS_ERROR_NULL;
         _cleanup_(manager_freep) Manager *m = NULL;
-        Unit *a = NULL, *b = NULL, *c = NULL, *d = NULL, *e = NULL, *g = NULL, *h = NULL, *unit_with_multiple_dashes = NULL;
+        Unit *a = NULL, *b = NULL, *c = NULL, *d = NULL, *e = NULL, *g = NULL,
+             *h = NULL, *i = NULL, *a_conj = NULL, *unit_with_multiple_dashes = NULL;
         Job *j;
         int r;
 
@@ -40,7 +43,7 @@ int main(int argc, char *argv[]) {
         manager_dump_units(m, stdout, "\t");
 
         printf("Test1: (Trivial)\n");
-        r = manager_add_job(m, JOB_START, c, JOB_REPLACE, &err, &j);
+        r = manager_add_job(m, JOB_START, c, JOB_REPLACE, NULL, &err, &j);
         if (sd_bus_error_is_set(&err))
                 log_error("error: %s: %s", err.name, err.message);
         assert_se(r == 0);
@@ -53,15 +56,15 @@ int main(int argc, char *argv[]) {
         manager_dump_units(m, stdout, "\t");
 
         printf("Test2: (Cyclic Order, Unfixable)\n");
-        assert_se(manager_add_job(m, JOB_START, d, JOB_REPLACE, NULL, &j) == -EDEADLK);
+        assert_se(manager_add_job(m, JOB_START, d, JOB_REPLACE, NULL, NULL, &j) == -EDEADLK);
         manager_dump_jobs(m, stdout, "\t");
 
         printf("Test3: (Cyclic Order, Fixable, Garbage Collector)\n");
-        assert_se(manager_add_job(m, JOB_START, e, JOB_REPLACE, NULL, &j) == 0);
+        assert_se(manager_add_job(m, JOB_START, e, JOB_REPLACE, NULL, NULL, &j) == 0);
         manager_dump_jobs(m, stdout, "\t");
 
         printf("Test4: (Identical transaction)\n");
-        assert_se(manager_add_job(m, JOB_START, e, JOB_FAIL, NULL, &j) == 0);
+        assert_se(manager_add_job(m, JOB_START, e, JOB_FAIL, NULL, NULL, &j) == 0);
         manager_dump_jobs(m, stdout, "\t");
 
         printf("Load3:\n");
@@ -69,21 +72,21 @@ int main(int argc, char *argv[]) {
         manager_dump_units(m, stdout, "\t");
 
         printf("Test5: (Colliding transaction, fail)\n");
-        assert_se(manager_add_job(m, JOB_START, g, JOB_FAIL, NULL, &j) == -EDEADLK);
+        assert_se(manager_add_job(m, JOB_START, g, JOB_FAIL, NULL, NULL, &j) == -EDEADLK);
 
         printf("Test6: (Colliding transaction, replace)\n");
-        assert_se(manager_add_job(m, JOB_START, g, JOB_REPLACE, NULL, &j) == 0);
+        assert_se(manager_add_job(m, JOB_START, g, JOB_REPLACE, NULL, NULL, &j) == 0);
         manager_dump_jobs(m, stdout, "\t");
 
         printf("Test7: (Unmergeable job type, fail)\n");
-        assert_se(manager_add_job(m, JOB_STOP, g, JOB_FAIL, NULL, &j) == -EDEADLK);
+        assert_se(manager_add_job(m, JOB_STOP, g, JOB_FAIL, NULL, NULL, &j) == -EDEADLK);
 
         printf("Test8: (Mergeable job type, fail)\n");
-        assert_se(manager_add_job(m, JOB_RESTART, g, JOB_FAIL, NULL, &j) == 0);
+        assert_se(manager_add_job(m, JOB_RESTART, g, JOB_FAIL, NULL, NULL, &j) == 0);
         manager_dump_jobs(m, stdout, "\t");
 
         printf("Test9: (Unmergeable job type, replace)\n");
-        assert_se(manager_add_job(m, JOB_STOP, g, JOB_REPLACE, NULL, &j) == 0);
+        assert_se(manager_add_job(m, JOB_STOP, g, JOB_REPLACE, NULL, NULL, &j) == 0);
         manager_dump_jobs(m, stdout, "\t");
 
         printf("Load4:\n");
@@ -91,7 +94,31 @@ int main(int argc, char *argv[]) {
         manager_dump_units(m, stdout, "\t");
 
         printf("Test10: (Unmergeable job type of auxiliary job, fail)\n");
-        assert_se(manager_add_job(m, JOB_START, h, JOB_FAIL, NULL, &j) == 0);
+        assert_se(manager_add_job(m, JOB_START, h, JOB_FAIL, NULL, NULL, &j) == 0);
+        manager_dump_jobs(m, stdout, "\t");
+
+        printf("Load5:\n");
+        manager_clear_jobs(m);
+        assert_se(manager_load_startable_unit_or_warn(m, "i.service", NULL, &i) >= 0);
+        SERVICE(a)->state = SERVICE_RUNNING;
+        SERVICE(d)->state = SERVICE_RUNNING;
+        manager_dump_units(m, stdout, "\t");
+
+        printf("Test11: (Start/stop job ordering, execution cycle)\n");
+        assert_se(manager_add_job(m, JOB_START, i, JOB_FAIL, NULL, NULL, &j) == 0);
+        assert_se(a->job && a->job->type == JOB_STOP);
+        assert_se(d->job && d->job->type == JOB_STOP);
+        assert_se(b->job && b->job->type == JOB_START);
+        manager_dump_jobs(m, stdout, "\t");
+
+        printf("Load6:\n");
+        manager_clear_jobs(m);
+        assert_se(manager_load_startable_unit_or_warn(m, "a-conj.service", NULL, &a_conj) >= 0);
+        SERVICE(a)->state = SERVICE_DEAD;
+        manager_dump_units(m, stdout, "\t");
+
+        printf("Test12: (Trivial cycle, Unfixable)\n");
+        assert_se(manager_add_job(m, JOB_START, a_conj, JOB_REPLACE, NULL, NULL, &j) == -EDEADLK);
         manager_dump_jobs(m, stdout, "\t");
 
         assert_se(!hashmap_get(a->dependencies[UNIT_PROPAGATES_RELOAD_TO], b));

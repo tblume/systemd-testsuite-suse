@@ -165,7 +165,7 @@ static int builtin_hwdb(sd_device *dev, int argc, char *argv[], bool test) {
                 if (r < 0)
                         return log_device_debug_errno(dev, r, "Failed to lookup hwdb: %m");
                 if (r == 0)
-                        return log_device_debug_errno(dev, ENOENT, "No entry found from hwdb: %m");
+                        return log_device_debug_errno(dev, SYNTHETIC_ERRNO(ENODATA), "No entry found from hwdb.");
                 return r;
         }
 
@@ -180,7 +180,7 @@ static int builtin_hwdb(sd_device *dev, int argc, char *argv[], bool test) {
         if (r < 0)
                 return log_device_debug_errno(dev, r, "Failed to lookup hwdb: %m");
         if (r == 0)
-                return log_device_debug_errno(dev, ENOENT, "No entry found from hwdb: %m");
+                return log_device_debug_errno(dev, SYNTHETIC_ERRNO(ENODATA), "No entry found from hwdb.");
         return r;
 }
 
@@ -208,7 +208,7 @@ static bool builtin_hwdb_validate(void) {
         return hwdb_validate(hwdb);
 }
 
-const struct udev_builtin udev_builtin_hwdb = {
+const UdevBuiltin udev_builtin_hwdb = {
         .name = "hwdb",
         .cmd = builtin_hwdb,
         .init = builtin_hwdb_init,

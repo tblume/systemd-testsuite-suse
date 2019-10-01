@@ -11,18 +11,18 @@
 
 #include "bus-error.h"
 #include "bus-util.h"
-#include "def.h"
 #include "fd-util.h"
 #include "fileio.h"
+#include "kbd-util.h"
 #include "locale-util.h"
 #include "main-func.h"
+#include "memory-util.h"
 #include "pager.h"
 #include "pretty-print.h"
 #include "proc-cmdline.h"
 #include "set.h"
 #include "spawn-polkit-agent.h"
 #include "strv.h"
-#include "util.h"
 #include "verbs.h"
 #include "virt.h"
 
@@ -510,6 +510,7 @@ static int run(int argc, char *argv[]) {
         int r;
 
         setlocale(LC_ALL, "");
+        log_show_color(true);
         log_parse_environment();
         log_open();
 

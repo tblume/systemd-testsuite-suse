@@ -20,6 +20,7 @@
 #include "output-mode.h"
 #include "path-util.h"
 #include "process-util.h"
+#include "sort-util.h"
 #include "string-util.h"
 #include "terminal-util.h"
 #include "unit-name.h"
@@ -28,7 +29,7 @@ static void show_pid_array(
                 pid_t pids[],
                 unsigned n_pids,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 bool extra,
                 bool more,
                 OutputFlags flags) {
@@ -50,17 +51,19 @@ static void show_pid_array(
         pid_width = DECIMAL_STR_WIDTH(pids[j]);
 
         if (flags & OUTPUT_FULL_WIDTH)
-                n_columns = 0;
+                n_columns = SIZE_MAX;
         else {
-                if (n_columns > pid_width+2)
-                        n_columns -= pid_width+2;
+                if (n_columns > pid_width + 3) /* something like "├─1114784 " */
+                        n_columns -= pid_width + 3;
                 else
                         n_columns = 20;
         }
         for (i = 0; i < n_pids; i++) {
                 _cleanup_free_ char *t = NULL;
 
-                (void) get_process_cmdline(pids[i], n_columns, true, &t);
+                (void) get_process_cmdline(pids[i], n_columns,
+                                           PROCESS_CMDLINE_COMM_FALLBACK | PROCESS_CMDLINE_USE_LOCALE,
+                                           &t);
 
                 if (extra)
                         printf("%s%s ", prefix, special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET));
@@ -74,7 +77,7 @@ static void show_pid_array(
 static int show_cgroup_one_by_path(
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 bool more,
                 OutputFlags flags) {
 
@@ -118,7 +121,7 @@ static int show_cgroup_one_by_path(
 int show_cgroup_by_path(
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 OutputFlags flags) {
 
         _cleanup_free_ char *fn = NULL, *p1 = NULL, *last = NULL, *p2 = NULL;
@@ -145,7 +148,7 @@ int show_cgroup_by_path(
         while ((r = cg_read_subgroup(d, &gn)) > 0) {
                 _cleanup_free_ char *k = NULL;
 
-                k = strjoin(fn, "/", gn);
+                k = path_join(fn, gn);
                 free(gn);
                 if (!k)
                         return -ENOMEM;
@@ -162,7 +165,7 @@ int show_cgroup_by_path(
                         printf("%s%s%s\n", prefix, special_glyph(SPECIAL_GLYPH_TREE_BRANCH), cg_unescape(basename(last)));
 
                         if (!p1) {
-                                p1 = strappend(prefix, special_glyph(SPECIAL_GLYPH_TREE_VERTICAL));
+                                p1 = strjoin(prefix, special_glyph(SPECIAL_GLYPH_TREE_VERTICAL));
                                 if (!p1)
                                         return -ENOMEM;
                         }
@@ -184,7 +187,7 @@ int show_cgroup_by_path(
                 printf("%s%s%s\n", prefix, special_glyph(SPECIAL_GLYPH_TREE_RIGHT), cg_unescape(basename(last)));
 
                 if (!p2) {
-                        p2 = strappend(prefix, "  ");
+                        p2 = strjoin(prefix, "  ");
                         if (!p2)
                                 return -ENOMEM;
                 }
@@ -198,7 +201,7 @@ int show_cgroup_by_path(
 int show_cgroup(const char *controller,
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 OutputFlags flags) {
         _cleanup_free_ char *p = NULL;
         int r;
@@ -216,7 +219,7 @@ static int show_extra_pids(
                 const char *controller,
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 const pid_t pids[],
                 unsigned n_pids,
                 OutputFlags flags) {
@@ -261,7 +264,7 @@ int show_cgroup_and_extra(
                 const char *controller,
                 const char *path,
                 const char *prefix,
-                unsigned n_columns,
+                size_t n_columns,
                 const pid_t extra_pids[],
                 unsigned n_extra_pids,
                 OutputFlags flags) {

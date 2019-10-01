@@ -15,8 +15,10 @@
 #include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
-#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
@@ -31,16 +33,18 @@
 #include "io-util.h"
 #include "macro.h"
 #include "main-func.h"
+#include "memory-util.h"
 #include "mkdir.h"
 #include "path-util.h"
+#include "plymouth-util.h"
 #include "pretty-print.h"
 #include "process-util.h"
+#include "set.h"
 #include "signal-util.h"
 #include "socket-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "terminal-util.h"
-#include "util.h"
 #include "utmp-wtmp.h"
 
 static enum {
@@ -235,13 +239,13 @@ finish:
 }
 
 static int send_passwords(const char *socket_name, char **passwords) {
-        _cleanup_free_ char *packet = NULL;
+        _cleanup_(erase_and_freep) char *packet = NULL;
         _cleanup_close_ int socket_fd = -1;
         union sockaddr_union sa = {};
         size_t packet_length = 1;
         char **p, *d;
         ssize_t n;
-        int r, salen;
+        int salen;
 
         assert(socket_name);
 
@@ -263,25 +267,58 @@ static int send_passwords(const char *socket_name, char **passwords) {
                 d = stpcpy(d, *p) + 1;
 
         socket_fd = socket(AF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC, 0);
-        if (socket_fd < 0) {
-                r = log_debug_errno(errno, "socket(): %m");
-                goto finish;
-        }
+        if (socket_fd < 0)
+                return log_debug_errno(errno, "socket(): %m");
 
         n = sendto(socket_fd, packet, packet_length, MSG_NOSIGNAL, &sa.sa, salen);
-        if (n < 0) {
-                r = log_debug_errno(errno, "sendto(): %m");
-                goto finish;
-        }
+        if (n < 0)
+                return log_debug_errno(errno, "sendto(): %m");
 
-        r = (int) n;
-
-finish:
-        explicit_bzero_safe(packet, packet_length);
-        return r;
+        return (int) n;
 }
 
-static int parse_password(const char *filename, char **wall) {
+static bool wall_tty_match(const char *path, void *userdata) {
+        _cleanup_free_ char *p = NULL;
+        _cleanup_close_ int fd = -1;
+        struct stat st;
+
+        if (!path_is_absolute(path))
+                path = strjoina("/dev/", path);
+
+        if (lstat(path, &st) < 0) {
+                log_debug_errno(errno, "Failed to stat %s: %m", path);
+                return true;
+        }
+
+        if (!S_ISCHR(st.st_mode)) {
+                log_debug("%s is not a character device.", path);
+                return true;
+        }
+
+        /* We use named pipes to ensure that wall messages suggesting
+         * password entry are not printed over password prompts
+         * already shown. We use the fact here that opening a pipe in
+         * non-blocking mode for write-only will succeed only if
+         * there's some writer behind it. Using pipes has the
+         * advantage that the block will automatically go away if the
+         * process dies. */
+
+        if (asprintf(&p, "/run/systemd/ask-password-block/%u:%u", major(st.st_rdev), minor(st.st_rdev)) < 0) {
+                log_oom();
+                return true;
+        }
+
+        fd = open(p, O_WRONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
+        if (fd < 0) {
+                log_debug_errno(errno, "Failed to open the wall pipe: %m");
+                return 1;
+        }
+
+        /* What, we managed to open the pipe? Then this tty is filtered. */
+        return 0;
+}
+
+static int parse_password(const char *filename) {
         _cleanup_free_ char *socket_name = NULL, *message = NULL;
         bool accept_cached = false, echo = false;
         uint64_t not_after = 0;
@@ -322,19 +359,16 @@ static int parse_password(const char *filename, char **wall) {
                 printf("'%s' (PID %u)\n", message, pid);
 
         else if (arg_action == ACTION_WALL) {
-                char *_wall;
+                _cleanup_free_ char *wall = NULL;
 
-                if (asprintf(&_wall,
-                             "%s%sPassword entry required for \'%s\' (PID %u).\r\n"
-                             "Please enter password with the systemd-tty-ask-password-agent tool:",
-                             strempty(*wall),
-                             *wall ? "\r\n\r\n" : "",
+                if (asprintf(&wall,
+                             "Password entry required for \'%s\' (PID %u).\r\n"
+                             "Please enter password with the systemd-tty-ask-password-agent tool.",
                              message,
                              pid) < 0)
                         return log_oom();
 
-                free(*wall);
-                *wall = _wall;
+                (void) utmp_wall(wall, NULL, NULL, wall_tty_match, NULL);
 
         } else {
                 _cleanup_strv_free_erase_ char **passwords = NULL;
@@ -415,47 +449,6 @@ static int wall_tty_block(void) {
         return fd;
 }
 
-static bool wall_tty_match(const char *path, void *userdata) {
-        _cleanup_free_ char *p = NULL;
-        _cleanup_close_ int fd = -1;
-        struct stat st;
-
-        if (!path_is_absolute(path))
-                path = strjoina("/dev/", path);
-
-        if (lstat(path, &st) < 0) {
-                log_debug_errno(errno, "Failed to stat %s: %m", path);
-                return true;
-        }
-
-        if (!S_ISCHR(st.st_mode)) {
-                log_debug("%s is not a character device.", path);
-                return true;
-        }
-
-        /* We use named pipes to ensure that wall messages suggesting
-         * password entry are not printed over password prompts
-         * already shown. We use the fact here that opening a pipe in
-         * non-blocking mode for write-only will succeed only if
-         * there's some writer behind it. Using pipes has the
-         * advantage that the block will automatically go away if the
-         * process dies. */
-
-        if (asprintf(&p, "/run/systemd/ask-password-block/%u:%u", major(st.st_rdev), minor(st.st_rdev)) < 0) {
-                log_oom();
-                return true;
-        }
-
-        fd = open(p, O_WRONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
-        if (fd < 0) {
-                log_debug_errno(errno, "Failed to open the wall pipe: %m");
-                return 1;
-        }
-
-        /* What, we managed to open the pipe? Then this tty is filtered. */
-        return 0;
-}
-
 static int show_passwords(void) {
         _cleanup_closedir_ DIR *d;
         struct dirent *de;
@@ -470,10 +463,10 @@ static int show_passwords(void) {
         }
 
         FOREACH_DIRENT_ALL(de, d, return log_error_errno(errno, "Failed to read directory: %m")) {
-                _cleanup_free_ char *p = NULL, *wall = NULL;
+                _cleanup_free_ char *p = NULL;
                 int q;
 
-                /* We only support /dev on tmpfs, hence we can rely on
+                /* We only support /run on tmpfs, hence we can rely on
                  * d_type to be reliable */
 
                 if (de->d_type != DT_REG)
@@ -485,16 +478,13 @@ static int show_passwords(void) {
                 if (!startswith(de->d_name, "ask."))
                         continue;
 
-                p = strappend("/run/systemd/ask-password/", de->d_name);
+                p = path_join("/run/systemd/ask-password", de->d_name);
                 if (!p)
                         return log_oom();
 
-                q = parse_password(p, &wall);
+                q = parse_password(p);
                 if (q < 0 && r == 0)
                         r = q;
-
-                if (wall)
-                        (void) utmp_wall(wall, NULL, NULL, wall_tty_match, NULL);
         }
 
         return r;
@@ -685,51 +675,53 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 /*
- * To be able to ask on all terminal devices of /dev/console
- * the devices are collected. If more than one device is found,
- * then on each of the terminals a inquiring task is forked.
- * Every task has its own session and its own controlling terminal.
- * If one of the tasks does handle a password, the remaining tasks
- * will be terminated.
+ * To be able to ask on all terminal devices of /dev/console the devices are collected. If more than one
+ * device is found, then on each of the terminals a inquiring task is forked.  Every task has its own session
+ * and its own controlling terminal.  If one of the tasks does handle a password, the remaining tasks will be
+ * terminated.
  */
-static int ask_on_this_console(const char *tty, pid_t *ret_pid, int argc, char *argv[]) {
-        struct sigaction sig = {
+static int ask_on_this_console(const char *tty, pid_t *ret_pid, char **arguments) {
+        static const struct sigaction sigchld = {
                 .sa_handler = nop_signal_handler,
                 .sa_flags = SA_NOCLDSTOP | SA_RESTART,
         };
-        pid_t pid;
+        static const struct sigaction sighup = {
+                .sa_handler = SIG_DFL,
+                .sa_flags = SA_RESTART,
+        };
         int r;
 
+        assert_se(sigaction(SIGCHLD, &sigchld, NULL) >= 0);
+        assert_se(sigaction(SIGHUP, &sighup, NULL) >= 0);
         assert_se(sigprocmask_many(SIG_UNBLOCK, NULL, SIGHUP, SIGCHLD, -1) >= 0);
 
-        assert_se(sigemptyset(&sig.sa_mask) >= 0);
-        assert_se(sigaction(SIGCHLD, &sig, NULL) >= 0);
-
-        sig.sa_handler = SIG_DFL;
-        assert_se(sigaction(SIGHUP, &sig, NULL) >= 0);
-
-        r = safe_fork("(sd-passwd)", FORK_RESET_SIGNALS|FORK_LOG, &pid);
+        r = safe_fork("(sd-passwd)", FORK_RESET_SIGNALS|FORK_LOG, ret_pid);
         if (r < 0)
                 return r;
         if (r == 0) {
-                int ac;
+                char **i;
 
                 assert_se(prctl(PR_SET_PDEATHSIG, SIGHUP) >= 0);
 
-                for (ac = 0; ac < argc; ac++) {
-                        if (streq(argv[ac], "--console")) {
-                                argv[ac] = strjoina("--console=", tty);
-                                break;
+                STRV_FOREACH(i, arguments) {
+                        char *k;
+
+                        if (!streq(*i, "--console"))
+                                continue;
+
+                        k = strjoin("--console=", tty);
+                        if (!k) {
+                                log_oom();
+                                _exit(EXIT_FAILURE);
                         }
+
+                        free_and_replace(*i, k);
                 }
 
-                assert(ac < argc);
-
-                execv(SYSTEMD_TTY_ASK_PASSWORD_AGENT_BINARY_PATH, argv);
+                execv(SYSTEMD_TTY_ASK_PASSWORD_AGENT_BINARY_PATH, arguments);
                 _exit(EXIT_FAILURE);
         }
 
-        *ret_pid = pid;
         return 0;
 }
 
@@ -785,9 +777,9 @@ static void terminate_agents(Set *pids) {
         }
 }
 
-static int ask_on_consoles(int argc, char *argv[]) {
+static int ask_on_consoles(char *argv[]) {
         _cleanup_set_free_ Set *pids = NULL;
-        _cleanup_strv_free_ char **consoles = NULL;
+        _cleanup_strv_free_ char **consoles = NULL, **arguments = NULL;
         siginfo_t status = {};
         char **tty;
         pid_t pid;
@@ -801,9 +793,13 @@ static int ask_on_consoles(int argc, char *argv[]) {
         if (!pids)
                 return log_oom();
 
+        arguments = strv_copy(argv);
+        if (!arguments)
+                return log_oom();
+
         /* Start an agent on each console. */
         STRV_FOREACH(tty, consoles) {
-                r = ask_on_this_console(*tty, &pid, argc, argv);
+                r = ask_on_this_console(*tty, &pid, arguments);
                 if (r < 0)
                         return r;
 
@@ -848,7 +844,7 @@ static int run(int argc, char *argv[]) {
                 /*
                  * Spawn a separate process for each console device.
                  */
-                return ask_on_consoles(argc, argv);
+                return ask_on_consoles(argv);
 
         if (arg_device) {
                 /*

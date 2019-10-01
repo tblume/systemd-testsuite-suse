@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "alloc-util.h"
 #include "macro.h"
 
 /* What is interpreted as whitespace? */
@@ -56,6 +57,16 @@ static inline const char *empty_to_dash(const char *str) {
         return isempty(str) ? "-" : str;
 }
 
+static inline bool empty_or_dash(const char *str) {
+        return !str ||
+                str[0] == 0 ||
+                (str[0] == '-' && str[1] == 0);
+}
+
+static inline const char *empty_or_dash_to_null(const char *p) {
+        return empty_or_dash(p) ? NULL : p;
+}
+
 static inline char *startswith(const char *s, const char *prefix) {
         size_t l;
 
@@ -97,7 +108,6 @@ const char* split(const char **state, size_t *l, const char *separator, SplitFla
 #define _FOREACH_WORD(word, length, s, separator, flags, state)         \
         for ((state) = (s), (word) = split(&(state), &(length), (separator), (flags)); (word); (word) = split(&(state), &(length), (separator), (flags)))
 
-char *strappend(const char *s, const char *suffix);
 char *strnappend(const char *s, const char *suffix, size_t length);
 
 char *strjoin_real(const char *x, ...) _sentinel_;
@@ -111,7 +121,7 @@ char *strjoin_real(const char *x, ...) _sentinel_;
                 size_t _i_;                                           \
                 for (_i_ = 0; _i_ < ELEMENTSOF(_appendees_) && _appendees_[_i_]; _i_++) \
                         _len_ += strlen(_appendees_[_i_]);              \
-                _p_ = _d_ = alloca(_len_ + 1);                          \
+                _p_ = _d_ = newa(char, _len_ + 1);                      \
                 for (_i_ = 0; _i_ < ELEMENTSOF(_appendees_) && _appendees_[_i_]; _i_++) \
                         _p_ = stpcpy(_p_, _appendees_[_i_]);            \
                 *_p_ = 0;                                               \
@@ -164,8 +174,6 @@ char *cellescape(char *buf, size_t len, const char *s);
 /* This limit is arbitrary, enough to give some idea what the string contains */
 #define CELLESCAPE_DEFAULT_LENGTH 64
 
-bool nulstr_contains(const char *nulstr, const char *needle);
-
 char* strshorten(char *s, size_t l);
 
 char *strreplace(const char *text, const char *old_string, const char *new_string);
@@ -181,39 +189,12 @@ char *strrep(const char *s, unsigned n);
 int split_pair(const char *s, const char *sep, char **l, char **r);
 
 int free_and_strdup(char **p, const char *s);
+static inline int free_and_strdup_warn(char **p, const char *s) {
+        if (free_and_strdup(p, s) < 0)
+                return log_oom();
+        return 0;
+}
 int free_and_strndup(char **p, const char *s, size_t l);
-
-/* Normal memmem() requires haystack to be nonnull, which is annoying for zero-length buffers */
-static inline void *memmem_safe(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen) {
-
-        if (needlelen <= 0)
-                return (void*) haystack;
-
-        if (haystacklen < needlelen)
-                return NULL;
-
-        assert(haystack);
-        assert(needle);
-
-        return memmem(haystack, haystacklen, needle, needlelen);
-}
-
-#if HAVE_EXPLICIT_BZERO
-static inline void* explicit_bzero_safe(void *p, size_t l) {
-        if (l > 0)
-                explicit_bzero(p, l);
-
-        return p;
-}
-#else
-void *explicit_bzero_safe(void *p, size_t l);
-#endif
-
-char *string_erase(char *x);
-
-char *string_free_erase(char *s);
-DEFINE_TRIVIAL_CLEANUP_FUNC(char *, string_free_erase);
-#define _cleanup_string_free_erase_ _cleanup_(string_free_erasep)
 
 bool string_is_safe(const char *p) _pure_;
 
@@ -223,6 +204,12 @@ static inline size_t strlen_ptr(const char *s) {
 
         return strlen(s);
 }
+
+DISABLE_WARNING_STRINGOP_TRUNCATION;
+static inline void strncpy_exact(char *buf, const char *src, size_t buf_len) {
+        strncpy(buf, src, buf_len);
+}
+REENABLE_WARNING;
 
 /* Like startswith(), but operates on arbitrary memory blocks */
 static inline void *memory_startswith(const void *p, size_t sz, const char *token) {
@@ -262,4 +249,17 @@ static inline void *memory_startswith_no_case(const void *p, size_t sz, const ch
         }
 
         return (uint8_t*) p + n;
+}
+
+static inline char* str_realloc(char **p) {
+        /* Reallocate *p to actual size */
+
+        if (!*p)
+                return NULL;
+
+        char *t = realloc(*p, strlen(*p) + 1);
+        if (!t)
+                return NULL;
+
+        return (*p = t);
 }

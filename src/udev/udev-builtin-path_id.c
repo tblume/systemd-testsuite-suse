@@ -110,7 +110,6 @@ static sd_device *handle_scsi_fibre_channel(sd_device *parent, char **path) {
         assert(parent);
         assert(path);
 
-
         if (sd_device_get_parent_with_subsystem_devtype(parent, "scsi", "scsi_target", &targetdev) < 0)
                 return NULL;
         if (sd_device_get_sysname(targetdev, &sysname) < 0)
@@ -676,7 +675,7 @@ static int builtin_path_id(sd_device *dev, int argc, char *argv[], bool test) {
         return 0;
 }
 
-const struct udev_builtin udev_builtin_path_id = {
+const UdevBuiltin udev_builtin_path_id = {
         .name = "path_id",
         .cmd = builtin_path_id,
         .help = "Compose persistent device path",

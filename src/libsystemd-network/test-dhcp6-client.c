@@ -4,6 +4,7 @@
 ***/
 
 #include <net/ethernet.h>
+#include <net/if_arp.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <sys/socket.h>
@@ -18,9 +19,10 @@
 #include "dhcp6-protocol.h"
 #include "fd-util.h"
 #include "macro.h"
+#include "memory-util.h"
 #include "socket-util.h"
 #include "tests.h"
-#include "util.h"
+#include "time-util.h"
 #include "virt.h"
 
 static struct ether_addr mac_addr = {

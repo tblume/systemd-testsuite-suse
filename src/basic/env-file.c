@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <stdio_ext.h>
-
 #include "alloc-util.h"
 #include "env-file.h"
 #include "env-util.h"
@@ -35,7 +33,6 @@ static int parse_env_file_internal(
                 VALUE,
                 VALUE_ESCAPE,
                 SINGLE_QUOTE_VALUE,
-                SINGLE_QUOTE_VALUE_ESCAPE,
                 DOUBLE_QUOTE_VALUE,
                 DOUBLE_QUOTE_VALUE_ESCAPE,
                 COMMENT,
@@ -113,7 +110,7 @@ static int parse_env_file_internal(
 
                         } else if (c == '\'')
                                 state = SINGLE_QUOTE_VALUE;
-                        else if (c == '\"')
+                        else if (c == '"')
                                 state = DOUBLE_QUOTE_VALUE;
                         else if (c == '\\')
                                 state = VALUE_ESCAPE;
@@ -186,8 +183,6 @@ static int parse_env_file_internal(
                 case SINGLE_QUOTE_VALUE:
                         if (c == '\'')
                                 state = PRE_VALUE;
-                        else if (c == '\\')
-                                state = SINGLE_QUOTE_VALUE_ESCAPE;
                         else {
                                 if (!GREEDY_REALLOC(value, value_alloc, n_value+2))
                                         return -ENOMEM;
@@ -197,19 +192,8 @@ static int parse_env_file_internal(
 
                         break;
 
-                case SINGLE_QUOTE_VALUE_ESCAPE:
-                        state = SINGLE_QUOTE_VALUE;
-
-                        if (!strchr(NEWLINE, c)) {
-                                if (!GREEDY_REALLOC(value, value_alloc, n_value+2))
-                                        return -ENOMEM;
-
-                                value[n_value++] = c;
-                        }
-                        break;
-
                 case DOUBLE_QUOTE_VALUE:
-                        if (c == '\"')
+                        if (c == '"')
                                 state = PRE_VALUE;
                         else if (c == '\\')
                                 state = DOUBLE_QUOTE_VALUE_ESCAPE;
@@ -225,12 +209,17 @@ static int parse_env_file_internal(
                 case DOUBLE_QUOTE_VALUE_ESCAPE:
                         state = DOUBLE_QUOTE_VALUE;
 
-                        if (!strchr(NEWLINE, c)) {
+                        if (c == '"') {
                                 if (!GREEDY_REALLOC(value, value_alloc, n_value+2))
                                         return -ENOMEM;
-
+                                value[n_value++] = '"';
+                        } else if (!strchr(NEWLINE, c)) {
+                                if (!GREEDY_REALLOC(value, value_alloc, n_value+3))
+                                        return -ENOMEM;
+                                value[n_value++] = '\\';
                                 value[n_value++] = c;
                         }
+
                         break;
 
                 case COMMENT:
@@ -253,7 +242,6 @@ static int parse_env_file_internal(
                    VALUE,
                    VALUE_ESCAPE,
                    SINGLE_QUOTE_VALUE,
-                   SINGLE_QUOTE_VALUE_ESCAPE,
                    DOUBLE_QUOTE_VALUE,
                    DOUBLE_QUOTE_VALUE_ESCAPE)) {
 
@@ -497,6 +485,8 @@ static int merge_env_file_push(
 
         free_and_replace(value, expanded_value);
 
+        log_debug("%s:%u: setting %s=%s", filename, line, key, value);
+
         return load_env_file_push(filename, line, key, value, env, n_pushed);
 }
 
@@ -527,7 +517,7 @@ static void write_env_var(FILE *f, const char *v) {
         fwrite_unlocked(v, 1, p-v, f);
 
         if (string_has_cc(p, NULL) || chars_intersect(p, WHITESPACE SHELL_NEED_QUOTES)) {
-                fputc_unlocked('\"', f);
+                fputc_unlocked('"', f);
 
                 for (; *p; p++) {
                         if (strchr(SHELL_NEED_ESCAPE, *p))
@@ -536,7 +526,7 @@ static void write_env_var(FILE *f, const char *v) {
                         fputc_unlocked(*p, f);
                 }
 
-                fputc_unlocked('\"', f);
+                fputc_unlocked('"', f);
         } else
                 fputs_unlocked(p, f);
 
@@ -555,7 +545,6 @@ int write_env_file(const char *fname, char **l) {
         if (r < 0)
                 return r;
 
-        (void) __fsetlocking(f, FSETLOCKING_BYCALLER);
         (void) fchmod_umask(fileno(f), 0644);
 
         STRV_FOREACH(i, l)
@@ -569,6 +558,6 @@ int write_env_file(const char *fname, char **l) {
                 r = -errno;
         }
 
-        unlink(p);
+        (void) unlink(p);
         return r;
 }
