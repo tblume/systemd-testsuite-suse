@@ -23,7 +23,7 @@ function testsuiteprepare {
     case "$VERSION" in
         234|237|243)
             ARCH=$(uname -m)
-            progs="lz4 busybox dhcp-client python3 plymouth yast2-firstboot binutils netcat-openbsd cryptsetup less"
+            progs="lz4 busybox dhcp-client python3 plymouth yast2-firstboot binutils netcat-openbsd cryptsetup less socat"
             [[ $VERSION == 237 ]] && progs+=" ninja quota ppp"
             for prog in $progs; do
                 rpm -q $prog || zypper -n in --no-recommends "$prog"
