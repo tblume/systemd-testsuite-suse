@@ -188,10 +188,15 @@ else
 
         if [[ -z "$2" || "$2" == "--run" ]]; then
             TESTDIR=$(sed -n '/systemd-test.*system.journal/s/.*\(systemd-test.[[:alnum:]]*\)\/.*/\1/p' ${TEST_BASE_DIR%%/test}/logs/$testname-run.log)
-	    [[ -f /failed ]] && cat /failed
-            if [ -f /testok ]; then
-		   cat /testok
-		   RESULT=$(sed -n '/OK/p' /testok)
+	    NOQEMU=$(sed -n '/TEST_NO_QEMU=1/p' test.sh)
+	    if [ "$NOQEMU" == "TEST_NO_QEMU=1" ]; then
+                RESULT=$(sed -n '$ s/.*\(OK\).*/\1/p' ${TEST_BASE_DIR%%/test}/logs/$testname-run.log)
+            else
+	        [[ -f /failed ]] && cat /failed
+                if [ -f /testok ]; then
+	               cat /testok
+	               RESULT=$(sed -n '/OK/p' /testok)
+	        fi
 	    fi
 	    [[ "$RESULT" == "OK" ]] && TESTRES='\033[0;32m'"PASS" || TESTRES='\033[0;31m'"FAIL"
             echo -e "\n$TESTRES:" '\033[m'"$testname"
