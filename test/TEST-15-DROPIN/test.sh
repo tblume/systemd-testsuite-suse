@@ -17,6 +17,7 @@ test_setup() {
     ln -fs /dev/null $initdir/etc/systemd/system/systemd-resolved.service
 
     # import the test scripts in the rootfs and plug them in systemd
+    echo "testservice=$initdir/etc/systemd/system/testsuite.service"
     cp testsuite.service $initdir/etc/systemd/system/
     cp test-dropin.sh    $initdir/
     setup_testsuite
