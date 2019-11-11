@@ -25,6 +25,7 @@ test_setup() {
         ln -fs /dev/null $initdir/etc/systemd/system/systemd-machined.service
 
         # setup the testsuite service
+        echo "testservice=$initdir/etc/systemd/system/testsuite.service"
         cat >$initdir/etc/systemd/system/testsuite.service <<EOF
 [Unit]
 Description=Testsuite service
