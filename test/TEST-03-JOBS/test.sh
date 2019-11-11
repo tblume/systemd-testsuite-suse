@@ -3,6 +3,7 @@ set -e
 TEST_DESCRIPTION="Job-related tests"
 TEST_NO_QEMU=1
 
+export TEST_BASE_DIR=/var/opt/systemd-tests/test
 . $TEST_BASE_DIR/test-functions
 
 test_setup() {
