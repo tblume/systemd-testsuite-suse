@@ -20,6 +20,8 @@ test_setup() {
         do
             cp testsuite-${s}.service ${initdir}/etc/systemd/system
         done
+
+        echo "testservice=$initdir/etc/systemd/system/testsuite.service"
         cp testsuite.service ${initdir}/etc/systemd/system
 
         cp extend_timeout_test_service.sh ${initdir}/
