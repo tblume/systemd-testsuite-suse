@@ -2,6 +2,7 @@
 set -e
 TEST_DESCRIPTION="FailureAction= operation"
 
+export TEST_BASE_DIR=/var/opt/systemd-tests/test
 . $TEST_BASE_DIR/test-functions
 QEMU_TIMEOUT=600
 
@@ -21,6 +22,7 @@ Description=Testsuite service
 
 [Service]
 ExecStart=/bin/bash -x /testsuite.sh
+ExecStopPost=/bin/sh -x -c 'systemctl --state=failed --no-pager > /failed'
 Type=oneshot
 StandardOutput=tty
 StandardError=tty
