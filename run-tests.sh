@@ -192,7 +192,9 @@ else
 	    if [ "$NOQEMU" == "TEST_NO_QEMU=1" ]; then
                 RESULT=$(sed -n '$ s/.*\(OK\).*/\1/p' ${TEST_BASE_DIR%%/test}/logs/$testname-run.log)
             else
-	        [[ -f /failed ]] && echo "failed:"; cat /failed
+	        [[ -f /failed ]] && (echo "failed:"; cat /failed)
+	        [[ -f /failed.qemu ]] && (echo "failed qemu:"; cat /failed.qemu)
+	        [[ -f /failed.nspawn ]] && (echo "failed nspawn:"; cat /failed.nspawn)
                 if [ -f /testok ]; then
 		       echo -e "\ntestresult:"
 	               cat /testok
