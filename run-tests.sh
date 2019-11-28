@@ -208,13 +208,16 @@ else
 	        [[ -f /failed ]] && (echo "failed:"; cat /failed)
 	        [[ -f /failed.qemu ]] && (echo "failed qemu:"; cat /failed.qemu)
 	        [[ -f /failed.nspawn ]] && (echo "failed nspawn:"; cat /failed.nspawn)
-                if [ -f /testok ]; then
-		       echo -e "\ntestresult:"
-	               cat /testok
-	               RESULT=$(sed -n '/OK/p' /testok)
-	        fi
+                echo -e "\ntestresult:"
+                for file in $(ls /testok*); do
+                        RESULT+=$(cat $file); echo $RESULT
+                done
 	    fi
-	    [[ "$RESULT" == "OK" ]] && TESTRES='\033[0;32m'"PASS" || TESTRES='\033[0;31m'"FAIL"
+	    if [[ "$RESULT" == "OK" ]] || [[ "$RESULT" == "OKOK" ]] || [[ "$RESULT" == "OKOKOK" ]]; then
+                TESTRES='\033[0;32m'"PASS"
+            else
+                TESTRES='\033[0;31m'"FAIL"
+            fi
             echo -e "\n$TESTRES:" '\033[m'"$testname"
             echo ":test-result: ${TESTRES##*m}" > ${TEST_BASE_DIR%%/test}/logs/$testname.trs
             [[ "$TESTRES" =~ "PASS" ]] && [[ -n "$TESTDIR" ]] && rm -rf /var/tmp/$TESTDIR &>/dev/null
