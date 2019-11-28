@@ -23,7 +23,21 @@ function testsuiteprepare {
     case "$VERSION" in
         234|237|243)
             ARCH=$(uname -m)
-            progs="lz4 busybox dhcp-client python3 plymouth yast2-firstboot binutils netcat-openbsd cryptsetup less socat"
+            case $ARCH in
+                x86_64|i*86)
+                     QEMU_PKG=qemu-x86
+                     ;;
+                ppc64*)
+                     QEMU_PKG="qemu-ppc qemu-vgabios"
+                     ;;
+                s390x)
+                     QEMU_PKG=qemu-s390
+                     ;;
+                aarch64)
+                     QEMU_PKG=qemu-arm
+                     ;;
+            esac
+            progs="lz4 busybox dhcp-client python3 plymouth yast2-firstboot binutils netcat-openbsd cryptsetup less socat $QEMU_PKG"
             [[ $VERSION == 237 ]] && progs+=" ninja quota ppp"
             for prog in $progs; do
                 rpm -q $prog || zypper -n in --no-recommends "$prog"
@@ -61,7 +75,6 @@ function testsuiteprepare {
     [[ -d /var/opt/systemd-tests/catalog ]] || ln -s /usr/lib/systemd/catalog /var/opt/systemd-tests/
     # only for tests running qemu
     # for i in $(ls /var/opt/systemd-tests/catalog/systemd.*.in); do mv $i ${i%%.in}; done
-
 }
 
 
