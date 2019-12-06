@@ -529,7 +529,7 @@ static inline long missing_get_mempolicy(int *mode, unsigned long *nodemask,
 
 #if !HAVE_PIDFD_OPEN
 /* may be (invalid) negative number due to libseccomp, see PR 13319 */
-#  if ! (defined __NR_pidfd_open && __NR_pidfd_open > 0)
+#  if ! (defined __NR_pidfd_open && __NR_pidfd_open >= 0)
 #    if defined __NR_pidfd_open
 #      undef __NR_pidfd_open
 #    endif
@@ -547,7 +547,7 @@ static inline int pidfd_open(pid_t pid, unsigned flags) {
 
 #if !HAVE_PIDFD_SEND_SIGNAL
 /* may be (invalid) negative number due to libseccomp, see PR 13319 */
-#  if ! (defined __NR_pidfd_send_signal && __NR_pidfd_send_signal > 0)
+#  if ! (defined __NR_pidfd_send_signal && __NR_pidfd_send_signal >= 0)
 #    if defined __NR_pidfd_send_signal
 #      undef __NR_pidfd_send_signal
 #    endif
