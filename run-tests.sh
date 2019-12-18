@@ -21,7 +21,7 @@ function testsuiteprepare {
     echo -e "\nChecking required packages\n"
 
     case "$VERSION" in
-        234|237|243)
+        234|243|244)
             ARCH=$(uname -m)
             case $ARCH in
                 x86_64|i*86)
@@ -136,7 +136,7 @@ if [ -z "$1" ]; then
     testfiles+="test/udev-test.pl
     test/hwdb-test.sh
     test/rule-syntax-check.py
-    hwdb/parse_hwdb.py
+    hwdb.d/parse_hwdb.py
     test/sysv-generator-test.py"
 
     skiptests="test-coredump-vacuum test-qcow2 test-patch-uid test-ns test-hostname test-ask-password-api test-dissect-image test-ipcrm test-btrfs test-netlink-manual test-cgroup test-install test-udev test-nss test-bus-benchmark test-ipv4ll-manual test-acd test-inhibit "
@@ -201,19 +201,14 @@ else
 
         if [[ -z "$2" || "$2" == "--run" ]]; then
             TESTDIR=$(sed -n '/systemd-test.*system.journal/s/.*\(systemd-test.[[:alnum:]]*\)\/.*/\1/p' ${TEST_BASE_DIR%%/test}/logs/$testname-run.log)
-	    NOQEMU=$(sed -n '/TEST_NO_QEMU=1/p' test.sh)
-	    if [ "$NOQEMU" == "TEST_NO_QEMU=1" ]; then
-                RESULT=$(sed -n '$ s/.*\(OK\).*/\1/p' ${TEST_BASE_DIR%%/test}/logs/$testname-run.log)
-            else
-	        [[ -f /failed ]] && (echo "failed:"; cat /failed)
-	        [[ -f /failed.qemu ]] && (echo "failed qemu:"; cat /failed.qemu)
-	        [[ -f /failed.nspawn ]] && (echo "failed nspawn:"; cat /failed.nspawn)
-                echo -e "\ntestresult:"
-                for file in $(ls /testok*); do
-                        RESULT+=$(cat $file); echo $RESULT
-                done
-	    fi
-	    if [[ "$RESULT" == "OK" ]] || [[ "$RESULT" == "OKOK" ]] || [[ "$RESULT" == "OKOKOK" ]]; then
+            [[ -f /failed ]] && (echo "failed:"; cat /failed)
+            [[ -f /failed.qemu ]] && (echo "failed qemu:"; cat /failed.qemu)
+            [[ -f /failed.nspawn ]] && (echo "failed nspawn:"; cat /failed.nspawn)
+            echo -e "\ntestresult:"
+            for file in $(ls /testok*); do
+                    RESULT+=$(cat $file); echo "$file: $RESULT"
+            done
+            if [[ "${RESULT:9:2}" == "OK" ]]; then
                 TESTRES='\033[0;32m'"PASS"
             else
                 TESTRES='\033[0;31m'"FAIL"
@@ -223,7 +218,7 @@ else
             [[ "$TESTRES" =~ "PASS" ]] && [[ -n "$TESTDIR" ]] && rm -rf /var/tmp/$TESTDIR &>/dev/null
             cd ${TEST_BASE_DIR%%/test}
             # only needed for qemu
-	    # losetup -d
+            # losetup -d
             cleanup
         fi
 
