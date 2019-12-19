@@ -61,8 +61,8 @@ Description=Testsuite service
 After=multi-user.target
 
 [Service]
-ExecStart=/bin/sh -e -x -c 'systemctl --state=failed --no-pager > /failed ; systemctl daemon-reload ; echo OK > /testok'
-ExecStartPost=/bin/sh -x -c '/bin/mount | /usr/bin/sed -n "/ \/var /p" >> /testok'
+ExecStart=/bin/sh -e -x -c 'systemctl --state=failed --no-pager > /failed ; systemctl daemon-reload ; echo SUSEtest OK > /testok'
+ExecStartPost=/bin/sh -x -c "cat /proc/mounts | /usr/bin/sed -n '/ \/var /p' >> /testok"
 Type=oneshot
 EOF
 
