@@ -27,38 +27,41 @@ check_result_nspawn() {
     return $_ret
 }
 
-check_result_qemu() {
-    local _ret=1
-    mkdir -p $initdir
-    mount ${LOOPDEV}p1 $initdir
-    [[ -e $initdir/testok ]] && _ret=0
-    if [[ -s $initdir/failed ]]; then
-        _ret=$(($_ret+1))
-        echo "=== Failed test log ==="
-        cat $initdir/failed
-    else
-        if [[ -s $initdir/skipped ]]; then
-            echo "=== Skipped test log =="
-            cat $initdir/skipped
-        fi
-        if [[ -s $initdir/testok ]]; then
-            echo "=== Passed tests ==="
-            cat $initdir/testok
+test_run() {
+    systemctl daemon-reload
+    systemctl start testsuite.service || return 1
+    systemctl status --full testsuite.service
+
+    if [ -z "$TEST_NO_NSPAWN" ]; then
+        if run_nspawn; then
+            check_result_nspawn || return 1
+        else
+            dwarn "can't run systemd-nspawn, skipping"
         fi
     fi
-    cp -a $initdir/var/log/journal $TESTDIR
-    umount $initdir
+    [[ -e /testok ]] && _ret=0
+    if [[ -s /failed ]]; then
+        _ret=$(($_ret+1))
+        echo "=== Failed test log ==="
+        cat /failed
+    else
+        if [[ -s /skipped ]]; then
+            echo "=== Skipped test log =="
+            cat /skipped
+        fi
+        if [[ -s /testok ]]; then
+            echo "=== Passed tests ==="
+            cat /testok
+        fi
+    fi
     [[ -n "$TIMED_OUT" ]] && _ret=$(($_ret+1))
     return $_ret
 }
 
 test_setup() {
-    if type -P meson && [[ "$(meson configure $BUILD_DIR | grep install-tests | awk '{ print $2 }')" != "true" ]]; then
-        dfatal "Needs to be built with -Dinstall-tests=true"
-        exit 1
-    fi
-
-    create_empty_image_rootdir
+    mkdir -p $TESTDIR/root
+    initdir=$TESTDIR/root
+    STRIP_BINARIES=no
 
     # Create what will eventually be our root filesystem onto an overlay
     (
@@ -78,7 +81,7 @@ test_setup() {
         inst_binary nproc
 
         # setup the testsuite service
-        cat >$initdir/etc/systemd/system/testsuite.service <<EOF
+        cat >/etc/systemd/system/testsuite.service <<EOF
 [Unit]
 Description=Testsuite service
 
@@ -86,9 +89,6 @@ Description=Testsuite service
 ExecStart=/testsuite.sh
 Type=oneshot
 EOF
-        cp testsuite.sh $initdir/
-
-        setup_testsuite
     )
     setup_nspawn_root
 
