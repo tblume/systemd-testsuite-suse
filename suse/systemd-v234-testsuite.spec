@@ -150,6 +150,10 @@ Source6:        baselibs.conf
 Source11:       after-local.service
 Source12:       systemd-sysv-install
 Source14:       kbd-model-map.legacy
+Source15:       run-tests.sh
+Source16:       test-driver
+Source17:       rule-syntax-check-run.sh
+Source18:       cleanup.sh
 
 Source100:      scripts-systemd-fix-machines-btrfs-subvol.sh
 Source101:      scripts-systemd-upgrade-from-pre-210.sh
@@ -175,87 +179,38 @@ Patch4:         0001-mount-swap-cryptsetup-introduce-an-option-to-prevent.patch
 # Temporary patch due to SLE15-SP2 having a more recent kernel
 Patch50:        0001-seccomp-shm-get-at-dt-now-have-their-own-numbers-eve.patch
 
-# jsc#SLE-7743
-Patch100:       0001-tests-when-running-a-manager-object-in-a-test-migrat.patch
-Patch101:       0002-in-addr-util-be-more-systematic-with-naming-our-func.patch
-Patch102:       0003-in-addr-util-prefix-return-parameters-with-ret_.patch
-Patch103:       0004-in-addr-util-add-new-helper-call-in_addr_prefix_from.patch
-Patch104:       0005-build-sys-add-new-kernel-bpf.h-drop-in.patch
-Patch105:       0006-Add-abstraction-model-for-BPF-programs.patch
-Patch106:       0007-Add-IP-address-address-ACL-representation-and-parser.patch
-Patch107:       0008-cgroup-add-fields-to-accommodate-eBPF-related-detail.patch
-Patch108:       0009-Add-firewall-eBPF-compiler.patch
-Patch109:       0010-cgroup-unit-fragment-parser-make-use-of-new-firewall.patch
-Patch110:       0011-manager-hook-up-IP-accounting-defaults.patch
-Patch111:       0012-systemctl-report-accounted-network-traffic-in-system.patch
-Patch112:       0013-man-document-the-new-ip-accounting-and-filting-direc.patch
-Patch113:       0014-cgroup-dump-the-newly-added-IP-settings-in-the-cgrou.patch
-Patch114:       0015-core-support-IP-firewalling-to-be-configured-for-tra.patch
-Patch115:       0016-ip-address-access-minimize-IP-address-lists.patch
-Patch116:       0017-Add-test-for-eBPF-firewall-code.patch
-Patch117:       0018-core-warn-loudly-if-IP-firewalling-is-configured-but.patch
-Patch118:       0019-socket-label-let-s-use-IN_SET-so-that-we-have-to-cal.patch
-Patch119:       0020-core-when-creating-the-socket-fds-for-a-socket-unit-.patch
-Patch120:       0021-core-serialize-deserialize-IP-accounting-across-daem.patch
-Patch121:       0022-core-when-coming-back-from-reload-reexec-reapply-all.patch
-Patch122:       0023-cgroup-refuse-to-return-accounting-data-if-accountin.patch
-Patch123:       0024-bpf-set-BPF_F_ALLOW_OVERRIDE-when-attaching-a-cgroup.patch
-Patch124:       0025-fix-compile-error-on-musl.patch
-Patch125:       0026-bpf-firewall-properly-handle-kernels-where-BPF-cgrou.patch
-Patch126:       0027-core-improve-dbus-cgroup-error-message.patch
-Patch127:       0028-run-also-show-IP-traffic-accounting-data-on-systemd-.patch
-Patch128:       0029-core-only-warn-about-BPF-cgroup-missing-once-per-run.patch
-Patch129:       0030-cgroup-drop-unused-parameter-from-function.patch
-Patch130:       0031-bpf-firewall-actually-invoke-BPF_PROG_ATTACH-to-chec.patch
-Patch131:       0032-ip-address-access-let-s-exit-the-loop-after-invalida.patch
-Patch132:       0033-bpf-firewall-fix-warning-text.patch
-Patch133:       0034-bpf-add-new-bpf.h-header-copy-from-4.15-kernel.patch
-Patch134:       0035-bpf-beef-up-bpf-detection-check-if-BPF_F_ALLOW_MULTI.patch
-Patch135:       0036-bpf-program-optionally-take-fd-of-program-to-detach.patch
-Patch136:       0037-bpf-use-BPF_F_ALLOW_MULTI-flag-if-it-is-available.patch
-Patch137:       0038-bpf-program-make-bpf_program_load_kernel-idempotent.patch
-Patch138:       0039-bpf-rework-how-we-keep-track-and-attach-cgroup-bpf-p.patch
-Patch139:       0040-bpf-reset-extra-IP-accounting-counters-when-turning-.patch
-Patch140:       0041-Fix-three-uses-of-bogus-errno-value-in-logs-and-retu.patch
-Patch141:       0042-tree-wide-avoid-assignment-of-r-just-to-use-in-a-com.patch
-Patch142:       0043-core-fix-the-check-if-CONFIG_CGROUP_BPF-is-on.patch
-Patch143:       0044-bpf-firewall-always-use-log_unit_xyz-insteadof-log_x.patch
-Patch144:       0045-main-bump-RLIMIT_MEMLOCK-for-the-root-user-substanti.patch
-Patch145:       0046-cgroup-always-invalidate-cpu-and-cpuacct-together.patch
-Patch146:       0047-unit-initialize-bpf-cgroup-realization-state-properl.patch
-Patch147:       0048-cgroup-improve-cg_mask_to_string-a-bit-and-add-tests.patch
-Patch148:       0049-core-rename-cgroup_queue-cgroup_realize_queue.patch
-Patch149:       0050-core-refactor-bpf-firewall-support-into-a-pseudo-con.patch
-Patch150:       0051-Move-warning-about-unsupported-BPF-firewall-right-be.patch
-Patch151:       0052-core-bump-mlock-ulimit-to-64Mb.patch
-Patch152:       0053-def-add-a-high-limit-for-RLIMIT_NOFILE.patch
-Patch153:       0054-main-introduce-a-define-HIGH_RLIMIT_MEMLOCK-similar-.patch
-Patch154:       0055-main-when-bumping-RLIMIT_MEMLOCK-save-the-previous-v.patch
-
-# A bunch of upstream commits that allow to configure user slices
-# using dash-truncated dropins. The new mechanism is used (since v239)
-# to replace UserTasksMax= option in logind.conf. This allows to start
-# deprecating UserTasksMax usage which could hopefully be removed from
-# the next major version of SLE.
-Patch200:       0001-shared-dropin-improve-error-message.patch
-Patch201:       0002-tests-skip-tests-when-cg_pid_get_path-fails-7033.patch
-Patch202:       0003-unit-name-add-new-unit_name_build_from_type-helper.patch
-Patch203:       0004-systemctl-fix-indentation-in-output-of-systemcl-stat.patch
-Patch204:       0005-dropin-when-looking-for-dropins-for-a-unit-also-look.patch
-Patch205:       0006-test-add-test-for-prefix-unit-loading.patch
-Patch206:       0007-man-document-the-new-dash-truncation-drop-in-directo.patch
-Patch207:       0008-Use-a-dash-truncated-drop-in-for-user-j.slice-config.patch
-Patch208:       0009-login-fix-typo-in-log-message.patch
-Patch209:       0010-logind-move-two-functions-to-logind_core-utility-lib.patch
-# SUSE specific patch to keep backward compatibility when
-# UserTasksMax= is used. In this case it converts at runtime the
-# option into a dash-truncated dropin and also warn the user about the
-# deprecated option and how to permanently migrate to the new setting.
-Patch210:       0011-logind-keep-backward-compatibility-with-UserTasksMax.patch
-
 Patch1000:      0001-polkit-on-async-pk-requests-re-validate-action-detai.patch
 Patch1001:      0002-sd-bus-introduce-API-for-re-enqueuing-incoming-messa.patch
 Patch1002:      0003-polkit-when-authorizing-via-PK-let-s-re-resolve-call.patch
+
+#testsuite patches
+Patch2001:      0001-test-catalog-fix-catalog-source-directory.patch
+Patch2002:      0002-testsuite-fix-test-keymap-test.patch
+Patch2003:      0003-udev-test-textual-group-id-has-group-disk-on-SUSE.patch
+Patch2004:      0004-test-watchdog-include-pre-timeout-in-timeout-setting.patch
+Patch2005:      0005-TEST-08-set-rootfs-to-btrfs.patch
+Patch2006:      0006-test-seccomp-arm64-does-not-have-access-and-poll.patch
+Patch2007:      0007-sysv-generator-test-multiple-LSB-macro-deps-add-Want.patch
+# PATCH-FIX-OPENSUSE Make-shebang-for-python-an-absolute-command-path gh/systemd/systemd#9267
+# https://github.com/systemd/systemd/pull/9267
+Patch2008:      0008-Make-shebang-for-python-an-absolute-command-path.patch
+Patch2010:      0001-test-functions-adapt-for-systemd-testsuite-package.patch
+Patch2011:      0010-TEST-01-BASIC-remove-qemu-from-testrun.patch
+Patch2012:      0011-TEST-02-CRYPTSETUP-remove-qemu-from-test-runs.patch
+Patch2013:      0012-TEST-03-JOBS-remove-qemu-from-test-runs.patch
+Patch2014:      0013-TEST-04-JOURNAL-remove-qemu-from-testrun.patch
+Patch2015:      0014-TEST-05-RLIMITS-remove-qemu-from-testrun.patch
+Patch2017:      0016-TEST-07-ISSUE-1981-remove-qemu-from-testrun.patch
+Patch2018:      0017-TEST-08-ISSUE-2730-remove-qemu-from-testrun.patch
+Patch2019:      0018-TEST-09-ISSUE-2691-remove-qemu-from-testrun.patch
+Patch2020:      0019-TEST-10-ISSUE-2467-remove-qemu-from-testrun.patch
+Patch2021:      0020-TEST-11-ISSUE-3166-remove-qemu-from-testrun.patch
+Patch2022:      0021-TEST-12-ISSUE-3171-remove-qemu-from-testrun.patch
+Patch2023:      0022-TEST-13-NSPAWN-SMOKE-remove-qemu-from-testrun.patch
+Patch2024:      0023-TEST-14-MACHINE-ID-remove-qemu-from-testrun.patch
+Patch2025:      0024-TEST-15-DROPIN-remove-qemu-from-testrun.patch
+Patch2026:      0025-TEST-22-TMPFILES-remove-qemu-from-testrun.patch
+Patch2027:      0001-TEST-47-NETDEV-test-ordering-cycles-with-_netdev.patch
 
 %description
 Systemd is a system and service manager, compatible with SysV and LSB
@@ -530,6 +485,15 @@ Conflicts:      systemd-bash-completion
 %description bash-completion
 Some systemd commands offer bash completion, but it is an optional dependency.
 
+%package qa-testsuite
+Summary:        Test suite for QA
+License:        LGPL-2.1-or-later
+Group:          System/Benchmark
+Requires:       systemd-container
+
+%description qa-testsuite
+This provides the system testsuite scripts and binaries for QA
+
 %prep
 %setup -q -n systemd-v%{version}%{suse_version}
 %autopatch -p1
@@ -559,7 +523,6 @@ ntp_servers=({0..3}.suse.pool.ntp.org)
         --enable-split-usr \
         --disable-static \
         --disable-lto \
-        --disable-tests \
         --without-kill-user-processes \
         --with-default-hierarchy=hybrid \
         --with-rc-local-script-path-start=/etc/init.d/boot.local \
@@ -584,7 +547,10 @@ ntp_servers=({0..3}.suse.pool.ntp.org)
 %if %{without resolved}
         --disable-resolved \
 %endif
-        --disable-kdbus
+
+#testsuite set correct testing dirs
+sed -i '/-DTEST_DIR=/s/\"$(abs_top_srcdir)/\"\/var\/opt\/systemd-tests/' Makefile
+sed -i '/-DCATALOG_DIR=/s/\"$(abs_top_srcdir)/\"\/var\/opt\/systemd-tests/' Makefile
 
 %make_build V=e
 
@@ -791,6 +757,60 @@ fi
 cat %{S:14} >>%{buildroot}%{_datarootdir}/systemd/kbd-model-map
 
 %find_lang systemd
+
+#testsuite installation
+mkdir -p %{buildroot}/var/opt/systemd-tests/hwdb
+mkdir -p %{buildroot}/var/opt/systemd-tests/rules
+mkdir -p %{buildroot}/var/opt/systemd-tests/units
+mkdir -p %{buildroot}/var/opt/systemd-tests/logs
+mkdir -p %{buildroot}/var/opt/systemd-tests/.libs
+
+for test in $(ls test-*) systemd-sysv-generator; do
+        cp -n $test %{buildroot}/var/opt/systemd-tests
+done
+
+cp -avr test %{buildroot}/var/opt/systemd-tests
+cp -avr tools %{buildroot}/var/opt/systemd-tests
+
+for hwdatafile in $(ls hwdb); do
+        [[ $hwdatafile == "Makefile" ]] && continue
+        cp -n hwdb/$hwdatafile %{buildroot}/var/opt/systemd-tests/hwdb
+done
+
+for target in basic sysinit shutdown sockets timers paths; do
+        install -m0644 units/$target.target %{buildroot}/var/opt/systemd-tests/units/
+done
+
+for lib in $(ls .libs/test-*) .libs/systemd-sysv-generator; do
+        cp -n $lib %{buildroot}/var/opt/systemd-tests/.libs/
+done
+
+install systemd-hwdb %{buildroot}/var/opt/systemd-tests
+install systemd-sysv-generator %{buildroot}/var/opt/systemd-tests
+install -m0644 rules/* %{buildroot}/var/opt/systemd-tests/rules
+
+install test/*.py %{buildroot}/var/opt/systemd-tests
+install test/*.pl %{buildroot}/var/opt/systemd-tests
+install test/*.sh %{buildroot}/var/opt/systemd-tests
+install -m0755 %{S:15} %{buildroot}/var/opt/systemd-tests/
+install -m0755 %{S:16} %{buildroot}/var/opt/systemd-tests/
+install -m0755 %{S:17} %{buildroot}/var/opt/systemd-tests/
+install -m0755 %{S:18} %{buildroot}/var/opt/systemd-tests/
+
+for file in $(echo %{buildroot}/var/opt/systemd-tests/*.py); do
+        [[ -n $(sed -n '\/usr\/bin\/python3/p' $file) ]] && continue
+        sed -i '1 i\#!\/usr\/bin\/python3' $file
+done
+
+rm %{buildroot}/var/opt/systemd-tests/*.c
+rm %{buildroot}/var/opt/systemd-tests/*.o
+%fdupes %{buildroot}
+
+#correct some paths
+for testscript in $(ls test-*) $(ls .libs/*); do
+        sed -i 's#/home/abuild/rpmbuild/BUILD/systemd-234#/var/opt/systemd-tests#g' $testscript
+done
+sed -i 's/os.path.dirname(os.path.abspath(__file__))/os.path.abspath(__file__)/' %{buildroot}/var/opt/systemd-tests/rule-syntax-check.py
 
 %pre
 # Build of installation images uses an hard coded list of some
@@ -1005,6 +1025,31 @@ fi
 %service_del_postun systemd-journal-remote.socket systemd-journal-remote.service
 %service_del_postun systemd-journal-upload.service
 %endif
+
+%preun qa-testsuite
+rm -rf /var/opt/systemd-tests/logs/*
+rm -f /var/opt/systemd-tests/catalog
+rm -rf /var/opt/systemd-tests/test/sys
+for i in testdata libsystemd.so.0 libsystemd.so.0.19.0 libudev.so.1 libudev.so.1.6.6; do
+        rm /var/opt/systemd-tests/.libs/$i
+done
+for i in $(find /var/opt/systemd-tests -name .testdir); do
+        rm $i
+done
+
+%post qa-testsuite
+ln -sf /var/opt/systemd-tests/test /var/opt/systemd-tests/.libs/testdata
+ln -sf %{_prefix}/lib/systemd/catalog /var/opt/systemd-tests/catalog
+ln -sf /usr/lib64/libsystemd.so.0 /var/opt/systemd-tests/.libs
+ln -sf /usr/lib64/libsystemd.so.0.19.0 /var/opt/systemd-tests/.libs
+ln -sf /usr/lib64/libudev.so.1 /var/opt/systemd-tests/.libs
+ln -sf /usr/lib64/libudev.so.1.6.6 /var/opt/systemd-tests/.libs
+
+ldconfig
+
+%postun qa-testsuite
+[[ -f /var/opt/systemd-tests ]] && rm -rf /var/opt/systemd-tests
+ldconfig
 
 %clean
 
@@ -1494,5 +1539,16 @@ fi
 %dir %{_datadir}/bash-completion
 %dir %{_datadir}/bash-completion/completions
 %{_datadir}/bash-completion/completions/*
+
+%files qa-testsuite
+%defattr(-,root,root,-)
+%dir /var/opt/systemd-tests
+%dir /var/opt/systemd-tests/rules
+%dir /var/opt/systemd-tests/test
+%dir /var/opt/systemd-tests/logs
+%dir /var/opt/systemd-tests/.libs
+%dir /var/opt/systemd-tests/test/*
+/var/opt/systemd-tests/*
+/var/opt/systemd-tests/.libs/*
 
 %changelog
