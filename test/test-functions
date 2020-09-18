@@ -79,6 +79,11 @@ TEST_BASE_DIR=${TEST_BASE_DIR:-$(realpath "$(dirname "${BASH_SOURCE[0]}")")}
 TEST_UNITS_DIR="$(realpath "$TEST_BASE_DIR/units")"
 SOURCE_DIR=$(realpath "$TEST_BASE_DIR/..")
 TOOLS_DIR="$SOURCE_DIR/tools"
+#BUILD_DIR=/usr/lib/systemd/tests
+NO_BUILD=1
+SYSTEMD_JOURNAL_REMOTE=/usr/lib/systemd/systemd-journal-remote
+SYSTEMD=/usr/lib/systemd/systemd
+JOURNALCTL=/bin/journalctl
 # These variables are used by test scripts
 export TEST_BASE_DIR TEST_UNITS_DIR SOURCE_DIR TOOLS_DIR
 
@@ -105,7 +110,7 @@ if [ -z "$TESTFILE" ]; then
     exit 1
 fi
 TESTNAME="$(basename "$(dirname "$(realpath "$TESTFILE")")")"
-STATEDIR="$BUILD_DIR/test/$TESTNAME"
+STATEDIR="."
 STATEFILE="$STATEDIR/.testdir"
 IMAGESTATEDIR="$STATEDIR/.."
 TESTLOG="$STATEDIR/test.log"
@@ -197,6 +202,7 @@ BASICTOOLS=(
 )
 
 DEBUGTOOLS=(
+    agetty
     cp
     df
     dhclient
@@ -213,7 +219,6 @@ DEBUGTOOLS=(
     mkdir
     ping
     ps
-    route
     sort
     strace
     stty
@@ -282,9 +287,9 @@ find_qemu_bin() {
 
     [[ -n "$ARCH" ]] || ARCH="$(uname -m)"
     case $ARCH in
-    x86_64)
+    x86_64|s390x|aarch64)
         # QEMU's own build system calls it qemu-system-x86_64
-        [[ -n "$QEMU_BIN" ]] || QEMU_BIN="$(command -v qemu-system-x86_64 2>/dev/null | grep '^/' -m1)"
+        [ "$QEMU_BIN" ] || QEMU_BIN=$(which -a qemu-system-$ARCH 2>/dev/null | grep '^/' -m1)
         ;;
     i*86)
         # new i386 version of QEMU
@@ -344,6 +349,38 @@ run_qemu() {
     if [[ ! "$KERNEL_BIN" ]]; then
         if get_bool "$LOOKS_LIKE_ARCH"; then
             KERNEL_BIN=/boot/vmlinuz-linux
+        elif [[ "$LOOKS_LIKE_SUSE" ]]; then
+            [ "$ARCH" ] || ARCH=$(uname -m)
+            case $ARCH in
+                aarch64)
+                    KERNEL_BIN=$(ls /boot/Image-$KERNEL_VER)
+                    PARAMS+=" console=ttyAMA0 "
+                    DRIVEOPTS+="if=none,id=hd0"
+                    QEMUOPTS=" -cpu cortex-a57 -M virt,usb=off"
+                    DEVICEOPTS="-device ahci,id=ahci -device ide-hd,drive=hd0,bus=ahci.0"
+                    ;;
+                ppc64*)
+                    PARAMS+=" console=hvc0 "
+                    DRIVEOPTS+="if=none,id=scsi0"
+                    QEMUOPTS=" -M pseries"
+                    DEVICEOPTS="-device virtio-scsi-pci -device scsi-hd,drive=scsi0"
+                    ;;
+                s390*)
+                    KERNEL_BIN=$(ls /boot/zipl/image-$KERNEL_VER)
+                    default_suse_initrd=/boot/zipl/initrd-${KERNEL_VER}
+                    DRIVEOPTS+="if=none,id=scsi0"
+                    QEMUOPTS=" -M s390-ccw-virtio"
+                    S390ZIPLDEV=$(sed -n '/boot\/zipl/s/\([[:graph:]]*\).*/\1/p' /etc/fstab)
+                    CHAN=$(echo $S390ZIPLDEV | sed -n 's/.*ccw-[0-9]\([[:graph:]]*\)-part.*/fe\1/p')
+                    DASDDEV=$(ls -l $S390ZIPLDEV | sed -n 's/.*\(vd[a-z]*\)[[:digit:]]*/\/dev\/\1/p')
+                    DEVICEOPTS="-drive file=$DASDDEV,if=none,id=disk0,format=raw -device virtio-blk-ccw,devno=$CHAN,drive=disk0 \
+                                -device virtio-scsi-ccw,id=scsi0,devno=fe.0.0001 -device scsi-hd,drive=scsi0"
+                    ;;
+                *)
+                    KERNEL_BIN=$(ls /boot/vmlinu*-$KERNEL_VER)
+		    DEVICEOPTS="-object rng-random,id=objrng0,filename=/dev/urandom -device virtio-rng-pci,rng=objrng0,id=rng0,bus=pci.0,addr=0x9"
+                    ;;
+            esac
         else
             [ "$ARCH" ] || ARCH=$(uname -m)
             case $ARCH in
@@ -434,7 +471,9 @@ run_qemu() {
         -m "$QEMU_MEM"
         -nographic
         -kernel "$KERNEL_BIN"
-        -drive "format=raw,cache=unsafe,file=$image"
+        -drive "format=raw,cache=unsafe,file=$image,$DRIVEOPTS"
+        $QEMUOPTS
+        $DEVICEOPTS
     )
 
     if [[ -n "${QEMU_OPTIONS:=}" ]]; then
@@ -868,7 +907,6 @@ EOF
 install_fs_tools() {
     dinfo "Install fsck"
     dracut_install /sbin/fsck*
-    dracut_install -o /bin/fsck*
 
     # fskc.reiserfs calls reiserfsck. so, install it
     dracut_install -o reiserfsck
@@ -940,6 +978,8 @@ install_distro_systemd() {
 
     if get_bool "$LOOKS_LIKE_DEBIAN"; then
         install_debian_systemd
+    elif get_bool "$LOOKS_LIKE_SUSE"; then
+        install_suse_systemd
     else
         dfatal "NO_BUILD not supported for this distro"
         exit 1
@@ -953,6 +993,32 @@ install_systemd() {
     else
         install_compiled_systemd
     fi
+}
+
+install_suse_systemd() {
+    ORIGDIR=$(pwd)
+    cd $TEST_BASE_DIR/..
+    local _skiplist=$(sed -n 's/ *skiplist="\(test.*\)\"/\1/p' run-tests.sh)
+    for i in $(find /usr/lib/systemd ! -path '*/tests/sys/*' ! -path '*/tests/logs/*' ! -name '*.img') $(find /usr/share/systemd); do
+        for skip in $_skiplist; do
+            [[ $(basename $i) == $skip ]] && continue 2;
+        done
+        [[ -L "$i" ]] && inst_symlink $i
+        [[ -d "$i" ]] && inst_dir $i
+        [[ -f "$i" ]] && inst_simple $i
+    done
+    inst_simple /usr/bin/systemctl
+    inst_simple /bin/systemctl
+    cp -avr test/sys "$initdir/$_target"
+    for pkg in systemd systemd-container; do
+        for file in $(rpm -ql $pkg | sed -n '/usr\/bin/p'); do
+            inst_simple $file
+        done
+    done
+    for i in $(find /usr/lib/udev) $(find /etc/udev); do
+        inst_rules $(basename $i)
+    done
+    cd $ORIGDIR
 
     # remove unneeded documentation
     rm -fr "$initdir"/usr/share/{man,doc}
@@ -1025,7 +1091,7 @@ create_empty_image() {
         exit 1
     fi
 
-    local size=500
+    local size=600
     if ! get_bool "$NO_BUILD"; then
         if meson configure "${BUILD_DIR:?}" | grep 'static-lib\|standalone-binaries' | awk '{ print $2 }' | grep -q 'true'; then
             size=$((size+=200))
@@ -1358,7 +1424,12 @@ install_execs() {
         # also, plymouth is pulled in by rescue.service, but even there the exit code
         # is ignored; as it's not present on some distros, don't fail if it doesn't exist
         dinfo "Attempting to install $exe (based on unit file reference)"
-        inst "$exe" || [ "${exe%.local}" != "$exe" ] || [ "${exe%systemd-update-done}" != "$exe" ] || [ "${exe##*/}" == "plymouth" ]
+        # dracut binary are not present with the same name in the installed system
+        [[ "$i" =~ "/bin/dracut-" ]] && i=$(find /usr/lib/dracut -name ${i#/*/*}.sh)
+        [[ -z "$i" ]] && continue
+        # wicked service requires pppd which might not be installed
+        # quotaon service requires quotaon which might not be installed
+        inst "$exe" || [ "${exe%.local}" != "$exe" ] || [ "${exe%systemd-update-done}" != "$exe" ] || [ "${exe##*/}" == "plymouth" ] || :
     done < <(sed -r -n 's|^Exec[a-zA-Z]*=[@+!-]*([^ ]+).*|\1|gp' "${initdir:?}"/{"$systemunitdir","$userunitdir"}/*.service | sort -u)
 }
 
@@ -1438,9 +1509,6 @@ install_config_files() {
 install_basic_tools() {
     dinfo "Install basic tools"
     dracut_install "${BASICTOOLS[@]}"
-    dracut_install -o sushell
-    # in Debian ldconfig is just a shell script wrapper around ldconfig.real
-    dracut_install -o ldconfig.real
 }
 
 install_debug_tools() {
@@ -2131,21 +2199,22 @@ inst_symlink() {
 # attempt to install any programs specified in a udev rule
 inst_rule_programs() {
     local rule="${1:?}"
-    local prog bin
+    local prog _bin
 
-    sed -rn 's/^.*?PROGRAM==?"([^ "]+).*$/\1/p' "$rule" | while read -r prog; do
-        if [ -x "/lib/udev/$prog" ]; then
-            bin="/lib/udev/$prog"
-        else
-            if ! bin="$(find_binary "$prog")"; then
-                dinfo "Skipping program $prog used in udev rule $(basename "$rule") as it cannot be found"
-                continue
+    if grep -qE 'PROGRAM==?"[^ "]+' "$1"; then
+        for _prog in $(grep -E 'PROGRAM==?"[^ "]+' "$1" | sed -r 's/.*PROGRAM==?"([^ "]+).*/\1/'); do
+            if [ -x /usr/lib/udev/$_prog ]; then
+                _bin=/usr/lib/udev/$_prog
+            else
+                _bin=$(find_binary "$_prog") || {
+                    dinfo "Skipping program $_prog using in udev rule $(basename $1) as it cannot be found"
+                    continue;
+                }
             fi
-        fi
-
-        #dinfo "Installing $_bin due to it's use in the udev rule $(basename $1)"
-        dracut_install "$bin"
-    done
+            dinfo "Installing $_bin due to it's use in the udev rule $(basename $1)"
+            dracut_install "$_bin"
+        done
+    fi
 }
 
 # udev rules always get installed in the same place, so
@@ -2154,7 +2223,7 @@ inst_rules() {
     local target=/etc/udev/rules.d
     local found rule
 
-    inst_dir "/lib/udev/rules.d"
+    inst_dir "/usr/lib/udev/rules.d"
     inst_dir "$target"
     for rule in "$@"; do
         if [ "${rule#/}" = "$rule" ]; then
@@ -2401,9 +2470,14 @@ instmods() {
 }
 
 setup_suse() {
-    ln -fs ../usr/bin/systemctl "${initdir:?}/bin/"
-    ln -fs ../usr/lib/systemd "$initdir/lib/"
     inst_simple "/usr/lib/systemd/system/haveged.service"
+    inst_simple "/usr/sbin/haveged"
+    instmods ext4
+    instmods af_packet
+    #python needs its libraries
+    for i in $(find /usr/lib*/python*/ -name "*.py*") $(find /usr/share/kbd/keymaps/xkb/); do
+        [ -d "$i" ] && inst_dir $i || inst_simple $i
+    done
 }
 
 _umount_dir() {
