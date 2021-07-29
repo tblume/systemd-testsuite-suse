@@ -171,13 +171,14 @@ static void test_x11_convert_to_vconsole(void) {
         assert_se(free_and_strdup(&c.x11_variant, NULL) >= 0);
 
         assert_se(x11_convert_to_vconsole(&c) == 1);
-        assert_se(streq(c.vc_keymap, "us"));
+        assert_se(streq(c.vc_keymap, "ruwin_alt-UTF-8"));
 
         log_info("/* test with a compound mapping (ru,us:) */");
         assert_se(free_and_strdup(&c.x11_layout, "ru,us") >= 0);
         assert_se(free_and_strdup(&c.x11_variant, NULL) >= 0);
 
         assert_se(x11_convert_to_vconsole(&c) == 1);
+        log_info("tblume ru map is %s",c.vc_keymap);
         assert_se(streq(c.vc_keymap, "ru"));
 
         /* https://bugzilla.redhat.com/show_bug.cgi?id=1333998 */
